@@ -15,6 +15,7 @@ use crate::{
     launcher::{ExitInfo, LaunchSpec, Launcher, Process},
 };
 use std::{
+    borrow::Cow,
     sync::{Arc, Mutex as StdMutex},
     time::Duration,
 };
@@ -288,6 +289,16 @@ impl Session {
                     bytes = b.len(),
                     "writing frame to stdin"
                 );
+                if tracing::enabled!(target: "lucarne::wire", tracing::Level::TRACE) {
+                    trace!(
+                        target: "lucarne::wire",
+                        pid = self.proc.as_ref().map(|proc| proc.pid()).unwrap_or(-1),
+                        epoch = self.epoch(),
+                        dir = "tx",
+                        bytes = b.len(),
+                        raw = %wire_trace_raw(b),
+                    );
+                }
                 let mut guard = self.stdin.lock().await;
                 let stdin = guard
                     .as_mut()
@@ -529,6 +540,16 @@ async fn pump_frames(
                 return;
             }
         };
+        if tracing::enabled!(target: "lucarne::wire", tracing::Level::TRACE) {
+            trace!(
+                target: "lucarne::wire",
+                pid = _proc.pid(),
+                epoch = epoch.as_str(),
+                dir = "rx",
+                bytes = bytes.len(),
+                raw = %wire_trace_raw(&bytes),
+            );
+        }
         let (events, out_frames) = {
             let mut d = dialect.lock().await;
             let evs = d.translate(&bytes);
@@ -560,6 +581,16 @@ async fn pump_frames(
         for of in out_frames {
             match of {
                 OutFrame::Stdin(b) => {
+                    if tracing::enabled!(target: "lucarne::wire", tracing::Level::TRACE) {
+                        trace!(
+                            target: "lucarne::wire",
+                            pid = _proc.pid(),
+                            epoch = epoch.as_str(),
+                            dir = "tx_reactive",
+                            bytes = b.len(),
+                            raw = %wire_trace_raw(&b),
+                        );
+                    }
                     let mut g = stdin.lock().await;
                     if let Some(s) = g.as_mut() {
                         if let Err(e) = s.write_all(&b).await {
@@ -697,10 +728,29 @@ pub fn synthetic_session() -> (Session, mpsc::Sender<Event>) {
     (Session::new_synthetic(rx, tx), tx_clone)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wire_trace_raw_preserves_payload_bytes_without_decoration() {
+        let bytes = b"{\"jsonrpc\":\"2.0\",\"method\":\"turn/start\"}\n";
+
+        assert_eq!(
+            wire_trace_raw(bytes),
+            "{\"jsonrpc\":\"2.0\",\"method\":\"turn/start\"}\n"
+        );
+    }
+}
+
 // Suppress warning about ExitInfo unused import when other modules
 // drop it later.
 
 fn _keep_exit_info(_: ExitInfo) {}
+
+fn wire_trace_raw(bytes: &[u8]) -> Cow<'_, str> {
+    String::from_utf8_lossy(bytes)
+}
 
 fn out_frame_name(frame: &OutFrame) -> &'static str {
     match frame {
