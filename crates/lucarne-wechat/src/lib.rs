@@ -7,6 +7,7 @@
 
 pub mod adapter;
 pub mod context_store;
+mod intervention;
 pub mod onboarding;
 pub mod service;
 

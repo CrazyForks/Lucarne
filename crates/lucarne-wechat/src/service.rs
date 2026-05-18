@@ -1,5 +1,9 @@
 use smol_str::SmolStr;
 
+use crate::intervention::{
+    intervention_request_id, parse_intervention_text_response_zh, render_intervention_markdown_zh,
+};
+
 use std::{
     collections::{BTreeSet, HashMap, VecDeque},
     sync::{Arc, Mutex},
@@ -10,7 +14,8 @@ use async_trait::async_trait;
 use futures::{stream::BoxStream, StreamExt};
 use lucarne::{
     agent_runtime::{
-        AgentContextUsage, AgentInput, AgentTokenUsage, Event as AgentEvent, MessageRole,
+        AgentContextUsage, AgentInput, AgentTokenUsage, Event as AgentEvent, InterventionRequest,
+        MessageRole,
     },
     control_plane::{
         MessageSessionBinding, ProviderSessionId, StatusSnapshot, TurnId, WorkspaceBinding,
@@ -33,6 +38,7 @@ const DEFAULT_TYPING_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(4);
 const DEFAULT_PENDING_REPLY_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_PENDING_REPLIES: usize = 10;
 const MAX_PENDING_NOTIFICATIONS: usize = 10;
+const MAX_PENDING_INTERVENTIONS: usize = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WechatSendReceipt {
@@ -178,6 +184,8 @@ struct WechatState {
     pending_replies: HashMap<TurnId, WechatPendingReply>,
     pending_reply_order: VecDeque<TurnId>,
     pending_notifications: VecDeque<WechatPendingNotification>,
+    pending_interventions: HashMap<SmolStr, WechatPendingIntervention>,
+    pending_intervention_order: VecDeque<SmolStr>,
     typing_cancellations: HashMap<WorkspaceId, oneshot::Sender<()>>,
 }
 
@@ -237,6 +245,23 @@ struct WechatPendingReply {
 }
 
 #[derive(Clone)]
+struct WechatPendingIntervention {
+    workspace_id: WorkspaceId,
+    turn_id: Option<TurnId>,
+    request: InterventionRequest,
+    user_ids: BTreeSet<String>,
+    prompt_message_ids: BTreeSet<String>,
+    prompt_quote_ids: BTreeSet<String>,
+}
+
+#[derive(Clone)]
+enum PendingInterventionLookup {
+    None,
+    One(WechatPendingIntervention),
+    Multiple,
+}
+
+#[derive(Clone)]
 enum PendingReplyTerminal {
     Completed,
     Failed(SmolStr),
@@ -255,6 +280,8 @@ where
                 pending_replies: HashMap::new(),
                 pending_reply_order: VecDeque::new(),
                 pending_notifications: VecDeque::new(),
+                pending_interventions: HashMap::new(),
+                pending_intervention_order: VecDeque::new(),
                 typing_cancellations: HashMap::new(),
             }),
             rate_limiter: Arc::new(WechatRateLimiter::default()),
@@ -339,6 +366,14 @@ where
     pub async fn handle_core_event(&self, event: CoreEvent) -> Result<(), WechatError> {
         match event {
             CoreEvent::TimelineEvent {
+                workspace_id,
+                turn_id,
+                event: AgentEvent::InterventionRequest(request),
+            } => {
+                self.deliver_intervention_request(&workspace_id, turn_id.as_ref(), request)
+                    .await
+            }
+            CoreEvent::TimelineEvent {
                 turn_id: Some(turn_id),
                 event:
                     AgentEvent::Message(lucarne::agent_runtime::MessageEvent {
@@ -405,6 +440,12 @@ where
             return Ok(());
         }
         if text.is_empty() {
+            return Ok(());
+        }
+        if self
+            .handle_pending_intervention_response(&message, text)
+            .await?
+        {
             return Ok(());
         }
         let has_quote = message.quoted_message_id.is_some() || message.quoted_text.is_some();
@@ -490,6 +531,180 @@ where
             }
         }
         Ok(())
+    }
+
+    async fn deliver_intervention_request(
+        &self,
+        workspace_id: &WorkspaceId,
+        turn_id: Option<&TurnId>,
+        request: InterventionRequest,
+    ) -> Result<(), WechatError> {
+        let body = render_intervention_markdown_zh(&request);
+        let provider_session_id = self.core.active_provider_session_id(workspace_id).ok();
+        if let Some(reply_target) = turn_id.and_then(|turn_id| self.pending_reply(turn_id)) {
+            let user_id = reply_target.message.user_id.clone();
+            let receipt = self.transport.reply(&reply_target.message, &body).await?;
+            if let Some(provider_session_id) = provider_session_id.clone() {
+                self.bind_receipt(&user_id, receipt.clone(), &body, provider_session_id)?;
+            }
+            self.remember_pending_intervention(
+                workspace_id.clone(),
+                turn_id.cloned(),
+                user_id,
+                request,
+                receipt.message_ids,
+                receipt.visible_texts,
+            );
+            self.stop_typing_keepalive(workspace_id);
+            return Ok(());
+        }
+
+        let users = self.notification_users();
+        if users.is_empty() {
+            warn!(
+                target: "lucarne_wechat::service",
+                workspace_id = %workspace_id.as_str(),
+                req_id = %intervention_request_id(&request),
+                "wechat intervention request skipped because no known users"
+            );
+            return Ok(());
+        }
+
+        for user_id in users {
+            let Some(context) = self.transport.context_for_user(&user_id).await? else {
+                warn!(
+                    target: "lucarne_wechat::service",
+                    workspace_id = %workspace_id.as_str(),
+                    user_id = %user_id,
+                    "wechat intervention prompt skipped: no stored context for user"
+                );
+                continue;
+            };
+            let receipt = match self.transport.send(&context, &body).await {
+                Ok(receipt) => receipt,
+                Err(WechatError::RateLimited {
+                    retry_after,
+                    message,
+                }) => {
+                    self.record_rate_limit(retry_after, &message);
+                    warn!(
+                        target: "lucarne_wechat::service",
+                        workspace_id = %workspace_id.as_str(),
+                        user_id = %user_id,
+                        retry_after_secs = retry_after.as_secs(),
+                        error = %message,
+                        "wechat intervention prompt rate limited"
+                    );
+                    self.remember_pending_intervention(
+                        workspace_id.clone(),
+                        None,
+                        user_id.clone(),
+                        request.clone(),
+                        Vec::new(),
+                        Vec::new(),
+                    );
+                    if let Some(provider_session_id) = provider_session_id.clone() {
+                        self.remember_pending_notification(
+                            workspace_id.clone(),
+                            user_id,
+                            body.clone().into(),
+                            provider_session_id,
+                        );
+                    }
+                    continue;
+                }
+                Err(WechatError::Transport(err)) => {
+                    warn!(
+                        target: "lucarne_wechat::service",
+                        workspace_id = %workspace_id.as_str(),
+                        user_id = %user_id,
+                        error = %err,
+                        "wechat intervention prompt send failed"
+                    );
+                    self.remember_pending_intervention(
+                        workspace_id.clone(),
+                        None,
+                        user_id.clone(),
+                        request.clone(),
+                        Vec::new(),
+                        Vec::new(),
+                    );
+                    if let Some(provider_session_id) = provider_session_id.clone() {
+                        self.remember_pending_notification(
+                            workspace_id.clone(),
+                            user_id,
+                            body.clone().into(),
+                            provider_session_id,
+                        );
+                    }
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
+            if let Some(provider_session_id) = provider_session_id.clone() {
+                self.bind_receipt(&user_id, receipt.clone(), &body, provider_session_id)?;
+            }
+            self.remember_pending_intervention(
+                workspace_id.clone(),
+                None,
+                user_id,
+                request.clone(),
+                receipt.message_ids,
+                receipt.visible_texts,
+            );
+        }
+        Ok(())
+    }
+
+    async fn handle_pending_intervention_response(
+        &self,
+        message: &WechatIncoming,
+        text: &str,
+    ) -> Result<bool, WechatError> {
+        let pending = match self.lookup_pending_intervention(message) {
+            PendingInterventionLookup::None => return Ok(false),
+            PendingInterventionLookup::Multiple => {
+                self.transport
+                    .reply(message, "有多个待确认请求。请引用对应的授权/问题消息回复。")
+                    .await?;
+                return Ok(true);
+            }
+            PendingInterventionLookup::One(pending) => pending,
+        };
+        let parsed = match parse_intervention_text_response_zh(&pending.request, text) {
+            Ok(parsed) => parsed,
+            Err(help) => {
+                self.transport.reply(message, &help).await?;
+                return Ok(true);
+            }
+        };
+        let req_id = intervention_request_id(&pending.request).to_string();
+        match self
+            .core
+            .resolve_live_request(&pending.workspace_id, &req_id, parsed.response)
+            .await
+        {
+            Ok(()) => {
+                self.forget_pending_intervention(&req_id);
+                if pending
+                    .turn_id
+                    .as_ref()
+                    .is_some_and(|turn_id| self.pending_reply(turn_id).is_some())
+                {
+                    self.start_typing_keepalive(
+                        pending.workspace_id.clone(),
+                        message.user_id.clone(),
+                    );
+                }
+                self.transport.reply(message, &parsed.ack_markdown).await?;
+            }
+            Err(err) => {
+                self.transport
+                    .reply(message, &format!("提交失败：`{err}`。请稍后重试。"))
+                    .await?;
+            }
+        }
+        Ok(true)
     }
 
     async fn try_send_notification(
@@ -1239,6 +1454,100 @@ where
         true
     }
 
+    fn pending_reply(&self, turn_id: &TurnId) -> Option<WechatPendingReply> {
+        self.state
+            .lock()
+            .expect("wechat service state lock")
+            .pending_replies
+            .get(turn_id)
+            .cloned()
+    }
+
+    fn remember_pending_intervention(
+        &self,
+        workspace_id: WorkspaceId,
+        turn_id: Option<TurnId>,
+        user_id: String,
+        request: InterventionRequest,
+        message_ids: Vec<String>,
+        visible_texts: Vec<String>,
+    ) {
+        let req_id = intervention_request_id(&request).clone();
+        let quote_ids = visible_texts
+            .iter()
+            .map(|text| visible_quote_binding_id(text))
+            .collect::<Vec<_>>();
+        let mut state = self.state.lock().expect("wechat service state lock");
+        if !state.pending_interventions.contains_key(&req_id) {
+            while state.pending_interventions.len() >= MAX_PENDING_INTERVENTIONS {
+                let Some(oldest_req_id) = state.pending_intervention_order.pop_front() else {
+                    break;
+                };
+                state.pending_interventions.remove(&oldest_req_id);
+            }
+            state.pending_intervention_order.push_back(req_id.clone());
+            state.pending_interventions.insert(
+                req_id.clone(),
+                WechatPendingIntervention {
+                    workspace_id,
+                    turn_id,
+                    request,
+                    user_ids: BTreeSet::new(),
+                    prompt_message_ids: BTreeSet::new(),
+                    prompt_quote_ids: BTreeSet::new(),
+                },
+            );
+        }
+        if let Some(pending) = state.pending_interventions.get_mut(&req_id) {
+            pending.user_ids.insert(user_id);
+            pending.prompt_message_ids.extend(message_ids);
+            pending.prompt_quote_ids.extend(quote_ids);
+        }
+    }
+
+    fn lookup_pending_intervention(&self, message: &WechatIncoming) -> PendingInterventionLookup {
+        let state = self.state.lock().expect("wechat service state lock");
+        if let Some(message_id) = message.quoted_message_id.as_deref() {
+            if let Some(pending) = state
+                .pending_interventions
+                .values()
+                .find(|pending| pending.prompt_message_ids.contains(message_id))
+            {
+                return PendingInterventionLookup::One(pending.clone());
+            }
+        }
+        if let Some(quoted_text) = message.quoted_text.as_deref() {
+            let quote_id = visible_quote_binding_id(quoted_text);
+            if let Some(pending) = state
+                .pending_interventions
+                .values()
+                .find(|pending| pending.prompt_quote_ids.contains(&quote_id))
+            {
+                return PendingInterventionLookup::One(pending.clone());
+            }
+        }
+        let matches = state
+            .pending_interventions
+            .values()
+            .filter(|pending| pending.user_ids.contains(&message.user_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        match matches.len() {
+            0 => PendingInterventionLookup::None,
+            1 => PendingInterventionLookup::One(matches.into_iter().next().unwrap()),
+            _ => PendingInterventionLookup::Multiple,
+        }
+    }
+
+    fn forget_pending_intervention(&self, req_id: &str) -> Option<WechatPendingIntervention> {
+        let mut state = self.state.lock().expect("wechat service state lock");
+        let pending = state.pending_interventions.remove(req_id);
+        state
+            .pending_intervention_order
+            .retain(|pending_req_id| pending_req_id.as_str() != req_id);
+        pending
+    }
+
     fn remember_pending_notification(
         &self,
         workspace_id: WorkspaceId,
@@ -1752,8 +2061,9 @@ mod tests {
         agent_runtime::events::{TurnCompletedEvent, TurnFailedEvent},
         agent_runtime::{
             AgentError, AgentErrorKind, AgentEventStream, AgentProvider, AgentSession, AgentStatus,
-            InstanceId, MessageEvent, OpenSession, ProbeResult, ProviderId, ResumeSession,
-            SessionId,
+            ApprovalDecision, ApprovalRequest, InstanceId, InterventionRequest,
+            InterventionResponse, MessageEvent, OpenSession, ProbeResult, ProviderId, Question,
+            QuestionOption, QuestionRequest, ResumeSession, SessionId,
         },
         control_plane::ControlPlaneSqliteStore,
         core_service::OpenWorkspaceRequest,
@@ -1853,6 +2163,228 @@ mod tests {
             "assistant reply text should be bound for continued quoted replies"
         );
         assert!(!core.direct_notification_suppressed(&workspace_id));
+    }
+
+    #[tokio::test]
+    async fn intervention_approval_prompts_wechat_and_allow_reply_resolves_provider() {
+        let provider = Arc::new(FakeProvider::default());
+        let core = test_core(Arc::clone(&provider));
+        core.open_workspace_with_events(OpenWorkspaceRequest {
+            provider_id: "codex",
+            project_path: Some("/tmp/workspace-approval".into()),
+            title: "workspace-approval".into(),
+        })
+        .await
+        .expect("open workspace");
+        let mut events = core.watch_events();
+        let transport = Arc::new(FakeTransport::default());
+        let service = WechatNotificationService::new(
+            Arc::clone(&core),
+            Arc::clone(&transport),
+            WechatServiceOptions {
+                initial_user_ids: vec!["user-1".into()],
+                ..WechatServiceOptions::default()
+            },
+        );
+
+        provider.emit_intervention(
+            "thread-1",
+            InterventionRequest::Approval(ApprovalRequest {
+                req_id: "approval-1".into(),
+                tool_name: "apply_patch".into(),
+                message: Some("需要修改文件".into()),
+                input: Some(serde_json::json!({ "cmd": "apply_patch", "path": "src/main.rs" })),
+            }),
+        );
+        service
+            .handle_core_event(next_intervention_event(&mut events).await)
+            .await
+            .expect("send approval prompt");
+
+        let sends = transport.sends();
+        assert_eq!(sends.len(), 1);
+        assert_eq!(sends[0].user_id, "user-1");
+        assert!(sends[0].text.contains("## 需要授权"), "{}", sends[0].text);
+        assert!(
+            sends[0].text.contains("**工具**：`apply_patch`"),
+            "{}",
+            sends[0].text
+        );
+        assert!(sends[0].text.contains("```json"), "{}", sends[0].text);
+        assert!(sends[0].text.contains("回复 `允许`"), "{}", sends[0].text);
+
+        service
+            .handle_incoming(WechatIncoming::new(
+                "decision-1",
+                "user-1",
+                "允许",
+                Option::<String>::None,
+            ))
+            .await
+            .expect("resolve approval");
+
+        assert_eq!(
+            provider.resolved_interventions(),
+            vec![(
+                "approval-1".to_string(),
+                InterventionResponse::Approval(ApprovalDecision::Allow),
+            )]
+        );
+        let replies = transport.replies();
+        assert_eq!(replies.len(), 1);
+        assert!(replies[0].text.contains("已允许"), "{}", replies[0].text);
+    }
+
+    #[tokio::test]
+    async fn intervention_approval_response_resumes_typing_for_pending_reply_turn() {
+        let provider = Arc::new(FakeProvider::default());
+        let core = test_core(Arc::clone(&provider));
+        let opened = core
+            .open_workspace_with_events(OpenWorkspaceRequest {
+                provider_id: "codex",
+                project_path: Some("/tmp/workspace-approval-typing".into()),
+                title: "workspace-approval-typing".into(),
+            })
+            .await
+            .expect("open workspace");
+        let workspace_id = opened.workspace.workspace_id.clone();
+        let transport = Arc::new(FakeTransport::default());
+        let service = WechatNotificationService::new(
+            Arc::clone(&core),
+            Arc::clone(&transport),
+            WechatServiceOptions {
+                initial_user_ids: vec!["user-1".into()],
+                typing_keepalive_interval: Duration::from_millis(10),
+                ..WechatServiceOptions::default()
+            },
+        );
+        let turn_id = TurnId::new("turn-approval-typing");
+        let source = WechatIncoming::new("incoming-1", "user-1", "改一下", Option::<String>::None);
+        service.remember_pending_reply(turn_id.clone(), workspace_id.clone(), source.clone());
+
+        service
+            .handle_core_event(CoreEvent::TimelineEvent {
+                workspace_id: workspace_id.clone(),
+                turn_id: Some(turn_id),
+                event: AgentEvent::InterventionRequest(InterventionRequest::Approval(
+                    ApprovalRequest {
+                        req_id: "approval-typing".into(),
+                        tool_name: "apply_patch".into(),
+                        message: Some("需要修改文件".into()),
+                        input: None,
+                    },
+                )),
+            })
+            .await
+            .expect("send approval prompt");
+        assert_eq!(
+            transport.typing_count("user-1"),
+            0,
+            "approval prompt should not look like agent output is still being generated"
+        );
+
+        service
+            .handle_incoming(WechatIncoming::new(
+                "decision-1",
+                "user-1",
+                "允许",
+                Option::<String>::None,
+            ))
+            .await
+            .expect("resolve approval");
+        wait_until(|| transport.typing_count("user-1") > 0).await;
+    }
+
+    #[tokio::test]
+    async fn intervention_question_prompts_wechat_and_answer_reply_resolves_provider() {
+        let provider = Arc::new(FakeProvider::default());
+        let core = test_core(Arc::clone(&provider));
+        core.open_workspace_with_events(OpenWorkspaceRequest {
+            provider_id: "codex",
+            project_path: Some("/tmp/workspace-question".into()),
+            title: "workspace-question".into(),
+        })
+        .await
+        .expect("open workspace");
+        let mut events = core.watch_events();
+        let transport = Arc::new(FakeTransport::default());
+        let service = WechatNotificationService::new(
+            Arc::clone(&core),
+            Arc::clone(&transport),
+            WechatServiceOptions {
+                initial_user_ids: vec!["user-1".into()],
+                ..WechatServiceOptions::default()
+            },
+        );
+
+        provider.emit_intervention(
+            "thread-1",
+            InterventionRequest::Question(QuestionRequest {
+                req_id: "question-1".into(),
+                questions: vec![Question {
+                    header: Some("选择分支".into()),
+                    text: "要切到哪个分支？".into(),
+                    options: vec![
+                        QuestionOption {
+                            label: "main".into(),
+                            description: Some("稳定分支".into()),
+                        },
+                        QuestionOption {
+                            label: "feature".into(),
+                            description: Some("功能分支".into()),
+                        },
+                    ],
+                    multi_select: false,
+                }],
+            }),
+        );
+        service
+            .handle_core_event(next_intervention_event(&mut events).await)
+            .await
+            .expect("send question prompt");
+
+        let sends = transport.sends();
+        assert_eq!(sends.len(), 1);
+        assert!(sends[0].text.contains("## 需要你回答"), "{}", sends[0].text);
+        assert!(
+            sends[0].text.contains("### 1. 选择分支"),
+            "{}",
+            sends[0].text
+        );
+        assert!(
+            sends[0].text.contains("- `A` **main** — 稳定分支"),
+            "{}",
+            sends[0].text
+        );
+
+        service
+            .handle_incoming(WechatIncoming::new(
+                "answer-1",
+                "user-1",
+                "B",
+                Option::<String>::None,
+            ))
+            .await
+            .expect("resolve question");
+
+        assert_eq!(
+            provider.resolved_interventions(),
+            vec![(
+                "question-1".to_string(),
+                InterventionResponse::Answers(lucarne::agent_runtime::QuestionResponse {
+                    answers: vec![lucarne::agent_runtime::QuestionAnswer {
+                        values: vec!["feature".into()],
+                    }],
+                }),
+            )]
+        );
+        let replies = transport.replies();
+        assert_eq!(replies.len(), 1);
+        assert!(
+            replies[0].text.contains("已提交回答"),
+            "{}",
+            replies[0].text
+        );
     }
 
     #[tokio::test]
@@ -3610,6 +4142,23 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
         );
     }
 
+    async fn next_intervention_event(
+        events: &mut lucarne::core_service::CoreEventReceiver,
+    ) -> CoreEvent {
+        loop {
+            let event = events.recv().await.expect("core event");
+            if matches!(
+                event,
+                CoreEvent::TimelineEvent {
+                    event: AgentEvent::InterventionRequest(_),
+                    ..
+                }
+            ) {
+                return event;
+            }
+        }
+    }
+
     async fn next_timeline_event(
         events: &mut lucarne::core_service::CoreEventReceiver,
     ) -> CoreEvent {
@@ -3764,6 +4313,7 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
         submit_failure: StdMutex<Option<String>>,
         status: AgentStatus,
         status_calls: Arc<StdMutex<usize>>,
+        resolved_interventions: Arc<StdMutex<Vec<(String, InterventionResponse)>>>,
     }
 
     impl FakeProvider {
@@ -3798,6 +4348,13 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
             self.resume_args.lock().expect("resume args lock").clone()
         }
 
+        fn resolved_interventions(&self) -> Vec<(String, InterventionResponse)> {
+            self.resolved_interventions
+                .lock()
+                .expect("resolved interventions lock")
+                .clone()
+        }
+
         fn emit_assistant(&self, session_id: &str, text: &str) {
             let tx = self
                 .sessions
@@ -3812,6 +4369,18 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
                 streaming: false,
             }))
             .expect("send fake event");
+        }
+
+        fn emit_intervention(&self, session_id: &str, request: InterventionRequest) {
+            let tx = self
+                .sessions
+                .lock()
+                .expect("sessions lock")
+                .get(session_id)
+                .cloned()
+                .expect("session sender");
+            tx.try_send(AgentEvent::InterventionRequest(request))
+                .expect("send fake intervention");
         }
     }
 
@@ -3877,6 +4446,7 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
                 submit_failure,
                 status: self.status.clone(),
                 status_calls: Arc::clone(&self.status_calls),
+                resolved_interventions: Arc::clone(&self.resolved_interventions),
             }
         }
     }
@@ -3891,6 +4461,7 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
         submit_failure: Option<String>,
         status: AgentStatus,
         status_calls: Arc<StdMutex<usize>>,
+        resolved_interventions: Arc<StdMutex<Vec<(String, InterventionResponse)>>>,
     }
 
     #[async_trait]
@@ -3973,9 +4544,13 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
 
         async fn resolve(
             &self,
-            _req_id: &str,
-            _response: lucarne::agent_runtime::InterventionResponse,
+            req_id: &str,
+            response: lucarne::agent_runtime::InterventionResponse,
         ) -> Result<(), AgentError> {
+            self.resolved_interventions
+                .lock()
+                .expect("resolved interventions lock")
+                .push((req_id.to_string(), response));
             Ok(())
         }
 
