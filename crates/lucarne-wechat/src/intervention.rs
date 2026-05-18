@@ -2,6 +2,7 @@ use lucarne::{
     ApprovalDecision, ApprovalRequest, InterventionRequest, InterventionResponse, Question,
     QuestionAnswer, QuestionResponse,
 };
+use serde_json::Value;
 use smol_str::SmolStr;
 
 const MAX_JSON_CHARS: usize = 1200;
@@ -50,6 +51,10 @@ pub(crate) fn intervention_request_id(request: &InterventionRequest) -> &SmolStr
 }
 
 fn render_approval_markdown_zh(request: &ApprovalRequest) -> String {
+    if is_file_change_approval(request) {
+        return render_file_change_approval_markdown_zh(request);
+    }
+
     let mut body = format!(
         "## 需要授权\n\n**工具**：`{}`\n",
         markdown_inline_code(request.tool_name.as_str())
@@ -59,6 +64,7 @@ fn render_approval_markdown_zh(request: &ApprovalRequest) -> String {
         .as_deref()
         .map(str::trim)
         .filter(|message| !message.is_empty())
+        .or_else(|| approval_reason(request.input.as_ref()))
     {
         body.push_str(&format!(
             "\n**说明**：{}\n",
@@ -73,6 +79,118 @@ fn render_approval_markdown_zh(request: &ApprovalRequest) -> String {
     }
     body.push_str("\n回复 `允许` 继续，或回复 `拒绝` 取消。");
     body
+}
+
+fn render_file_change_approval_markdown_zh(request: &ApprovalRequest) -> String {
+    let mut body = String::from("## 需要授权：文件变更\n");
+    if let Some(reason) = request
+        .message
+        .as_deref()
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .or_else(|| approval_reason(request.input.as_ref()))
+    {
+        body.push_str(&format!(
+            "\n**说明**：{}\n",
+            short_markdown_text(reason, MAX_MESSAGE_CHARS)
+        ));
+    }
+
+    let changes = file_changes_from_input(request.input.as_ref());
+    if changes.is_empty() {
+        body.push_str("\n变更详情暂不可用。提供方只返回了审批请求 ID，未附带文件列表。\n");
+    } else {
+        body.push_str("\n**文件**：\n");
+        for change in &changes {
+            body.push_str(&format!(
+                "- `{}`{}\n",
+                markdown_inline_code(&change.path),
+                change
+                    .kind
+                    .as_deref()
+                    .map(|kind| format!("（{}）", file_change_kind_label(kind)))
+                    .unwrap_or_default()
+            ));
+        }
+    }
+
+    body.push_str("\n回复 `允许` 继续，或回复 `拒绝` 取消。");
+    body
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileChangeDisplay {
+    path: String,
+    kind: Option<String>,
+}
+
+fn is_file_change_approval(request: &ApprovalRequest) -> bool {
+    matches!(
+        request.tool_name.as_str(),
+        "item/fileChange/requestApproval" | "applyPatchApproval"
+    ) || request.input.as_ref().is_some_and(|input| {
+        input.get("changes").is_some()
+            || input
+                .get("approvalKind")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind == "file_change")
+    })
+}
+
+fn approval_reason(input: Option<&Value>) -> Option<&str> {
+    input
+        .and_then(|input| input.get("reason"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+}
+
+fn file_changes_from_input(input: Option<&Value>) -> Vec<FileChangeDisplay> {
+    let Some(input) = input else {
+        return Vec::new();
+    };
+    let changes = input
+        .get("changes")
+        .and_then(Value::as_array)
+        .map(|changes| {
+            changes
+                .iter()
+                .filter_map(file_change_from_value)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if !changes.is_empty() {
+        return changes;
+    }
+    file_change_from_value(input).into_iter().collect()
+}
+
+fn file_change_from_value(value: &Value) -> Option<FileChangeDisplay> {
+    let path = string_field(value, &["path", "file", "file_path", "filePath"])?;
+    let kind = string_field(value, &["changeKind", "kind", "type"]).or_else(|| {
+        value
+            .get("kind")
+            .and_then(|kind| string_field(kind, &["type"]))
+    });
+    Some(FileChangeDisplay { path, kind })
+}
+
+fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn file_change_kind_label(kind: &str) -> &'static str {
+    match kind.trim().to_ascii_lowercase().as_str() {
+        "add" | "added" | "create" | "created" => "新增",
+        "delete" | "deleted" | "remove" | "removed" => "删除",
+        "move" | "rename" | "renamed" => "重命名",
+        "update" | "modify" | "modified" => "修改",
+        _ => "变更",
+    }
 }
 
 fn append_question_markdown_zh(body: &mut String, index: usize, question: &Question) {
@@ -329,6 +447,67 @@ mod tests {
         assert!(markdown.contains("\"path\": \"src/main.rs\""), "{markdown}");
         assert!(markdown.contains("回复 `允许`"), "{markdown}");
         assert!(markdown.contains("`拒绝`"), "{markdown}");
+    }
+
+    #[test]
+    fn renders_file_change_approval_with_files_and_without_rpc_metadata() {
+        let request = InterventionRequest::Approval(ApprovalRequest {
+            req_id: "approval-1".into(),
+            tool_name: "item/fileChange/requestApproval".into(),
+            message: None,
+            input: Some(serde_json::json!({
+                "threadId": "019e3925-5892-7163-bc90-553af11c982c",
+                "turnId": "019e3a40-8c1e-71d0-ba74-b4354ef6c61f",
+                "itemId": "call_N2vhR8G2gRpY8EqN0fq4eNBk",
+                "startedAtMs": 1779093976203_i64,
+                "changes": [{
+                    "path": "/Volumes/Data/opensource/conductor/lucarne/crates/lucarne/src/core_service/service.rs",
+                    "kind": {"type": "update", "move_path": null},
+                    "diff": "@@ -1,2 +1,2 @@\n-old\n+new\n"
+                }]
+            })),
+        });
+
+        let markdown = render_intervention_markdown_zh(&request);
+
+        assert!(markdown.contains("## 需要授权：文件变更"), "{markdown}");
+        assert!(markdown.contains("core_service/service.rs"), "{markdown}");
+        assert!(markdown.contains("（修改）"), "{markdown}");
+        assert!(!markdown.contains("```diff"), "{markdown}");
+        assert!(!markdown.contains("-old"), "{markdown}");
+        assert!(!markdown.contains("threadId"), "{markdown}");
+        assert!(!markdown.contains("turnId"), "{markdown}");
+        assert!(!markdown.contains("itemId"), "{markdown}");
+        assert!(!markdown.contains("startedAtMs"), "{markdown}");
+        assert!(!markdown.contains("**参数**"), "{markdown}");
+    }
+
+    #[test]
+    fn renders_file_change_approval_without_changes_as_missing_details() {
+        let request = InterventionRequest::Approval(ApprovalRequest {
+            req_id: "approval-1".into(),
+            tool_name: "item/fileChange/requestApproval".into(),
+            message: None,
+            input: Some(serde_json::json!({
+                "threadId": "019e3925-5892-7163-bc90-553af11c982c",
+                "turnId": "019e3a40-8c1e-71d0-ba74-b4354ef6c61f",
+                "itemId": "call_N2vhR8G2gRpY8EqN0fq4eNBk",
+                "startedAtMs": 1779093976203_i64,
+                "reason": null,
+                "grantRoot": null
+            })),
+        });
+
+        let markdown = render_intervention_markdown_zh(&request);
+
+        assert!(markdown.contains("## 需要授权：文件变更"), "{markdown}");
+        assert!(markdown.contains("变更详情暂不可用"), "{markdown}");
+        assert!(!markdown.contains("threadId"), "{markdown}");
+        assert!(
+            !markdown.contains("call_N2vhR8G2gRpY8EqN0fq4eNBk"),
+            "{markdown}"
+        );
+        assert!(!markdown.contains("**参数**"), "{markdown}");
     }
 
     #[test]

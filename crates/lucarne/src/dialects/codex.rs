@@ -195,6 +195,7 @@ pub struct Codex {
     completed_turn_ids: HashSet<String>,
     started_item_ids: HashSet<String>,
     completed_item_ids: HashSet<String>,
+    file_change_items: HashMap<String, Value>,
     fork_target_rollbacks: HashMap<String, u64>,
     pending_fork_source_thread_id: Option<String>,
     current_permission_preset: Option<String>,
@@ -358,6 +359,7 @@ impl Codex {
             completed_turn_ids: HashSet::new(),
             started_item_ids: HashSet::new(),
             completed_item_ids: HashSet::new(),
+            file_change_items: HashMap::new(),
             fork_target_rollbacks: HashMap::new(),
             pending_fork_source_thread_id: None,
             current_permission_preset: None,
@@ -1679,6 +1681,13 @@ impl Codex {
             self.turn_has_non_message_activity = true;
             return self.handle_subagent_item(&id, item);
         }
+        if ty == "file_change" {
+            self.turn_has_non_message_activity = true;
+            if !id.is_empty() {
+                self.file_change_items.insert(id, item.clone());
+            }
+            return Vec::new();
+        }
         if ty != "command_execution" {
             return Vec::new();
         }
@@ -1714,6 +1723,9 @@ impl Codex {
             return Vec::new();
         }
         let ty = normalize_item_type(item.get("type").and_then(|v| v.as_str()).unwrap_or(""));
+        if ty == "file_change" && !id.is_empty() {
+            self.file_change_items.insert(id.clone(), item.clone());
+        }
         let status = item
             .get("status")
             .and_then(|v| v.as_str())
@@ -1918,6 +1930,10 @@ impl Codex {
         if let Some(f) = params.get("file").and_then(|v| v.as_str()) {
             input_map.insert("file".into(), Value::String(f.to_string()));
         }
+        if is_file_change_approval_method(obj.get("method").and_then(|v| v.as_str()).unwrap_or(""))
+        {
+            self.enrich_file_change_approval_input(&mut input_map);
+        }
 
         let risk = match input_map.get("command").and_then(|v| v.as_str()) {
             Some(cmd) if !cmd.is_empty() => risk_from_command(cmd),
@@ -1935,6 +1951,31 @@ impl Codex {
                 questions: Vec::new(),
             })),
         ]
+    }
+
+    fn enrich_file_change_approval_input(&self, input_map: &mut Map<String, Value>) {
+        let Some(item_id) = input_map.get("itemId").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(item) = self.file_change_items.get(item_id) else {
+            return;
+        };
+        input_map.insert(
+            "approvalKind".into(),
+            Value::String("file_change".to_string()),
+        );
+        if let Some(changes) = item.get("changes") {
+            input_map.insert("changes".into(), changes.clone());
+        }
+        if let Some(change) = first_file_change(item.get("changes")) {
+            if !change.path.is_empty() {
+                input_map.insert("path".into(), Value::String(change.path));
+            }
+            let kind = first_non_empty(&[&change.kind, &change.ty]);
+            if !kind.is_empty() {
+                input_map.insert("changeKind".into(), Value::String(kind.to_string()));
+            }
+        }
     }
 
     fn emit_question_request(&mut self, obj: &Map<String, Value>) -> Vec<Event> {
@@ -3755,6 +3796,13 @@ fn normalize_item_type(s: &str) -> String {
     }
 }
 
+fn is_file_change_approval_method(method: &str) -> bool {
+    matches!(
+        method,
+        "item/fileChange/requestApproval" | "applyPatchApproval"
+    )
+}
+
 fn codex_agent_message_phase_is_commentary(phase: Option<&Value>) -> bool {
     phase.and_then(Value::as_str) == Some("commentary")
 }
@@ -5091,6 +5139,56 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event.payload, Payload::TurnCompleted(_))),
             "native turn/completed must complete the turn: {complete_events:?}"
+        );
+    }
+
+    #[test]
+    fn file_change_approval_includes_started_item_changes() {
+        let mut dialect = Codex::new();
+        dialect.init(&cfg(PermissionMode::Default));
+
+        let started_events = dialect.translate(
+            br#"{"jsonrpc":"2.0","method":"item/started","params":{"item":{"type":"fileChange","id":"call_file_started_1","changes":[{"path":"/tmp/repo/src/main.rs","kind":{"type":"update","move_path":null},"diff":"@@\n-old\n+new\n"}],"status":"inProgress"}}}"#,
+        );
+        assert!(started_events.is_empty());
+
+        let events = dialect.translate(
+            br#"{"jsonrpc":"2.0","id":7,"method":"item/fileChange/requestApproval","params":{"threadId":"thread-1","turnId":"turn-1","itemId":"call_file_started_1","reason":null,"grantRoot":null}}"#,
+        );
+        let request = events
+            .iter()
+            .find_map(|event| match &event.payload {
+                Payload::PermissionRequest(request) => Some(request),
+                _ => None,
+            })
+            .expect("server approval must surface as permission request");
+        let input = request
+            .input
+            .as_ref()
+            .and_then(Value::as_object)
+            .expect("approval input");
+
+        assert_eq!(request.tool, "item/fileChange/requestApproval");
+        assert_eq!(
+            input.get("approvalKind").and_then(Value::as_str),
+            Some("file_change")
+        );
+        assert_eq!(
+            input.get("path").and_then(Value::as_str),
+            Some("/tmp/repo/src/main.rs")
+        );
+        assert!(
+            input.get("diff").is_none(),
+            "diffs should remain provider-owned change payload data, not mapped to approval input"
+        );
+        assert_eq!(
+            input
+                .get("changes")
+                .and_then(Value::as_array)
+                .and_then(|changes| changes.first())
+                .and_then(|change| change.get("path"))
+                .and_then(Value::as_str),
+            Some("/tmp/repo/src/main.rs")
         );
     }
 
