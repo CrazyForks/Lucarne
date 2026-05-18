@@ -1,0 +1,11 @@
+# Permission variant: control_request uses request.tool_name instead of request.tool
+OUT {"type":"system","subtype":"init","session_id":"sess-perm-tool-name","model":"claude-sonnet-4"}
+EXPECT_IN_CONTAINS "delete cache"
+OUT {"type":"control_request","request_id":"req_tool_name","request":{"tool_name":"Bash","input":{"command":"rm -rf /tmp/cache"}}}
+EXPECT_IN_CONTAINS "\"request_id\":\"req_tool_name\""
+EXPECT_IN_CONTAINS "\"behavior\":\"allow\""
+OUT {"type":"assistant","message":{"id":"msg_p1","content":[{"type":"tool_use","id":"tu_tool_name","name":"Bash","input":{"command":"rm -rf /tmp/cache"}}]}}
+OUT {"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu_tool_name","content":[{"type":"text","text":""}]}]}}
+OUT {"type":"assistant","message":{"id":"msg_p2","content":[{"type":"text","text":"Done."}]}}
+OUT {"type":"result","subtype":"success","session_id":"sess-perm-tool-name","num_turns":1,"usage":{"input_tokens":20,"output_tokens":12}}
+EXIT 0

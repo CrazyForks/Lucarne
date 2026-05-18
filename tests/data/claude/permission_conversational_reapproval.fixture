@@ -1,0 +1,14 @@
+OUT {"type":"system","subtype":"init","session_id":"sess-perm-conv-loop","model":"claude-sonnet-4"}
+EXPECT_IN_CONTAINS "write the file"
+OUT {"type":"assistant","message":{"id":"msg_perm_loop_1","content":[{"type":"tool_use","id":"toolu_perm_loop_1","name":"Write","input":{"file_path":"/var/folders/example/live-output.txt","content":"boom"}}]}}
+OUT {"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_perm_loop_1","is_error":true,"content":"Claude requested permissions to write to /var/folders/example/live-output.txt, but you haven't granted it yet."}]}}
+OUT {"type":"assistant","message":{"id":"msg_perm_loop_ask_1","content":[{"type":"text","text":"I need your permission to write the file. Please approve the write operation to continue."}]}}
+OUT {"type":"result","subtype":"success","session_id":"sess-perm-conv-loop","usage":{"input_tokens":2,"output_tokens":1}}
+EXPECT_IN_CONTAINS "write /var/folders/example/live-output.txt"
+OUT {"type":"user","message":{"role":"user","content":[{"type":"text","text":"Approved. You may write /var/folders/example/live-output.txt."}]}}
+OUT {"type":"assistant","message":{"id":"msg_perm_loop_2","content":[{"type":"text","text":"Let me try the write again."},{"type":"tool_use","id":"toolu_perm_loop_2","name":"Write","input":{"file_path":"/private/var/folders/example/live-output.txt","content":"boom"}}]}}
+OUT {"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_perm_loop_2","is_error":true,"content":"Claude requested permissions to write to /private/var/folders/example/live-output.txt, but you haven't granted it yet."}]}}
+OUT {"type":"assistant","message":{"id":"msg_perm_loop_ask_2","content":[{"type":"text","text":"The system is still requesting explicit permission even after approval."}]}}
+OUT {"type":"result","subtype":"success","session_id":"sess-perm-conv-loop","usage":{"input_tokens":4,"output_tokens":2}}
+EXPECT_IN_CONTAINS "write /private/var/folders/example/live-output.txt"
+EXIT 0

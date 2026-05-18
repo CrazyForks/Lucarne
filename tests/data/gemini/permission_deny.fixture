@@ -1,0 +1,15 @@
+# Real Gemini permission denial flow: reject_once leads to a normal end_turn with assistant text explaining the cancellation.
+EXPECT_IN_CONTAINS "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}
+EXPECT_IN_CONTAINS "\"method\":\"session/new\""
+OUT {"jsonrpc":"2.0","id":2,"result":{"sessionId":"gemini-sess-permission-deny-real","modes":{"currentModeId":"default","availableModes":[{"id":"default","name":"Default"},{"id":"autoEdit","name":"Auto Edit"},{"id":"yolo","name":"YOLO"},{"id":"plan","name":"Plan"}]},"models":{"currentModelId":"gemini-2.5-flash-lite"}}}
+EXPECT_IN_CONTAINS "\"method\":\"session/prompt\""
+EXPECT_IN_CONTAINS "sleep 30"
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"gemini-sess-permission-deny-real","update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"**Executing Shell Command**\n\nI am preparing to execute the `sleep 30` command.\n\n"}}}}
+OUT {"jsonrpc":"2.0","id":77,"method":"session/request_permission","params":{"sessionId":"gemini-sess-permission-deny-real","options":[{"optionId":"proceed_always","name":"Allow for this session","kind":"allow_always"},{"optionId":"proceed_once","name":"Allow","kind":"allow_once"},{"optionId":"cancel","name":"Reject","kind":"reject_once"}],"toolCall":{"toolCallId":"run_shell_command-2","status":"pending","title":"sleep 30","content":[],"locations":[],"kind":"execute"}}}
+EXPECT_IN_CONTAINS "\"optionId\":\"cancel\""
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"gemini-sess-permission-deny-real","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"I am"}}}}
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"gemini-sess-permission-deny-real","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":" unable to execute the `sleep 30` command as it was canceled by the user. Is"}}}}
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"gemini-sess-permission-deny-real","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":" there anything else I can help you with?"}}}}
+OUT {"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn","usage":{"inputTokens":24848,"outputTokens":52,"cachedReadTokens":0,"totalTokens":24900}}}
+EXIT 0

@@ -1,0 +1,8 @@
+# Codex start failure: empty thread/start result should surface as session closure.
+
+EXPECT_IN_CONTAINS "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":0,"result":{}}
+EXPECT_IN_CONTAINS "\"method\":\"initialized\""
+EXPECT_IN_CONTAINS "thread/start"
+OUT {"jsonrpc":"2.0","id":1,"result":{"thread":{}}}
+EXIT 0

@@ -1,0 +1,13 @@
+# Codex raw file-change + token usage stream.
+
+EXPECT_IN_CONTAINS "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":0,"result":{}}
+EXPECT_IN_CONTAINS "\"method\":\"initialized\""
+EXPECT_IN_CONTAINS "thread/start"
+OUT {"jsonrpc":"2.0","id":1,"result":{"threadId":"test-thread-file-change"}}
+EXPECT_IN_CONTAINS "turn/start"
+OUT {"jsonrpc":"2.0","method":"turn/started","params":{}}
+OUT {"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"tokenUsage":{"last":{"inputTokens":11,"outputTokens":3,"cachedInputTokens":2}}}}
+OUT {"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"fileChange","id":"edit-1","changes":[{"path":"/tmp/repo/src/main.go","kind":"modify","unified_diff":"@@\n-old\n+new\n"}]}}}
+OUT {"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"turn-file-change","status":"completed"}}}
+EXIT 0

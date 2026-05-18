@@ -1,0 +1,7 @@
+{"type":"session.start","data":{"sessionId":"sess-tool-error","selectedModel":"claude-sonnet-4"}}
+{"type":"session.mcp_servers_loaded","data":{"servers":[{"name":"github-mcp-server","status":"connected","source":"builtin"}]},"ephemeral":true}
+{"type":"assistant.turn_start","data":{"turnId":"0"}}
+{"type":"assistant.message_delta","data":{"messageId":"msg-err","deltaContent":"trying"}}
+{"type":"assistant.message","data":{"messageId":"msg-err","content":"trying","toolRequests":[{"toolCallId":"tool-err","name":"bash","arguments":{"command":"foobar"}}],"outputTokens":3}}
+{"type":"tool.execution_complete","data":{"toolCallId":"tool-err","success":false,"error":{"message":"command not found: foobar"}}}
+{"type":"result","sessionId":"sess-tool-error","exitCode":0}

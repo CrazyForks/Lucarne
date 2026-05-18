@@ -1,0 +1,6 @@
+# Thinking block + text
+OUT {"type":"system","subtype":"init","session_id":"sess-think","model":"claude-sonnet-4"}
+EXPECT_IN_CONTAINS "explain"
+OUT {"type":"assistant","message":{"id":"msg_t1","content":[{"type":"thinking","text":"Let me consider the options."},{"type":"text","text":"The answer is 42."}]}}
+OUT {"type":"result","subtype":"success","session_id":"sess-think","num_turns":1,"duration_ms":100,"usage":{"input_tokens":12,"output_tokens":8}}
+EXIT 0

@@ -1,0 +1,18 @@
+[package]
+name = "lucarne-channel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Channel abstraction for lucarne bots (Telegram and future platforms)."
+
+[dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+bytes = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

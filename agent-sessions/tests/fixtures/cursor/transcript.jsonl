@@ -1,0 +1,2 @@
+{"role":"user","message":{"content":[{"type":"text","text":"Hello, world!"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"Let me check."},{"type":"tool_use","name":"read_file"}]}}

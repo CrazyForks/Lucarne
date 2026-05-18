@@ -1,0 +1,17 @@
+# Real-shape Codex command approval captured from live app-server I/O.
+
+EXPECT_IN_CONTAINS "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1}}
+EXPECT_IN_CONTAINS "\"method\":\"initialized\""
+EXPECT_IN_CONTAINS "\"method\":\"thread/start\""
+OUT {"jsonrpc":"2.0","id":1,"result":{"thread":{"id":"real-thread-1","status":{"type":"idle"}}}}
+EXPECT_IN_CONTAINS "\"method\":\"turn/start\""
+OUT {"jsonrpc":"2.0","method":"thread/status/changed","params":{"threadId":"real-thread-1","status":{"type":"active","activeFlags":["waitingOnApproval"]}}}
+OUT {"jsonrpc":"2.0","id":0,"method":"item/commandExecution/requestApproval","params":{"threadId":"real-thread-1","turnId":"turn-real-1","itemId":"call_real_1","reason":"Do you want to allow me to run a shell command to delete the requested file?","command":"/bin/zsh -lc 'rm /tmp/repo/delete-target.txt'","cwd":"/tmp/repo","commandActions":[{"type":"unknown","command":"rm /tmp/repo/delete-target.txt"}],"proposedExecpolicyAmendment":["rm","/tmp/repo/delete-target.txt"],"availableDecisions":["accept",{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["rm","/tmp/repo/delete-target.txt"]}},"cancel"]}}
+EXPECT_IN_CONTAINS "\"decision\":\"accept\""
+OUT {"jsonrpc":"2.0","method":"thread/status/changed","params":{"threadId":"real-thread-1","status":{"type":"active","activeFlags":[]}}}
+OUT {"jsonrpc":"2.0","method":"item/started","params":{"item":{"type":"commandExecution","id":"call_real_1","command":"/bin/zsh -lc 'rm /tmp/repo/delete-target.txt'","cwd":"/tmp/repo"}}}
+OUT {"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"commandExecution","id":"call_real_1","command":"/bin/zsh -lc 'rm /tmp/repo/delete-target.txt'","cwd":"/tmp/repo","aggregatedOutput":"","exitCode":0}}}
+OUT {"jsonrpc":"2.0","method":"thread/status/changed","params":{"threadId":"real-thread-1","status":{"type":"idle"}}}
+OUT {"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"turn-real-1","status":"completed"}}}
+EXIT 0

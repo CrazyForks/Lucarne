@@ -1,0 +1,13 @@
+# Codex resume fallback: empty thread/resume result should fall back to fresh thread/start.
+
+EXPECT_IN_CONTAINS "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":0,"result":{}}
+EXPECT_IN_CONTAINS "\"method\":\"initialized\""
+EXPECT_IN_CONTAINS "thread/resume"
+OUT {"jsonrpc":"2.0","id":1,"result":{"thread":{}}}
+EXPECT_IN_CONTAINS "thread/start"
+OUT {"jsonrpc":"2.0","id":2,"result":{"threadId":"test-thread-fresh-after-empty-resume"}}
+EXPECT_IN_CONTAINS "turn/start"
+OUT {"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"agent_message","id":"msg-resume-empty","text":"Fresh thread after empty resume result."}}}
+OUT {"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"turn-resume-empty","status":"completed"}}}
+EXIT 0

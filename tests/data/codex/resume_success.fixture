@@ -1,0 +1,11 @@
+# Codex resume success: valid thread/resume should reuse the prior thread and skip fresh start.
+
+EXPECT_IN_CONTAINS "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":0,"result":{}}
+EXPECT_IN_CONTAINS "\"method\":\"initialized\""
+EXPECT_IN_CONTAINS "thread/resume"
+OUT {"jsonrpc":"2.0","id":1,"result":{"thread":{"id":"test-thread-resumed"}}}
+EXPECT_IN_CONTAINS "turn/start"
+OUT {"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"agent_message","id":"msg-resume-success","text":"Resumed prior thread."}}}
+OUT {"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"turn-resume-success","status":"completed"}}}
+EXIT 0

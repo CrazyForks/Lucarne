@@ -1,0 +1,14 @@
+# Journey 55: typed /model control command must use Codex config RPC, not prompt text.
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":0,"result":{}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"initialized\""
+EXPECT_IN_CONTAINS "thread/start"
+OUT {"jsonrpc":"2.0","id":1,"result":{"threadId":"journey-55-thread"}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"config/value/write\""
+EXPECT_IN_CONTAINS "\"keyPath\":\"model\""
+EXPECT_IN_CONTAINS "\"value\":\"gpt-5.4\""
+EXPECT_IN_CONTAINS "\"mergeStrategy\":\"replace\""
+OUT {"jsonrpc":"2.0","id":2,"result":{"status":"ok"}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"config/read\""
+OUT {"jsonrpc":"2.0","id":3,"result":{"config":{"model":"gpt-5.4"}}}
+EXIT 0

@@ -1,0 +1,7 @@
+# Pi RPC tool results fixture
+EXPECT_IN_CONTAINS "get_state"
+OUT {"id":"0","type":"response","command":"get_state","success":true,"data":{"sessionId":"s1","sessionFile":"/tmp/pi-test.jsonl"}}
+EXPECT_IN_CONTAINS "prompt"
+OUT {"type":"agent_start"}
+OUT {"type":"turn_end","message":{"role":"assistant","content":"Done","usage":{"input":10,"output":5}},"toolResults":[{"toolCallId":"tool_1","content":"file contents","isError":false},{"toolCallId":"tool_2","content":"File not found","isError":true}]}
+EXIT 0

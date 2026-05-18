@@ -1,0 +1,12 @@
+# Real Gemini question flow: no native structured question tool, only reasoning chunks plus a final assistant question.
+EXPECT_IN_CONTAINS "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}
+EXPECT_IN_CONTAINS "\"method\":\"session/new\""
+OUT {"jsonrpc":"2.0","id":2,"result":{"sessionId":"gemini-sess-question-real","modes":{"currentModeId":"default","availableModes":[{"id":"default","name":"Default"},{"id":"autoEdit","name":"Auto Edit"},{"id":"yolo","name":"YOLO"},{"id":"plan","name":"Plan"}]},"models":{"currentModelId":"gemini-2.5-flash-lite"}}}
+EXPECT_IN_CONTAINS "\"method\":\"session/prompt\""
+EXPECT_IN_CONTAINS "native question flow"
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"gemini-sess-question-real","update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"**Exploring Question Mechanisms**\n\nI'm currently analyzing how to best integrate a clarifying question into our interaction.\n\n"}}}}
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"gemini-sess-question-real","update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"**Determining Initial `.pen` File**\n\nI need to ask directly which `.pen` file you want me to work with.\n\n"}}}}
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"gemini-sess-question-real","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Which `.pen` file would you like to open or work with?"}}}}
+OUT {"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn","usage":{"inputTokens":12362,"outputTokens":14,"cachedReadTokens":0,"totalTokens":12376}}}
+EXIT 0

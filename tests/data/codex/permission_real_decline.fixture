@@ -1,0 +1,17 @@
+# Real-shape Codex command approval denied by client, including waitingOnApproval state and declined command completion.
+
+EXPECT_IN_CONTAINS "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1}}
+EXPECT_IN_CONTAINS "\"method\":\"initialized\""
+EXPECT_IN_CONTAINS "\"method\":\"thread/start\""
+OUT {"jsonrpc":"2.0","id":1,"result":{"thread":{"id":"real-thread-decline","status":{"type":"idle"}}}}
+EXPECT_IN_CONTAINS "\"method\":\"turn/start\""
+OUT {"jsonrpc":"2.0","method":"thread/status/changed","params":{"threadId":"real-thread-decline","status":{"type":"active","activeFlags":[]}}}
+OUT {"jsonrpc":"2.0","id":0,"method":"item/commandExecution/requestApproval","params":{"threadId":"real-thread-decline","turnId":"turn-real-decline","itemId":"call_real_decline_1","reason":"Do you want me to delete /tmp/repo/delete-target.txt now?","command":"/bin/zsh -lc 'rm /tmp/repo/delete-target.txt'","cwd":"/tmp/repo","commandActions":[{"type":"unknown","command":"rm /tmp/repo/delete-target.txt"}],"proposedExecpolicyAmendment":["rm","/tmp/repo/delete-target.txt"],"availableDecisions":["accept",{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["rm","/tmp/repo/delete-target.txt"]}},"cancel"]}}
+EXPECT_IN_CONTAINS "\"decision\":\"reject\""
+OUT {"jsonrpc":"2.0","method":"thread/status/changed","params":{"threadId":"real-thread-decline","status":{"type":"active","activeFlags":[]}}}
+OUT {"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"commandExecution","id":"call_real_decline_1","command":"/bin/zsh -lc 'rm /tmp/repo/delete-target.txt'","cwd":"/tmp/repo","processId":null,"source":"agent","status":"declined","commandActions":[{"type":"unknown","command":"rm /tmp/repo/delete-target.txt"}],"aggregatedOutput":null,"exitCode":null,"durationMs":null},"threadId":"real-thread-decline","turnId":"turn-real-decline"}}
+OUT {"jsonrpc":"2.0","method":"thread/status/changed","params":{"threadId":"real-thread-decline","status":{"type":"idle"}}}
+OUT {"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"agentMessage","id":"msg_decline_1","text":"Deletion was not approved, so I could not remove the file.","phase":"final_answer","memoryCitation":null},"threadId":"real-thread-decline","turnId":"turn-real-decline"}}
+OUT {"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"turn-real-decline","status":"completed"}}}
+EXIT 0

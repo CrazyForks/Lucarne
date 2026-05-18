@@ -1,0 +1,74 @@
+# Command catalog: first-batch Codex control commands map to app-server RPCs.
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":0,"result":{}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"initialized\""
+EXPECT_IN_CONTAINS "thread/start"
+OUT {"jsonrpc":"2.0","id":1,"result":{"threadId":"codex-command-thread"}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"thread/name/set\""
+EXPECT_IN_CONTAINS "\"threadId\":\"codex-command-thread\""
+EXPECT_IN_CONTAINS "\"name\":\"release notes\""
+OUT {"jsonrpc":"2.0","id":2,"result":{}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"thread/backgroundTerminals/clean\""
+EXPECT_IN_CONTAINS "\"threadId\":\"codex-command-thread\""
+OUT {"jsonrpc":"2.0","id":3,"result":{}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"thread/read\""
+EXPECT_IN_CONTAINS "\"threadId\":\"codex-command-thread\""
+OUT {"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"threadId":"codex-command-thread","turnId":"turn-status","tokenUsage":{"total":{"totalTokens":10731300,"inputTokens":10700000,"cachedInputTokens":10200000,"outputTokens":31300,"reasoningOutputTokens":1200},"last":{"totalTokens":14000,"inputTokens":13613,"cachedInputTokens":12000,"outputTokens":387,"reasoningOutputTokens":40},"modelContextWindow":258400,"compactions":0}}}
+OUT {"jsonrpc":"2.0","id":4,"result":{"thread":{"id":"codex-command-thread","status":{"type":"idle"},"cwd":"/tmp/project","cliVersion":"0.124.0","instructionSources":["/Users/era/.codex/AGENTS.md"]},"cwd":"/tmp/project"}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"config/read\""
+OUT {"jsonrpc":"2.0","id":5,"result":{"config":{"model":"gpt-5.4","model_reasoning_effort":"low","approval_policy":"on-request","sandbox_mode":"workspace-write"}}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"model/list\""
+OUT {"jsonrpc":"2.0","id":6,"result":{"data":[{"id":"gpt-5.5","displayName":"GPT-5.5","description":"Frontier model for complex coding, research, and real-world work.","defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"low","description":"Fast responses"},{"reasoningEffort":"medium","description":"Balanced"},{"reasoningEffort":"high","description":"Deeper reasoning"}]},{"id":"gpt-5.4","displayName":"gpt-5.4","description":"Strong model for everyday coding.","defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium","description":"Balanced"},{"reasoningEffort":"high","description":"Deeper reasoning"}]}]}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"config/value/write\""
+EXPECT_IN_CONTAINS "\"keyPath\":\"model\""
+EXPECT_IN_CONTAINS "\"value\":\"gpt-5.4\""
+EXPECT_IN_CONTAINS "\"mergeStrategy\":\"replace\""
+OUT {"jsonrpc":"2.0","id":7,"result":{"status":"ok"}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"config/value/write\""
+EXPECT_IN_CONTAINS "\"keyPath\":\"model_reasoning_effort\""
+EXPECT_IN_CONTAINS "\"value\":\"high\""
+EXPECT_IN_CONTAINS "\"mergeStrategy\":\"replace\""
+OUT {"jsonrpc":"2.0","id":8,"result":{"status":"ok"}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"config/read\""
+OUT {"jsonrpc":"2.0","id":9,"result":{"config":{"model":"gpt-5.4","model_reasoning_effort":"high"}}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"skills/list\""
+OUT {"jsonrpc":"2.0","id":10,"result":{"data":[{"cwd":"/tmp/project","errors":[],"skills":[{"name":"browser-use:browser","description":"Use browser automation for local targets, screenshots, and page inspection.","enabled":true,"path":"/tmp/skills/browser/SKILL.md","interface":{"displayName":"Browser Use","shortDescription":"Inspect local browser targets."}}]}]}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"mcpServerStatus/list\""
+OUT {"jsonrpc":"2.0","id":11,"result":{"servers":[]}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"plugin/list\""
+OUT {"jsonrpc":"2.0","id":12,"result":{"plugins":[]}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"config/read\""
+OUT {"jsonrpc":"2.0","id":13,"result":{"config":{"approval_policy":"never","approvals_reviewer":"user","sandbox_mode":"danger-full-access"}}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"config/value/write\""
+EXPECT_IN_CONTAINS "\"keyPath\":\"approval_policy\""
+EXPECT_IN_CONTAINS "\"value\":\"on-request\""
+EXPECT_IN_CONTAINS "\"mergeStrategy\":\"replace\""
+OUT {"jsonrpc":"2.0","id":14,"result":{"status":"ok"}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"config/value/write\""
+EXPECT_IN_CONTAINS "\"keyPath\":\"approvals_reviewer\""
+EXPECT_IN_CONTAINS "\"value\":\"guardian_subagent\""
+EXPECT_IN_CONTAINS "\"mergeStrategy\":\"replace\""
+OUT {"jsonrpc":"2.0","id":15,"result":{"status":"ok"}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"config/batchWrite\""
+EXPECT_IN_CONTAINS "\"edits\""
+EXPECT_IN_CONTAINS "\"keyPath\":\"default_permissions\""
+EXPECT_IN_CONTAINS "\"value\":null"
+EXPECT_IN_CONTAINS "\"keyPath\":\"sandbox_mode\""
+EXPECT_IN_CONTAINS "\"value\":\"workspace-write\""
+EXPECT_IN_CONTAINS "\"mergeStrategy\":\"replace\""
+OUT {"jsonrpc":"2.0","id":16,"result":{"status":"ok"}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"config/read\""
+OUT {"jsonrpc":"2.0","id":17,"result":{"config":{"approval_policy":"on-request","approvals_reviewer":"guardian_subagent","sandbox_mode":"workspace-write"}}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"thread/read\""
+EXPECT_IN_CONTAINS "\"threadId\":\"codex-command-thread\""
+EXPECT_IN_CONTAINS "\"includeTurns\":true"
+OUT {"jsonrpc":"2.0","id":18,"result":{"thread":{"id":"codex-command-thread","turns":[{"id":"turn-1","items":[{"type":"userMessage","id":"user-1","content":[{"type":"text","text":"First prompt","text_elements":[]}]}]},{"id":"turn-2","items":[{"type":"userMessage","id":"user-2","content":[{"type":"text","text":"Second prompt","text_elements":[]}]}]}]}}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"thread/fork\""
+EXPECT_IN_CONTAINS "\"threadId\":\"codex-command-thread\""
+EXPECT_IN_CONTAINS "\"persistExtendedHistory\":true"
+OUT {"jsonrpc":"2.0","id":19,"result":{"thread":{"id":"codex-forked-thread"}}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"thread/rollback\""
+EXPECT_IN_CONTAINS "\"threadId\":\"codex-forked-thread\""
+EXPECT_IN_CONTAINS "\"numTurns\":1"
+OUT {"jsonrpc":"2.0","id":20,"result":{"thread":{"id":"codex-forked-thread","turns":[{"id":"turn-1","items":[{"type":"userMessage","id":"user-1","content":[{"type":"text","text":"First prompt","text_elements":[]}]}]}]}}}
+EXIT 0

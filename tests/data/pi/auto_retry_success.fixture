@@ -1,0 +1,8 @@
+# Pi RPC auto retry success fixture
+EXPECT_IN_CONTAINS "get_state"
+OUT {"id":"0","type":"response","command":"get_state","success":true,"data":{"sessionId":"s1","sessionFile":"/tmp/pi-test.jsonl"}}
+EXPECT_IN_CONTAINS "prompt"
+OUT {"type":"agent_start"}
+OUT {"type":"auto_retry_end","success":true,"attempt":1}
+OUT {"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"Recovered"}],"usage":{"input":10,"output":5}}}
+EXIT 0

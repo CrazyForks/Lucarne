@@ -1,0 +1,17 @@
+# Command catalog: ACP sends available_commands_update, then /help is handled locally.
+EXPECT_IN_CONTAINS "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}
+EXPECT_IN_CONTAINS "\"method\":\"session/new\""
+OUT {"jsonrpc":"2.0","id":2,"result":{"sessionId":"gemini-sess-commands","modes":{"currentModeId":"default","availableModes":[{"id":"default","name":"Default"},{"id":"autoEdit","name":"Auto Edit"}]},"models":{"currentModelId":"gemini-2.5-flash","availableModels":[{"modelId":"gemini-2.5-flash","name":"Gemini Flash","description":"Fast model"},{"modelId":"gemini-2.5-pro","name":"Gemini Pro"}]}}}
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"gemini-sess-commands","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"help","description":"Show available commands"},{"name":"about","description":"Show version information"}]}}}
+EXPECT_IN_CONTAINS "\"method\":\"session/prompt\""
+EXPECT_IN_CONTAINS "\"text\":\"/help\""
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"gemini-sess-commands","update":{"sessionUpdate":"agent_message_chunk","messageId":"msg-command","content":{"type":"text","text":"GEMINI_HELP"}}}}
+OUT {"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn","usage":{"inputTokens":0,"outputTokens":0,"cachedReadTokens":0,"totalTokens":0}}}
+EXPECT_IN_CONTAINS "\"method\":\"session/set_model\""
+EXPECT_IN_CONTAINS "\"modelId\":\"gemini-2.5-pro\""
+OUT {"jsonrpc":"2.0","id":4,"result":{}}
+EXPECT_IN_CONTAINS "\"method\":\"session/set_mode\""
+EXPECT_IN_CONTAINS "\"modeId\":\"autoEdit\""
+OUT {"jsonrpc":"2.0","id":5,"result":{}}
+EXIT 0

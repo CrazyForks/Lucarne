@@ -1,0 +1,7 @@
+OUT {"type":"system","subtype":"init","session_id":"sess-real-question-freeform","model":"claude-haiku-4-5"}
+EXPECT_IN_CONTAINS "freeform answer"
+OUT {"type":"assistant","message":{"id":"msg_real_question_freeform_1","type":"message","role":"assistant","model":"claude-haiku-4-5-20251001","content":[{"type":"tool_use","id":"toolu_real_question_freeform_1","name":"AskUserQuestion","input":{"questions":[{"question":"What would you like me to help you with today?","header":"Task","options":[{"label":"Web Development","description":"Build or design web applications, components, pages, or UI"},{"label":"Software Engineering","description":"Code development, debugging, refactoring, testing, or architecture"},{"label":"Other","description":"Something else entirely"}],"multiSelect":false}]}}]}}
+OUT {"type":"assistant","message":{"id":"msg_real_question_freeform_ask","type":"message","role":"assistant","model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"What would you like me to help you with today?"}]}}
+OUT {"type":"result","subtype":"success","session_id":"sess-real-question-freeform","usage":{"input_tokens":10,"output_tokens":1}}
+EXPECT_IN_CONTAINS "Please continue."
+EXIT 0

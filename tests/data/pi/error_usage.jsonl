@@ -1,0 +1,6 @@
+{"type":"agent_start"}
+{"type":"usage","usage":{"input":200,"output":100,"cacheRead":50,"cost":{"total":0.005}}}
+{"type":"usage","usage":{"inputTokens":150,"outputTokens":75,"cachedInputTokens":25,"costUsd":0.003}}
+{"type":"tool_execution_start","toolCallId":"tool_err","toolName":"read","args":{"path":"/missing.txt"}}
+{"type":"tool_execution_end","toolCallId":"tool_err","result":"File not found","isError":true}
+{"type":"error","message":"Connection to model provider lost"}

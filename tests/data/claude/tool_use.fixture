@@ -1,0 +1,9 @@
+# Tool use: assistant issues Bash tool_use, user (Claude) echoes tool_result
+OUT {"type":"system","subtype":"init","session_id":"sess-tool","model":"claude-sonnet-4"}
+EXPECT_IN_CONTAINS "list files"
+OUT {"type":"assistant","message":{"id":"msg_a1","content":[{"type":"text","text":"I'll run ls."}]}}
+OUT {"type":"assistant","message":{"id":"msg_a2","content":[{"type":"tool_use","id":"tu_1","name":"Bash","input":{"command":"ls","description":"list"}}]}}
+OUT {"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu_1","content":[{"type":"text","text":"README.md\ngo.mod\n"}]}]}}
+OUT {"type":"assistant","message":{"id":"msg_a3","content":[{"type":"text","text":"Two files."}]}}
+OUT {"type":"result","subtype":"success","session_id":"sess-tool","num_turns":1,"duration_ms":250,"usage":{"input_tokens":20,"output_tokens":15}}
+EXIT 0

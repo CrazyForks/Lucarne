@@ -1,0 +1,5 @@
+OUT {"type":"system","subtype":"init","session_id":"sess-question-pass","model":"claude-sonnet-4"}
+EXPECT_IN_CONTAINS "pick a theme"
+OUT {"type":"assistant","message":{"id":"msg_question_pass_1","content":[{"type":"tool_use","id":"toolu_question_pass_1","name":"AskUserQuestion","input":{"questions":[{"id":"theme","header":"Theme","question":"Which color should I use?","options":[{"label":"Blue"},{"label":"Green"}]}]}}]}}
+OUT {"type":"result","subtype":"success","session_id":"sess-question-pass","usage":{"input_tokens":1,"output_tokens":1}}
+EXIT 0

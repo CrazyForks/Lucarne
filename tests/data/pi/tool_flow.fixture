@@ -1,0 +1,11 @@
+# Pi RPC tool streaming fixture — tool_execution_update
+EXPECT_IN_CONTAINS "get_state"
+OUT {"id":"0","type":"response","command":"get_state","success":true,"data":{"sessionId":"s1","sessionFile":"/tmp/pi-toolflow.jsonl"}}
+EXPECT_IN_CONTAINS "prompt"
+OUT {"type":"agent_start"}
+OUT {"type":"tool_execution_start","toolCallId":"t1","toolName":"bash","args":{"command":"sleep 1\necho part1\necho part2"}}
+OUT {"type":"tool_execution_update","toolCallId":"t1","result":"partial output line 1\n"}
+OUT {"type":"tool_execution_update","toolCallId":"t1","result":"partial output line 2\n"}
+OUT {"type":"tool_execution_end","toolCallId":"t1","result":"partial output line 1\npartial output line 2\n","isError":false}
+OUT {"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"Done with streaming tool"}],"usage":{"input":8,"output":3}}}
+EXIT 0

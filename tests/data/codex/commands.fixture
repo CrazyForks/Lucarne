@@ -1,0 +1,15 @@
+# Command catalog: /review maps to app-server review/start, never turn/start.
+EXPECT_IN_CONTAINS "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":0,"result":{}}
+EXPECT_IN_CONTAINS "\"method\":\"initialized\""
+EXPECT_IN_CONTAINS "thread/start"
+OUT {"jsonrpc":"2.0","id":1,"result":{"threadId":"codex-command-thread"}}
+EXPECT_IN_CONTAINS "\"method\":\"experimentalFeature/list\""
+OUT {"jsonrpc":"2.0","id":2,"result":{"data":[{"name":"goals","stage":"underDevelopment","displayName":null,"description":null,"announcement":null,"enabled":true,"defaultEnabled":false},{"name":"memories","stage":"beta","displayName":"Memories","description":"Allow Codex to create new memories from conversations.","announcement":"Try it with `/memories`.","enabled":true,"defaultEnabled":false},{"name":"plugins","stage":"stable","displayName":null,"description":null,"announcement":null,"enabled":true,"defaultEnabled":true},{"name":"shell_tool","stage":"stable","displayName":null,"description":null,"announcement":null,"enabled":true,"defaultEnabled":true}]}}
+EXPECT_IN_CONTAINS "\"method\":\"review/start\""
+EXPECT_IN_CONTAINS "\"target\":{\"type\":\"uncommittedChanges\"}"
+OUT {"jsonrpc":"2.0","id":3,"result":{"turn":{"id":"review-turn-1","items":[],"status":"inProgress","error":null,"startedAt":null,"completedAt":null,"durationMs":null},"reviewThreadId":"codex-command-thread"}}
+OUT {"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"codex-command-thread","turn":{"id":"review-turn-1","items":[],"status":"inProgress","error":null,"startedAt":1,"completedAt":null,"durationMs":null}}}
+OUT {"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"codex-command-thread","turnId":"review-turn-1","item":{"type":"agent_message","id":"review-msg-1","text":"REVIEW_OK"}}}
+OUT {"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"codex-command-thread","turn":{"id":"review-turn-1","items":[],"status":"completed","error":null,"startedAt":1,"completedAt":2,"durationMs":1},"usage":{"input_tokens":0,"output_tokens":0}}}
+EXIT 0

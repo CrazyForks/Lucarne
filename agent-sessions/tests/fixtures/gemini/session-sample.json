@@ -1,0 +1,74 @@
+{
+  "sessionId": "e1c7ee9f-90f8-41d5-815c-5d9cf9f83963",
+  "projectHash": "7d79b436f989328a8f09dc8a3bb7a6c6fd1eaf6f91f77da4423bb3700ade1d9a",
+  "startTime": "2026-04-14T13:34:31.019Z",
+  "lastUpdated": "2026-04-14T13:35:07.683Z",
+  "kind": "main",
+  "summary": "review session",
+  "messages": [
+    {
+      "id": "8c4f44d5-58b5-4c31-bcb3-ca190ca5445f",
+      "timestamp": "2026-04-14T13:34:31.690Z",
+      "type": "user",
+      "content": [
+        {
+          "text": "Please review my uncommitted changes"
+        }
+      ]
+    },
+    {
+      "id": "6fb128f7-2f83-4d5c-ad7f-50622cf49e02",
+      "timestamp": "2026-04-14T13:34:59.385Z",
+      "type": "gemini",
+      "content": "I will start by checking the current status of the repository and reviewing your uncommitted changes.",
+      "thoughts": [
+        {
+          "subject": "Planning review",
+          "description": "Inspect git state first.",
+          "timestamp": "2026-04-14T13:34:58.000Z"
+        }
+      ],
+      "tokens": {
+        "input": 13995,
+        "output": 44,
+        "cached": 11296,
+        "thoughts": 0,
+        "tool": 0,
+        "total": 14039
+      },
+      "model": "gemini-3-flash-preview",
+      "toolCalls": [
+        {
+          "id": "run_shell_command_1776173699332_0",
+          "name": "run_shell_command",
+          "args": {
+            "description": "Checking git status and uncommitted changes.",
+            "command": "git status && git diff HEAD"
+          },
+          "result": [
+            {
+              "functionResponse": {
+                "id": "run_shell_command_1776173699332_0",
+                "name": "run_shell_command",
+                "response": {
+                  "output": "Output too large. For full output see tool-outputs."
+                }
+              }
+            }
+          ],
+          "status": "success",
+          "timestamp": "2026-04-14T13:35:07.682Z",
+          "description": "Checking git status and uncommitted changes.",
+          "displayName": "Run shell command",
+          "renderOutputAsMarkdown": true
+        }
+      ]
+    },
+    {
+      "id": "99eeabe1-2680-4de2-8b97-d0d2637c9ae3",
+      "timestamp": "2026-04-14T13:35:07.683Z",
+      "type": "info",
+      "content": "Request cancelled."
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+# ACP commands can reuse names that amux also exposes as fixed capabilities.
+# Public /commands invocation must send the provider-native slash command.
+EXPECT_IN_CONTAINS "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}
+EXPECT_IN_CONTAINS "\"method\":\"session/new\""
+OUT {"jsonrpc":"2.0","id":2,"result":{"sessionId":"gemini-native-model","modes":{"currentModeId":"default","availableModes":[]},"models":{"currentModelId":"gemini-2.5-flash","availableModels":[]}}}
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"gemini-native-model","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"model","description":"Provider-native model command"}]}}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"session/prompt\""
+EXPECT_IN_CONTAINS "\"text\":\"/model\""
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"gemini-native-model","update":{"sessionUpdate":"agent_message_chunk","messageId":"msg-native-model","content":{"type":"text","text":"NATIVE_MODEL_OK"}}}}
+OUT {"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn","usage":{"inputTokens":0,"outputTokens":0,"cachedReadTokens":0,"totalTokens":0}}}
+EXIT 0

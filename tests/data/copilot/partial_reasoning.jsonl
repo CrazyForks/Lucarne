@@ -1,0 +1,7 @@
+{"type":"session.start","data":{"sessionId":"sess-partial","selectedModel":"claude-sonnet-4"}}
+{"type":"assistant.turn_start","data":{"turnId":"0"}}
+{"type":"assistant.reasoning","data":{"content":"Let me think about this..."}}
+{"type":"assistant.reasoning_delta","data":{"deltaContent":"thinking step"}}
+{"type":"assistant.message_delta","data":{"messageId":"m1","deltaContent":"hello "},"ephemeral":true}
+{"type":"assistant.message_delta","data":{"messageId":"m1","deltaContent":"world"},"ephemeral":true}
+{"type":"result","sessionId":"sess-partial","exitCode":0}

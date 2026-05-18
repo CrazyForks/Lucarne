@@ -1,0 +1,21 @@
+# Recorded live capture for pi
+EXPECT_IN_CONTAINS_NEXT "\"id\":\"0\""
+EXPECT_IN_CONTAINS_NEXT "\"type\":\"get_state\""
+OUT {"id":"0","type":"response","command":"get_state","success":true,"data":{"model":{"provider":"deepseek","id":"deepseek-v4-flash","name":"DeepSeek V4 Flash","reasoning":true},"thinkingLevel":"high","sessionFile":"/tmp/amux-pi-command/session.jsonl","sessionId":"pi-command","cwd":"/tmp/amux-pi-command"}}
+EXPECT_IN_CONTAINS_NEXT "\"id\":\"1\""
+EXPECT_IN_CONTAINS_NEXT "\"type\":\"get_commands\""
+OUT {"id":"1","type":"response","command":"get_commands","success":true,"data":{"commands":[]}}
+EXPECT_IN_CONTAINS_NEXT "\"id\":\"2\""
+EXPECT_IN_CONTAINS_NEXT "\"type\":\"get_state\""
+OUT {"id":"2","type":"response","command":"get_state","success":true,"data":{"model":{"provider":"deepseek","id":"deepseek-v4-flash","name":"DeepSeek V4 Flash","reasoning":true},"thinkingLevel":"high","sessionFile":"/tmp/amux-pi-command/session.jsonl","sessionId":"pi-command","cwd":"/tmp/amux-pi-command"}}
+EXPECT_IN_CONTAINS_NEXT "\"id\":\"3\""
+EXPECT_IN_CONTAINS_NEXT "\"type\":\"get_session_stats\""
+OUT {"id":"3","type":"response","command":"get_session_stats","success":true,"data":{"inputTokens":1,"outputTokens":2,"totalTokens":3}}
+EXPECT_IN_CONTAINS_NEXT "\"id\":\"4\""
+EXPECT_IN_CONTAINS_NEXT "\"type\":\"get_available_models\""
+OUT {"id":"4","type":"response","command":"get_available_models","success":true,"data":{"models":[{"provider":"deepseek","id":"deepseek-v4-flash","description":"Replay fixture model","supportsReasoning":true}]}}
+EXPECT_IN_CONTAINS_NEXT "\"id\":\"5\""
+EXPECT_IN_CONTAINS_NEXT "\"type\":\"get_commands\""
+OUT {"id":"5","type":"response","command":"get_commands","success":true,"data":{"commands":[{"name":"superpowers:brainstorming","displayName":"Brainstorming","description":"Replay fixture skill","source":"skill"}]}}
+EXPECT_SIGNAL_NEXT SIGTERM
+EXIT 0

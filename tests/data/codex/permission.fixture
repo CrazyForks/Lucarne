@@ -1,0 +1,21 @@
+# Codex permission: server-initiated approval request → client allows → message
+#
+# Sequence:
+#   client → thread/start (id=1)
+#   server → thread/start response
+#   client → turn/start (id=2)
+#   server → commandExecution approval request (server id=7)
+#   client → approval response id=7 {"decision":"accept"}
+#   server → item/completed, turn/completed
+
+EXPECT_IN_CONTAINS "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":0,"result":{}}
+EXPECT_IN_CONTAINS "\"method\":\"initialized\""
+EXPECT_IN_CONTAINS "thread/start"
+OUT {"jsonrpc":"2.0","id":1,"result":{"threadId":"test-thread-perm"}}
+EXPECT_IN_CONTAINS "turn/start"
+OUT {"jsonrpc":"2.0","id":7,"method":"item/commandExecution/requestApproval","params":{"command":"ls /tmp"}}
+EXPECT_IN_CONTAINS "accept"
+OUT {"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"command_execution","id":"cmd-1","command":"ls /tmp","output":"file1\nfile2\n"}}}
+OUT {"jsonrpc":"2.0","method":"turn/completed","params":{}}
+EXIT 0

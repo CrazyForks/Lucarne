@@ -1,0 +1,15 @@
+# Command catalog: /review args map to app-server custom review target.
+EXPECT_IN_CONTAINS "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":0,"result":{}}
+EXPECT_IN_CONTAINS "\"method\":\"initialized\""
+EXPECT_IN_CONTAINS "thread/start"
+OUT {"jsonrpc":"2.0","id":1,"result":{"threadId":"codex-command-thread"}}
+EXPECT_IN_CONTAINS "\"method\":\"review/start\""
+EXPECT_IN_CONTAINS "\"delivery\":\"inline\""
+EXPECT_IN_CONTAINS "\"type\":\"custom\""
+EXPECT_IN_CONTAINS "\"instructions\":\"focus on the runtime API\""
+OUT {"jsonrpc":"2.0","id":2,"result":{"turn":{"id":"review-turn-1","items":[],"status":"inProgress","error":null,"startedAt":null,"completedAt":null,"durationMs":null},"reviewThreadId":"codex-command-thread"}}
+OUT {"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"codex-command-thread","turn":{"id":"review-turn-1","items":[],"status":"inProgress","error":null,"startedAt":1,"completedAt":null,"durationMs":null}}}
+OUT {"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"codex-command-thread","turnId":"review-turn-1","item":{"type":"agent_message","id":"review-msg-1","text":"CUSTOM_REVIEW_OK"}}}
+OUT {"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"codex-command-thread","turn":{"id":"review-turn-1","items":[],"status":"completed","error":null,"startedAt":1,"completedAt":2,"durationMs":1},"usage":{"input_tokens":0,"output_tokens":0}}}
+EXIT 0

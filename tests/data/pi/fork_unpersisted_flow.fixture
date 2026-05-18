@@ -1,0 +1,11 @@
+# Pi RPC fork where Pi has switched runtime state but has not written the fork file yet.
+EXPECT_IN_CONTAINS "get_state"
+OUT {"id":"0","type":"response","command":"get_state","success":true,"data":{"sessionId":"s1","sessionFile":"/tmp/pi-fork-source.jsonl"}}
+EXPECT_IN_CONTAINS "prompt"
+OUT {"type":"agent_start"}
+EXPECT_IN_CONTAINS "\"type\":\"fork\""
+EXPECT_IN_CONTAINS "entry-1"
+OUT {"id":"2","type":"response","command":"fork","success":true,"data":{"text":"Fork from fake user prompt","cancelled":false}}
+EXPECT_IN_CONTAINS "\"type\":\"get_state\""
+OUT {"id":"3","type":"response","command":"get_state","success":true,"data":{"sessionId":"forked-unpersisted","sessionFile":"tests/data/pi/missing-fork-session.jsonl"}}
+EXIT 0

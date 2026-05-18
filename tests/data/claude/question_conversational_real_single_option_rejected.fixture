@@ -1,0 +1,9 @@
+OUT {"type":"system","subtype":"init","session_id":"sess-real-question-single-option","model":"claude-haiku-4-5"}
+EXPECT_IN_CONTAINS "default-only answer"
+OUT {"type":"assistant","message":{"id":"msg_real_question_single_1","type":"message","role":"assistant","model":"claude-haiku-4-5-20251001","content":[{"type":"tool_use","id":"toolu_real_question_single_1","name":"AskUserQuestion","input":{"questions":[{"question":"What would you like me to help you with?","header":"Task","multiSelect":false,"options":[{"label":"Continue","description":"Proceed to assist with your request"}]}]}}]}}
+OUT {"type":"assistant","message":{"id":"msg_real_question_single_ask","type":"message","role":"assistant","model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"What would you like me to help you with?"}]}}
+OUT {"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"InputValidationError: [ { \"origin\": \"array\", \"code\": \"too_small\", \"minimum\": 2, \"inclusive\": true, \"path\": [ \"questions\", 0, \"options\" ], \"message\": \"Too small: expected array to have >=2 items\" } ]","is_error":true,"tool_use_id":"toolu_real_question_single_1"}]},"toolUseResult":"InputValidationError: [ { \"origin\": \"array\", \"code\": \"too_small\", \"minimum\": 2, \"inclusive\": true, \"path\": [ \"questions\", 0, \"options\" ], \"message\": \"Too small: expected array to have >=2 items\" } ]"}
+OUT {"type":"assistant","message":{"id":"msg_real_question_single_retry","type":"message","role":"assistant","model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"I need at least 2 options. Let me rephrase:"}]}}
+OUT {"type":"result","subtype":"success","session_id":"sess-real-question-single-option","usage":{"input_tokens":10,"output_tokens":1}}
+EXPECT_IN_CONTAINS "Please continue."
+EXIT 0

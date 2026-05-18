@@ -1,0 +1,30 @@
+[package]
+name = "lucarned"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Single-process lucarne daemon composition root."
+
+[features]
+default = []
+memory-profiling = ["lucarne/memory-profiling"]
+
+[dependencies]
+clap = { workspace = true }
+async-trait = { workspace = true }
+lucarne = { path = "../lucarne" }
+lucarne-adapter = { path = "../lucarne-adapter" }
+lucarne-telegram = { path = "../lucarne-telegram" }
+lucarne-wechat = { path = "../lucarne-wechat" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-appender = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+reqwest = { workspace = true }
+dotenvy = "0.15"
+
+[dev-dependencies]
+tempfile = { workspace = true }

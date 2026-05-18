@@ -1,0 +1,11 @@
+# High-rate event burst used to stress the backpressure chain.
+OUT {"type":"system","subtype":"init","session_id":"sess-burst","model":"claude-sonnet-4"}
+EXPECT_IN_CONTAINS "burst"
+# 500 small assistant messages
+OUT_TMPL {"type":"assistant","message":{"id":"msg_${RAND_ID}","content":[{"type":"text","text":"tick 1"}]}}
+OUT_TMPL {"type":"assistant","message":{"id":"msg_${RAND_ID}","content":[{"type":"text","text":"tick 2"}]}}
+OUT_TMPL {"type":"assistant","message":{"id":"msg_${RAND_ID}","content":[{"type":"text","text":"tick 3"}]}}
+OUT_TMPL {"type":"assistant","message":{"id":"msg_${RAND_ID}","content":[{"type":"text","text":"tick 4"}]}}
+OUT_TMPL {"type":"assistant","message":{"id":"msg_${RAND_ID}","content":[{"type":"text","text":"tick 5"}]}}
+OUT {"type":"result","subtype":"success","session_id":"sess-burst","num_turns":1,"duration_ms":10,"usage":{"input_tokens":1,"output_tokens":1}}
+EXIT 0

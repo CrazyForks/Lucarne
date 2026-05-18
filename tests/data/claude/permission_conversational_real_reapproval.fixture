@@ -1,0 +1,7 @@
+OUT {"type":"system","subtype":"init","session_id":"sess-real-loop","model":"claude-haiku-4-5"}
+EXPECT_IN_CONTAINS "write the file"
+OUT {"type":"assistant","message":{"id":"msg_real_loop_1","type":"message","role":"assistant","model":"claude-haiku-4-5","content":[{"type":"text","text":"Now I'll create the live-output.txt file with the exact content requested:"},{"type":"tool_use","id":"toolu_real_loop_1","name":"Write","input":{"file_path":"/tmp/workdir/live-output.txt","content":"amux-live-tool"}}],"stop_reason":"tool_use","usage":{"input_tokens":10,"output_tokens":20}}}
+OUT {"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_real_loop_1","is_error":true,"content":"Claude requested permissions to write to /tmp/workdir/live-output.txt, but you haven't granted it yet."}]}}
+OUT {"type":"assistant","message":{"id":"msg_real_loop_ask_1","type":"message","role":"assistant","model":"claude-haiku-4-5","content":[{"type":"text","text":"I need permission to write the file. Can you approve the Write tool permission for creating ./live-output.txt?"}],"stop_reason":"end_turn","usage":{"input_tokens":7,"output_tokens":27}}}
+OUT {"type":"result","subtype":"success","session_id":"sess-real-loop","usage":{"input_tokens":7,"output_tokens":27}}
+EXIT 0

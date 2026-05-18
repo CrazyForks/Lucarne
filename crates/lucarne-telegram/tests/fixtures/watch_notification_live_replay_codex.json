@@ -1,0 +1,58 @@
+{
+  "provider_id": "codex",
+  "session_ref": "019dfc50-d714-7670-94a7-2bd90220b4b1",
+  "background_prompt": "Reply with exactly: LIVE_AMUX_WATCH_BACKGROUND_RECORDING",
+  "reply_prompt": "Reply with exactly: LIVE_AMUX_WATCH_REPLY_RECORDING",
+  "background_delay_ms": 25,
+  "background_events": [
+    {
+      "type": "message",
+      "role": "assistant",
+      "text": "LIVE_AMUX_WATCH_BACKGROUND_RECORDING"
+    },
+    {
+      "type": "turn_completed",
+      "turn_id": "019dfc50-e5e8-7333-a8f3-d6219c36f2b6",
+      "usage": null
+    }
+  ],
+  "submit_events": [
+    {
+      "type": "usage",
+      "input_tokens": 23168,
+      "output_tokens": 23,
+      "total_tokens": 30743,
+      "raw": {
+        "cache_read_tokens": 7552,
+        "input_tokens": 23168,
+        "output_tokens": 23
+      }
+    },
+    {
+      "type": "usage",
+      "input_tokens": null,
+      "output_tokens": null,
+      "total_tokens": null,
+      "raw": {}
+    },
+    {
+      "type": "message",
+      "role": "assistant",
+      "text": "LIVE_AMUX_WATCH_REPLY_RECORDING"
+    },
+    {
+      "type": "turn_completed",
+      "turn_id": "019dfc50-f42b-7230-a2a1-ef590e1573c7",
+      "usage": {
+        "input_tokens": 23168,
+        "output_tokens": 23,
+        "total_tokens": 30743,
+        "raw": {
+          "cache_read_tokens": 7552,
+          "input_tokens": 23168,
+          "output_tokens": 23
+        }
+      }
+    }
+  ]
+}

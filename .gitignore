@@ -1,0 +1,12 @@
+target/
+Cargo.lock.bak
+.claude/settings.local.json
+.worktrees/
+.env
+data/logs/
+data/state.sqlite3
+data/wechat-credentials.json
+data/tmp/
+data/instruments/
+
+data/wechat-contexts.json

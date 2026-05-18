@@ -1,0 +1,61 @@
+[package]
+name = "agent-sessions"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+
+[features]
+default = []
+codex = []
+claude = []
+copilot = ["dep:serde_yaml"]
+cursor = []
+gemini = []
+pi = []
+agent_session = []
+discovery = ["dep:walkdir"]
+watch = ["discovery", "agent_session", "dep:futures", "dep:notify", "dep:tokio", "dep:fsevent-sys"]
+memory-profiling = []
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+bytes = { workspace = true }
+tracing = { workspace = true }
+smol_str = { workspace = true }
+walkdir = { workspace = true, optional = true }
+serde_yaml = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+notify = { version = "6.1", optional = true, features = ["macos_kqueue"] }
+tokio = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+fsevent-sys = { version = "4.1", optional = true }
+
+[dev-dependencies]
+criterion = "0.5"
+dirs = { workspace = true }
+filetime = "0.2"
+walkdir = { workspace = true }
+tempfile = { workspace = true }
+
+[[bench]]
+name = "codex_parse"
+harness = false
+required-features = ["codex"]
+
+[[bench]]
+name = "claude_parse"
+harness = false
+required-features = ["claude"]
+
+[[bench]]
+name = "copilot_parse"
+harness = false
+required-features = ["copilot"]
+
+[[bench]]
+name = "codex_agent_session"
+harness = false
+required-features = ["codex", "agent_session"]

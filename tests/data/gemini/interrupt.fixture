@@ -1,0 +1,13 @@
+# Real Gemini cancel flow: permission approved, then client sends session/cancel and the turn ends as cancelled.
+EXPECT_IN_CONTAINS "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}
+EXPECT_IN_CONTAINS "\"method\":\"session/new\""
+OUT {"jsonrpc":"2.0","id":2,"result":{"sessionId":"gemini-sess-interrupt-real","modes":{"currentModeId":"default","availableModes":[{"id":"default","name":"Default"},{"id":"autoEdit","name":"Auto Edit"},{"id":"yolo","name":"YOLO"},{"id":"plan","name":"Plan"}]},"models":{"currentModelId":"gemini-2.5-flash-lite"}}}
+EXPECT_IN_CONTAINS "\"method\":\"session/prompt\""
+EXPECT_IN_CONTAINS "sleep 30"
+OUT {"jsonrpc":"2.0","id":77,"method":"session/request_permission","params":{"sessionId":"gemini-sess-interrupt-real","options":[{"optionId":"proceed_always","name":"Allow for this session","kind":"allow_always"},{"optionId":"proceed_once","name":"Allow","kind":"allow_once"},{"optionId":"cancel","name":"Reject","kind":"reject_once"}],"toolCall":{"toolCallId":"run_shell_command-1","status":"pending","title":"sleep 30","content":[],"locations":[],"kind":"execute"}}}
+EXPECT_IN_CONTAINS "\"optionId\":\"proceed_once\""
+EXPECT_IN_CONTAINS "\"method\":\"session/cancel\""
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"gemini-sess-interrupt-real","update":{"sessionUpdate":"tool_call_update","toolCallId":"run_shell_command-1","status":"completed","title":"sleep 30","content":[],"locations":[],"kind":"execute"}}}
+OUT {"jsonrpc":"2.0","id":3,"result":{"stopReason":"cancelled"}}
+EXIT 0

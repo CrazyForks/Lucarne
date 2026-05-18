@@ -1,0 +1,10 @@
+# Gemini ACP usage delta + turn summary.
+EXPECT_IN_CONTAINS "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}
+EXPECT_IN_CONTAINS "\"method\":\"session/new\""
+OUT {"jsonrpc":"2.0","id":2,"result":{"sessionId":"gemini-sess-usage","modes":{"currentModeId":"default","availableModes":[{"id":"default","name":"Default"},{"id":"auto_edit","name":"Auto Edit"},{"id":"yolo","name":"YOLO"},{"id":"plan","name":"Plan"}]},"models":{"currentModelId":"gemini-2.5-flash-lite"}}}
+EXPECT_IN_CONTAINS "\"method\":\"session/prompt\""
+EXPECT_IN_CONTAINS "measure usage"
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"gemini-sess-usage","update":{"sessionUpdate":"usage_update","cost":{"amount":0.25,"currency":"USD"}}}}
+OUT {"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn","usage":{"inputTokens":8,"outputTokens":6,"cachedReadTokens":1,"totalTokens":15}}}
+EXIT 0

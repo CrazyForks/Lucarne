@@ -1,0 +1,5 @@
+{"type":"user.message","data":{"content":"Fix the bug in main.rs"},"id":"evt1","timestamp":"2026-03-20T10:00:00Z"}
+{"type":"assistant.message","data":{"content":"I will inspect main.rs first.","toolRequests":[{"name":"read_file","toolCallId":"tool-1"}]},"id":"evt2","timestamp":"2026-03-20T10:00:03Z"}
+{"type":"tool.execution_start","data":{"toolName":"bash","toolCallId":"tool-2"},"id":"evt3","timestamp":"2026-03-20T10:00:04Z"}
+{"type":"tool.execution_complete","data":{"toolName":"bash","toolCallId":"tool-2"},"id":"evt4","timestamp":"2026-03-20T10:00:06Z"}
+{"type":"session.task_complete","data":{"summary":"Fixed the null pointer bug in main.rs\nAlso updated tests"},"id":"evt5","timestamp":"2026-03-20T11:00:00Z"}

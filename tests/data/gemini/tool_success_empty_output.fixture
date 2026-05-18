@@ -1,0 +1,10 @@
+# Gemini ACP tool success with empty output.
+EXPECT_IN_CONTAINS "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}
+EXPECT_IN_CONTAINS "\"method\":\"session/new\""
+OUT {"jsonrpc":"2.0","id":2,"result":{"sessionId":"gemini-sess-tool-empty","modes":{"currentModeId":"default","availableModes":[{"id":"default","name":"Default"},{"id":"auto_edit","name":"Auto Edit"},{"id":"yolo","name":"YOLO"},{"id":"plan","name":"Plan"}]},"models":{"currentModelId":"gemini-2.5-flash-lite"}}}
+EXPECT_IN_CONTAINS "\"method\":\"session/prompt\""
+EXPECT_IN_CONTAINS "run a quiet command"
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"gemini-sess-tool-empty","update":{"sessionUpdate":"tool_call","toolCallId":"tool-shell-2","title":"Run quiet shell","kind":"execute","status":"completed","rawInput":{"command":"true"}}}}
+OUT {"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn","usage":{"inputTokens":5,"outputTokens":1,"cachedReadTokens":0,"totalTokens":6}}}
+EXIT 0

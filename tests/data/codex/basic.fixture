@@ -1,0 +1,20 @@
+# Codex basic: thread/start handshake → one turn → item/completed → turn/completed
+#
+# Sequence:
+#   client → thread/start (id=1)
+#   server → thread/start response (threadId)
+#   client → turn/start (id=2)
+#   server → turn/started notification
+#   server → item/completed notification (assistant text)
+#   server → turn/completed notification (with usage)
+
+EXPECT_IN_CONTAINS "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":0,"result":{}}
+EXPECT_IN_CONTAINS "\"method\":\"initialized\""
+EXPECT_IN_CONTAINS "thread/start"
+OUT {"jsonrpc":"2.0","id":1,"result":{"threadId":"test-thread-basic"}}
+EXPECT_IN_CONTAINS "turn/start"
+OUT {"jsonrpc":"2.0","method":"turn/started","params":{}}
+OUT {"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"agent_message","id":"msg-1","text":"Hello from Codex!"}}}
+OUT {"jsonrpc":"2.0","method":"turn/completed","params":{"usage":{"input_tokens":10,"output_tokens":5}}}
+EXIT 0

@@ -1,0 +1,15 @@
+# Real-shape Codex interrupt flow where the shell command still completes after the turn is interrupted.
+
+EXPECT_IN_CONTAINS "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1}}
+EXPECT_IN_CONTAINS "\"method\":\"initialized\""
+EXPECT_IN_CONTAINS "\"method\":\"thread/start\""
+OUT {"jsonrpc":"2.0","id":1,"result":{"thread":{"id":"real-thread-interrupt-complete","status":{"type":"idle"}}}}
+EXPECT_IN_CONTAINS "\"method\":\"turn/start\""
+EXPECT_IN_CONTAINS "AFTER_INTERRUPT"
+OUT {"jsonrpc":"2.0","method":"item/started","params":{"item":{"type":"commandExecution","id":"call_real_interrupt_complete_1","command":"/bin/zsh -lc 'sleep 30; printf AFTER_INTERRUPT'","cwd":"/tmp/repo","processId":"57542","source":"unifiedExecStartup","status":"inProgress","commandActions":[{"type":"unknown","command":"sleep 30; printf AFTER_INTERRUPT"}],"aggregatedOutput":null,"exitCode":null,"durationMs":null},"threadId":"real-thread-interrupt-complete","turnId":"turn-real-interrupt-complete"}}
+EXPECT_IN_CONTAINS "\"method\":\"turn/interrupt\""
+EXPECT_IN_CONTAINS "\"turnId\":\"turn-real-interrupt-complete\""
+OUT {"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"real-thread-interrupt-complete","turn":{"id":"turn-real-interrupt-complete","items":[],"status":"interrupted","error":null}}}
+OUT {"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"commandExecution","id":"call_real_interrupt_complete_1","command":"/bin/zsh -lc 'sleep 30; printf AFTER_INTERRUPT'","cwd":"/tmp/repo","processId":"57542","source":"unifiedExecStartup","status":"completed","commandActions":[{"type":"unknown","command":"sleep 30; printf AFTER_INTERRUPT"}],"aggregatedOutput":"AFTER_INTERRUPT","exitCode":0,"durationMs":19990},"threadId":"real-thread-interrupt-complete","turnId":"turn-real-interrupt-complete"}}
+EXIT 0

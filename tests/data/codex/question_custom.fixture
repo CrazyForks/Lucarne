@@ -1,0 +1,14 @@
+# Codex question approval: explicit structured answers should be mapped back to question IDs.
+
+EXPECT_IN_CONTAINS "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":0,"result":{}}
+EXPECT_IN_CONTAINS "\"method\":\"initialized\""
+EXPECT_IN_CONTAINS "thread/start"
+OUT {"jsonrpc":"2.0","id":1,"result":{"threadId":"test-thread-question-custom"}}
+EXPECT_IN_CONTAINS "\"method\":\"turn/start\""
+OUT {"jsonrpc":"2.0","id":19,"method":"item/tool/requestUserInput","params":{"questions":[{"id":"confirm_path","header":"Confirm","question":"Proceed with the plan?","options":[{"label":"Yes (Recommended)"},{"label":"No"},{"label":"Maybe"}],"multiSelect":true},{"id":"pick_model","header":"Model","question":"Choose the model","options":[{"label":"gpt-5 (Recommended)"},{"label":"gpt-5-mini"}]}]}}
+EXPECT_IN_CONTAINS "\"confirm_path\":{\"answers\":[\"No\",\"Maybe\"]}"
+EXPECT_IN_CONTAINS "\"pick_model\":{\"answers\":[\"gpt-5-mini\"]}"
+OUT {"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"agentMessage","id":"msg-question-custom","text":"Captured your custom answers.","phase":"final_answer"}}}
+OUT {"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"turn-question-custom","status":"completed"}}}
+EXIT 0

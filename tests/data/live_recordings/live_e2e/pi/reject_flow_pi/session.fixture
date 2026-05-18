@@ -1,0 +1,18 @@
+# Recorded live capture for pi
+EXPECT_IN_CONTAINS_NEXT "\"id\":\"0\""
+EXPECT_IN_CONTAINS_NEXT "\"type\":\"get_state\""
+OUT {"id":"0","type":"response","command":"get_state","success":true,"data":{"model":{"provider":"deepseek","id":"deepseek-v4-flash","name":"DeepSeek V4 Flash","reasoning":true},"thinkingLevel":"high","sessionFile":"/tmp/amux-pi-reject/session.jsonl","sessionId":"pi-reject","cwd":"/tmp/amux-pi-reject"}}
+EXPECT_IN_CONTAINS_NEXT "\"id\":\"1\""
+EXPECT_IN_CONTAINS_NEXT "reject-target.txt"
+EXPECT_IN_CONTAINS_NEXT "Write tool"
+EXPECT_IN_CONTAINS_NEXT "\"type\":\"prompt\""
+OUT {"id":"1","type":"response","command":"prompt","success":true}
+OUT {"type":"agent_start"}
+OUT {"type":"turn_start"}
+OUT {"type":"extension_ui_request","id":"confirm-write","method":"confirm","message":"Allow write outside the workspace?","args":{"risk":"high","tool":"write"}}
+EXPECT_IN_CONTAINS_NEXT "\"confirmed\":false"
+EXPECT_IN_CONTAINS_NEXT "\"id\":\"confirm-write\""
+OUT {"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"Permission denied. I did not write the file."}],"usage":{"input":1,"output":1}},"toolResults":[]}
+OUT {"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"Permission denied. I did not write the file."}]}]}
+EXPECT_SIGNAL_NEXT SIGTERM
+EXIT 0

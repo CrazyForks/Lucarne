@@ -1,0 +1,28 @@
+[package]
+name = "lucarne-wechat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WeChat notification channel implementation for lucarne."
+
+[dependencies]
+lucarne = { path = "../lucarne" }
+lucarne-adapter = { path = "../lucarne-adapter" }
+lucarne-channel = { path = "../lucarne-channel" }
+wechat-ilink = "0.5"
+
+async-trait = { workspace = true }
+futures = { workspace = true }
+qrcode = { version = "0.14.1", default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+smol_str = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true }
+rusqlite = { workspace = true }
+
+[dev-dependencies]
+agent-sessions = { path = "../../agent-sessions", features = ["discovery", "agent_session", "watch", "codex"] }
+tempfile = { workspace = true }

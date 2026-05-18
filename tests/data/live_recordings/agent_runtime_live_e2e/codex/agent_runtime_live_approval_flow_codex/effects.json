@@ -1,0 +1,6 @@
+{
+  "writes": [],
+  "deletes": [
+    "delete-target.txt"
+  ]
+}

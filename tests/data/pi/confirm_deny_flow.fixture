@@ -1,0 +1,10 @@
+# Pi RPC permission confirm deny fixture
+EXPECT_IN_CONTAINS "get_state"
+OUT {"id":"0","type":"response","command":"get_state","success":true,"data":{"sessionId":"s1","sessionFile":"/tmp/pi-confirm-deny.jsonl"}}
+EXPECT_IN_CONTAINS "prompt"
+OUT {"type":"agent_start"}
+OUT {"type":"extension_ui_request","id":"ext-deny","method":"confirm","message":"Allow dangerous operation?","args":{"risk":"high"}}
+EXPECT_IN_CONTAINS "extension_ui_response"
+EXPECT_IN_CONTAINS "\"confirmed\":false"
+OUT {"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"Denied"}],"usage":{"input":5,"output":1}}}
+EXIT 0

@@ -1,0 +1,13 @@
+# Codex exec alias approval: legacy alias request accepted by client.
+
+EXPECT_IN_CONTAINS "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":0,"result":{}}
+EXPECT_IN_CONTAINS "\"method\":\"initialized\""
+EXPECT_IN_CONTAINS "thread/start"
+OUT {"jsonrpc":"2.0","id":1,"result":{"threadId":"test-thread-perm-exec-alias"}}
+EXPECT_IN_CONTAINS "turn/start"
+OUT {"jsonrpc":"2.0","id":9,"method":"execCommandApproval","params":{"command":"pwd"}}
+EXPECT_IN_CONTAINS "\"decision\":\"accept\""
+OUT {"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"commandExecution","id":"cmd-alias-1","command":"pwd","aggregatedOutput":"/tmp/repo"}}}
+OUT {"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"turn-perm-exec-alias","status":"completed"}}}
+EXIT 0

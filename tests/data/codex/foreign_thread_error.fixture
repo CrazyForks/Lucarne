@@ -1,0 +1,13 @@
+# Codex should ignore foreign-thread notifications and surface current-thread error.
+
+EXPECT_IN_CONTAINS "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":0,"result":{}}
+EXPECT_IN_CONTAINS "\"method\":\"initialized\""
+EXPECT_IN_CONTAINS "thread/start"
+OUT {"jsonrpc":"2.0","id":1,"result":{"threadId":"test-thread-current"}}
+EXPECT_IN_CONTAINS "turn/start"
+OUT {"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"other-thread","item":{"type":"agent_message","id":"msg-foreign","text":"Ignore me"}}}
+OUT {"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"test-thread-current","item":{"type":"agent_message","id":"msg-current","text":"Current thread response."}}}
+OUT {"jsonrpc":"2.0","method":"error","params":{"threadId":"other-thread","message":"ignore foreign error"}}
+OUT {"jsonrpc":"2.0","method":"error","params":{"threadId":"test-thread-current","message":"disk full"}}
+EXIT 0

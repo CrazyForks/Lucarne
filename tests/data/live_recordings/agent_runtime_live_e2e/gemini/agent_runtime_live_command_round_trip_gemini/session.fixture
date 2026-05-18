@@ -1,0 +1,16 @@
+# Recorded live capture for gemini ACP command catalog and invocation
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentInfo":{"name":"gemini-cli","title":"Gemini CLI","version":"0.38.2"},"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true}}}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"session/new\""
+OUT {"jsonrpc":"2.0","id":2,"result":{"sessionId":"gemini-live-command-session","modes":{"availableModes":[{"id":"default","name":"Default"}],"currentModeId":"default"},"models":{"availableModels":[{"modelId":"gemini-2.5-flash-lite","name":"gemini-2.5-flash-lite"}],"currentModelId":"gemini-2.5-flash-lite"}}}
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"gemini-live-command-session","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"help","description":"Show available commands"},{"name":"about","description":"Show version and environment info"}]}}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"session/prompt\""
+EXPECT_IN_CONTAINS_NEXT "\"text\":\"/help\""
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"gemini-live-command-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"GEMINI_HELP_OK"}}}}
+OUT {"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn","usage":{"inputTokens":0,"outputTokens":1,"cachedReadTokens":0,"totalTokens":1}}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"session/prompt\""
+EXPECT_IN_CONTAINS_NEXT "\"text\":\"/about\""
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"gemini-live-command-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"GEMINI_ABOUT_OK"}}}}
+OUT {"jsonrpc":"2.0","id":4,"result":{"stopReason":"end_turn","usage":{"inputTokens":0,"outputTokens":1,"cachedReadTokens":0,"totalTokens":1}}}
+EXPECT_SIGNAL_NEXT SIGTERM
+EXIT 0

@@ -1,0 +1,16 @@
+# Codex question approval: multiple questions should default to the first option of each non-empty question.
+
+EXPECT_IN_CONTAINS "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":0,"result":{}}
+EXPECT_IN_CONTAINS "\"method\":\"initialized\""
+EXPECT_IN_CONTAINS "thread/start"
+OUT {"jsonrpc":"2.0","id":1,"result":{"threadId":"test-thread-question-multi"}}
+EXPECT_IN_CONTAINS "turn/start"
+OUT {"jsonrpc":"2.0","id":16,"method":"item/tool/requestUserInput","params":{"questions":[{"id":"confirm_path","header":"Confirm","question":"Proceed with the plan?","options":[{"label":"Yes (Recommended)"},{"label":"No"}]},{"id":"empty_options","header":"Skip","question":"No defaults available","options":[]},{"id":"pick_model","header":"Model","question":"Choose the model","options":[{"label":"gpt-5 (Recommended)"},{"label":"gpt-5-mini"}]}]}}
+EXPECT_IN_CONTAINS "\"confirm_path\""
+EXPECT_IN_CONTAINS "\"Yes (Recommended)\""
+EXPECT_IN_CONTAINS "\"pick_model\""
+EXPECT_IN_CONTAINS "\"gpt-5 (Recommended)\""
+OUT {"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"agentMessage","id":"msg-question-multi","text":"Captured both answers.","phase":"final_answer"}}}
+OUT {"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"turn-question-multi","status":"completed"}}}
+EXIT 0

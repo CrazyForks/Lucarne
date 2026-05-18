@@ -1,0 +1,13 @@
+OUT {"type":"system","subtype":"init","session_id":"sess-perm-conv","model":"claude-sonnet-4"}
+EXPECT_IN_CONTAINS "write the file"
+OUT {"type":"assistant","message":{"id":"msg_perm_conv_1","content":[{"type":"tool_use","id":"toolu_perm_conv_1","name":"Write","input":{"file_path":"./danger.txt","content":"boom"}}]}}
+OUT {"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_perm_conv_1","is_error":true,"content":"Claude requested permissions to write to ./danger.txt, but you haven't granted it yet."}]}}
+OUT {"type":"assistant","message":{"id":"msg_perm_conv_ask","content":[{"type":"text","text":"I need permission to write ./danger.txt."}]}}
+OUT {"type":"result","subtype":"success","session_id":"sess-perm-conv","usage":{"input_tokens":2,"output_tokens":1}}
+EXPECT_IN_CONTAINS "approve"
+OUT {"type":"user","message":{"role":"user","content":[{"type":"text","text":"approval received"}]}}
+OUT {"type":"assistant","message":{"id":"msg_perm_conv_2","content":[{"type":"tool_use","id":"toolu_perm_conv_2","name":"Write","input":{"file_path":"./danger.txt","content":"boom"}},{"type":"text","text":"Proceeding."}]}}
+OUT {"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_perm_conv_2","content":"wrote ./danger.txt"}]}}
+OUT {"type":"assistant","message":{"id":"msg_perm_conv_3","content":[{"type":"text","text":"Done."}]}}
+OUT {"type":"result","subtype":"success","session_id":"sess-perm-conv","usage":{"input_tokens":4,"output_tokens":2}}
+EXIT 0

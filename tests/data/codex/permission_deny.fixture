@@ -1,0 +1,13 @@
+# Codex permission deny: alias file-change approval request rejected by client.
+
+EXPECT_IN_CONTAINS "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":0,"result":{}}
+EXPECT_IN_CONTAINS "\"method\":\"initialized\""
+EXPECT_IN_CONTAINS "thread/start"
+OUT {"jsonrpc":"2.0","id":1,"result":{"threadId":"test-thread-perm-deny"}}
+EXPECT_IN_CONTAINS "turn/start"
+OUT {"jsonrpc":"2.0","id":7,"method":"applyPatchApproval","params":{"file":"/tmp/repo/README.md"}}
+EXPECT_IN_CONTAINS "\"decision\":\"reject\""
+OUT {"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"fileChange","id":"patch-1","status":"rejected","changes":[{"path":"/tmp/repo/README.md","kind":"modify","unified_diff":"@@\n-old\n+new\n"}]}}}
+OUT {"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"turn-perm-deny","status":"completed"}}}
+EXIT 0

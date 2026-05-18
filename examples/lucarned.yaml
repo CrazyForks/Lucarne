@@ -1,0 +1,32 @@
+agents:
+  - claude
+  - codex
+  - copilot
+  - gemini
+  - pi
+
+state:
+  db: ~/.lucarned/state.sqlite3
+
+logging:
+  filter: "info,lucarne=info,lucarned=info"
+  dir: ~/.lucarned/logs
+  max_files: 16
+
+turn:
+  inactivity_secs: 1800 # 30min 无事件则 turn 失败
+  deadline_secs: 3600 # 1h turn 绝对上限
+
+session:
+  idle_timeout_secs: 7200 # 2h 闲置自动关闭
+
+channels:
+  telegram:
+    enabled: true
+    token: "123456:TELEGRAM_BOT_TOKEN"
+    entry_chat_id: "123456789"
+
+  wechat:
+    enabled: true
+    credential_path: ~/.lucarned/wechat-credentials.json
+    force_login: false

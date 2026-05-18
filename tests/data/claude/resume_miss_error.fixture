@@ -1,0 +1,4 @@
+OUT {"type":"system","subtype":"init","session_id":"fresh-new","model":"claude-sonnet-4"}
+EXPECT_IN_CONTAINS "continue"
+OUT {"type":"result","subtype":"error_during_execution","session_id":"fresh-new","result":"No conversation found with session ID: sess-dead"}
+EXIT 1

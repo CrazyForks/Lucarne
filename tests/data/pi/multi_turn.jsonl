@@ -1,0 +1,3 @@
+{"type":"agent_start"}
+{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"First response"}],"usage":{"input":50,"output":25,"cacheRead":0,"cost":{"total":0.001}}}}
+{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"Second response"}],"usage":{"input":30,"output":20,"cacheRead":10,"cost":{"total":0.0015}}}}

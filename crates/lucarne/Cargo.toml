@@ -1,0 +1,40 @@
+[package]
+name = "lucarne"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Agent multiplexer: protocol-normalizing daemon for AI agent CLIs."
+
+[features]
+default = ["claude", "codex", "copilot", "gemini", "pi"]
+claude = []
+codex = []
+copilot = []
+gemini = []
+pi = []
+memory-profiling = ["agent-sessions/memory-profiling"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+bytes = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+nix = { workspace = true }
+tempfile = { workspace = true }
+smol_str = { workspace = true }
+base64 = "0.22"
+rusqlite = { workspace = true }
+linkme = "0.3.35"
+once_cell = { workspace = true }
+agent-sessions = { path = "../../agent-sessions", features = ["discovery", "agent_session", "watch", "claude", "codex", "copilot", "gemini", "pi"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+once_cell = { workspace = true }
+tempfile = { workspace = true }

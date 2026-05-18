@@ -1,0 +1,7 @@
+OUT {"type":"system","subtype":"init","session_id":"sess-real-delete","model":"claude-haiku-4-5"}
+EXPECT_IN_CONTAINS "delete"
+OUT {"type":"assistant","message":{"id":"msg_real_delete_1","type":"message","role":"assistant","model":"claude-haiku-4-5","content":[{"type":"thinking","thinking":"","signature":"sig-real-delete-1"},{"type":"tool_use","id":"toolu_real_delete_1","name":"Bash","input":{"command":"rm ./delete-target.txt","description":"Delete the file delete-target.txt from current directory"}}],"stop_reason":"tool_use","usage":{"input_tokens":10,"output_tokens":163}}}
+OUT {"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"rm in '/tmp/workdir/delete-target.txt' was blocked. For security, Claude Code may only remove files from the allowed working directories for this session: '/tmp/workdir'.","is_error":true,"tool_use_id":"toolu_real_delete_1"}]}}
+OUT {"type":"assistant","message":{"id":"msg_real_delete_done","type":"message","role":"assistant","model":"claude-haiku-4-5","content":[{"type":"text","text":"DELETE_OK"}],"stop_reason":"end_turn","usage":{"input_tokens":7,"output_tokens":6}}}
+OUT {"type":"result","subtype":"success","session_id":"sess-real-delete","usage":{"input_tokens":7,"output_tokens":6}}
+EXIT 0

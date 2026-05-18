@@ -1,0 +1,9 @@
+{
+  "writes": [
+    {
+      "path": "live-output.txt",
+      "contents_base64": "YW11eC1saXZlLXRvb2w="
+    }
+  ],
+  "deletes": []
+}

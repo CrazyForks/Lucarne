@@ -1,0 +1,9 @@
+# Pi RPC model catalog fixture — verify adapter sends get_available_models
+EXPECT_IN_CONTAINS "get_state"
+OUT {"id":"0","type":"response","command":"get_state","success":true,"data":{"sessionId":"s1","sessionFile":"/tmp/pi-mcat.jsonl"}}
+EXPECT_IN_CONTAINS "prompt"
+OUT {"type":"agent_start"}
+EXPECT_IN_CONTAINS_NEXT "\"type\":\"get_available_models\""
+OUT {"id":"1","type":"response","command":"get_available_models","success":true,"data":{"models":[{"provider":"xai","id":"grok-4","supportsReasoning":false}]}}
+OUT {"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input":3,"output":1}}}
+EXIT 0

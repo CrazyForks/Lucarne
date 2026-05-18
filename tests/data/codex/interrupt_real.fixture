@@ -1,0 +1,14 @@
+# Real-shape Codex interrupt flow captured from live app-server I/O.
+
+EXPECT_IN_CONTAINS "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1}}
+EXPECT_IN_CONTAINS "\"method\":\"initialized\""
+EXPECT_IN_CONTAINS "\"method\":\"thread/start\""
+OUT {"jsonrpc":"2.0","id":1,"result":{"thread":{"id":"real-thread-interrupt","status":{"type":"idle"}}}}
+EXPECT_IN_CONTAINS "\"method\":\"turn/start\""
+EXPECT_IN_CONTAINS "sleep 30"
+OUT {"jsonrpc":"2.0","method":"item/started","params":{"item":{"type":"commandExecution","id":"call_real_interrupt_1","command":"/bin/zsh -lc 'sleep 30'","cwd":"/tmp/repo","processId":"93859","source":"unifiedExecStartup","status":"inProgress","commandActions":[{"type":"unknown","command":"sleep 30"}],"aggregatedOutput":null,"exitCode":null,"durationMs":null},"threadId":"real-thread-interrupt","turnId":"turn-real-interrupt"}}
+EXPECT_IN_CONTAINS "\"method\":\"turn/interrupt\""
+EXPECT_IN_CONTAINS "\"turnId\":\"turn-real-interrupt\""
+OUT {"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"real-thread-interrupt","turn":{"id":"turn-real-interrupt","items":[],"status":"interrupted","error":null}}}
+EXIT 0

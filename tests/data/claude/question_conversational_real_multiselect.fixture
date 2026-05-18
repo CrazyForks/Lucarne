@@ -1,0 +1,6 @@
+OUT {"type":"system","subtype":"init","session_id":"sess-real-question-multiselect","model":"claude-haiku-4-5"}
+EXPECT_IN_CONTAINS "pick preferences"
+OUT {"type":"assistant","message":{"id":"msg_real_question_multi_1","type":"message","role":"assistant","model":"claude-haiku-4-5-20251001","content":[{"type":"tool_use","id":"toolu_real_question_multi_1","name":"AskUserQuestion","input":{"questions":[{"question":"Which of the following interests you most?","header":"Preference","multiSelect":true,"options":[{"label":"Red","description":"Option focused on warm, energetic approaches"},{"label":"Blue","description":"Option focused on cool, analytical approaches"},{"label":"Green","description":"Option focused on balanced, growth-oriented approaches"}]}]}}]}}
+OUT {"type":"result","subtype":"success","session_id":"sess-real-question-multiselect","usage":{"input_tokens":0,"output_tokens":1}}
+EXPECT_IN_CONTAINS "Preference: Red, Green"
+EXIT 0

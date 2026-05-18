@@ -1,0 +1,13 @@
+# Codex question request: default first option answer should be sent back.
+
+EXPECT_IN_CONTAINS "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":0,"result":{}}
+EXPECT_IN_CONTAINS "\"method\":\"initialized\""
+EXPECT_IN_CONTAINS "thread/start"
+OUT {"jsonrpc":"2.0","id":1,"result":{"threadId":"test-thread-question"}}
+EXPECT_IN_CONTAINS "turn/start"
+OUT {"jsonrpc":"2.0","id":15,"method":"item/tool/requestUserInput","params":{"itemId":"call-question-1","threadId":"test-thread-question","turnId":"turn-question","questions":[{"id":"confirm_path","header":"Confirm","question":"Proceed with the plan?","options":[{"label":"Yes (Recommended)","description":"Continue the current plan."},{"label":"No","description":"Stop and revisit the approach."}]}]}}
+EXPECT_IN_CONTAINS "\"confirm_path\":{\"answers\":[\"Yes (Recommended)\"]}"
+OUT {"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"agent_message","id":"msg-question","text":"Thanks for answering."}}}
+OUT {"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"turn-question","status":"completed"}}}
+EXIT 0

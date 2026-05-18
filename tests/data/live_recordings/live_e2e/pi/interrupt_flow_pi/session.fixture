@@ -1,0 +1,16 @@
+# Recorded live capture for pi
+EXPECT_IN_CONTAINS_NEXT "\"id\":\"0\""
+EXPECT_IN_CONTAINS_NEXT "\"type\":\"get_state\""
+OUT {"id":"0","type":"response","command":"get_state","success":true,"data":{"sessionId":"pi-live-interrupt","sessionFile":"/tmp/amux-pi-live-interrupt/session.jsonl"}}
+EXPECT_IN_CONTAINS_NEXT "\"id\":\"1\""
+EXPECT_IN_CONTAINS_NEXT "\"type\":\"prompt\""
+OUT {"id":"1","type":"response","command":"prompt","success":true}
+OUT {"type":"agent_start"}
+OUT {"type":"turn_start"}
+EXPECT_IN_CONTAINS_NEXT "\"id\":\"2\""
+EXPECT_IN_CONTAINS_NEXT "\"type\":\"abort\""
+OUT {"id":"2","type":"response","command":"abort","success":true}
+OUT {"type":"turn_end","message":{"role":"assistant","content":[],"stopReason":"aborted","timestamp":1778394023316,"errorMessage":"Request was aborted"},"toolResults":[]}
+OUT {"type":"agent_end","messages":[{"role":"assistant","content":[],"stopReason":"aborted","timestamp":1778394023316,"errorMessage":"Request was aborted"}]}
+EXPECT_SIGNAL_NEXT SIGTERM
+EXIT 0

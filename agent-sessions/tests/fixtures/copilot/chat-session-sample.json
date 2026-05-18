@@ -1,0 +1,65 @@
+{
+  "version": 3,
+  "sessionId": "copilot-chat-001",
+  "workspaceId": "workspace-123",
+  "responderUsername": "GitHub Copilot",
+  "initialLocation": "panel",
+  "mode": {
+    "kind": "agent"
+  },
+  "selectedModel": {
+    "identifier": "copilot/claude-opus-4.5"
+  },
+  "requests": [
+    {
+      "requestId": "request_2eef2349-1624-4da0-9078-ab340674c658",
+      "message": {
+        "parts": [
+          {
+            "text": "How do I implement a trait in Rust?",
+            "kind": "text"
+          }
+        ],
+        "text": "How do I implement a trait in Rust?"
+      },
+      "variableData": {
+        "variables": []
+      },
+      "response": [
+        {
+          "value": "To implement a trait in Rust, you use the `impl` keyword.",
+          "kind": "markdownContent"
+        }
+      ],
+      "agent": {
+        "id": "github.copilot.default",
+        "name": "GitHub Copilot"
+      }
+    },
+    {
+      "requestId": "request_8a3b4c5d-6e7f-8901-2345-678901234567",
+      "message": {
+        "parts": [
+          {
+            "text": "What is the difference between &str and String?",
+            "kind": "text"
+          }
+        ],
+        "text": "What is the difference between &str and String?"
+      },
+      "variableData": {
+        "variables": []
+      },
+      "response": [
+        {
+          "value": "String owns data, &str borrows it.",
+          "kind": "markdownContent"
+        }
+      ],
+      "agent": {
+        "id": "github.copilot.default",
+        "name": "GitHub Copilot"
+      }
+    }
+  ]
+}

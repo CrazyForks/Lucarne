@@ -1,0 +1,8 @@
+# Pi RPC resume fixture — adapter passes --session <path>
+EXPECT_IN_CONTAINS "get_state"
+OUT {"id":"0","type":"response","command":"get_state","success":true,"data":{"sessionId":"s1","sessionFile":"/tmp/pi-resume-session.jsonl"}}
+EXPECT_IN_CONTAINS "prompt"
+OUT {"type":"agent_start"}
+OUT {"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"Resumed session"}}
+OUT {"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"Resumed session"}],"usage":{"input":5,"output":3}}}
+EXIT 0

@@ -1,0 +1,14 @@
+# Generic runtime invoke_command(status) must dispatch through amux's
+# AdapterMapped source when Codex does not expose /status in the provider-native catalog.
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":0,"result":{}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"initialized\""
+EXPECT_IN_CONTAINS_NEXT "thread/start"
+OUT {"jsonrpc":"2.0","id":1,"result":{"threadId":"codex-adapter-status-thread"}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"thread/read\""
+EXPECT_IN_CONTAINS "\"threadId\":\"codex-adapter-status-thread\""
+OUT {"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"threadId":"codex-adapter-status-thread","turnId":"turn-status","tokenUsage":{"total":{"totalTokens":10731300,"inputTokens":10700000,"cachedInputTokens":10200000,"outputTokens":31300,"reasoningOutputTokens":1200},"last":{"totalTokens":14000,"inputTokens":13613,"cachedInputTokens":12000,"outputTokens":387,"reasoningOutputTokens":40},"modelContextWindow":258400,"compactions":0}}}
+OUT {"jsonrpc":"2.0","id":2,"result":{"thread":{"id":"codex-adapter-status-thread","status":{"type":"idle"},"cwd":"/tmp/project","cliVersion":"0.124.0","instructionSources":["/Users/era/.codex/AGENTS.md"]},"cwd":"/tmp/project"}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"config/read\""
+OUT {"jsonrpc":"2.0","id":3,"result":{"config":{"model":"gpt-5.4","model_reasoning_effort":"low","approval_policy":"on-request","sandbox_mode":"workspace-write"}}}
+EXIT 0

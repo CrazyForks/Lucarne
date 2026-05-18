@@ -1,0 +1,9 @@
+# Pi RPC permission select fixture — extension_ui_request round-trip
+EXPECT_IN_CONTAINS "get_state"
+OUT {"id":"0","type":"response","command":"get_state","success":true,"data":{"sessionId":"s1","sessionFile":"/tmp/pi-permsel.jsonl"}}
+EXPECT_IN_CONTAINS "prompt"
+OUT {"type":"agent_start"}
+OUT {"type":"extension_ui_request","id":"ext-1","method":"select","message":"Pick an option","args":{"options":[{"label":"Option A","description":"First choice"},{"label":"Option B","description":"Second choice"}]}}
+EXPECT_IN_CONTAINS_NEXT "extension_ui_response"
+OUT {"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"Selected"}],"usage":{"input":5,"output":1}}}
+EXIT 0

@@ -1,0 +1,8 @@
+# Pi RPC interrupt fixture — verify adapter sends abort
+EXPECT_IN_CONTAINS "get_state"
+OUT {"id":"0","type":"response","command":"get_state","success":true,"data":{"sessionId":"s1","sessionFile":"/tmp/pi-abrt.jsonl"}}
+EXPECT_IN_CONTAINS "prompt"
+OUT {"type":"agent_start"}
+OUT {"type":"turn_start"}
+EXPECT_IN_CONTAINS_NEXT "\"type\":\"abort\""
+EXIT 0

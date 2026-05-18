@@ -1,0 +1,15 @@
+# Real-shape Codex file-change approval denied by client.
+
+EXPECT_IN_CONTAINS "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1}}
+EXPECT_IN_CONTAINS "\"method\":\"initialized\""
+EXPECT_IN_CONTAINS "\"method\":\"thread/start\""
+OUT {"jsonrpc":"2.0","id":1,"result":{"thread":{"id":"real-thread-file-change-deny","status":{"type":"idle"}}}}
+EXPECT_IN_CONTAINS "\"method\":\"turn/start\""
+OUT {"jsonrpc":"2.0","method":"thread/status/changed","params":{"threadId":"real-thread-file-change-deny","status":{"type":"active","activeFlags":["waitingOnApproval"]}}}
+OUT {"jsonrpc":"2.0","id":0,"method":"item/fileChange/requestApproval","params":{"threadId":"real-thread-file-change-deny","turnId":"turn-file-change-deny","itemId":"call_file_deny_1","reason":"Do you want to allow me to apply the requested file change?","grantRoot":"/tmp/repo"}}
+EXPECT_IN_CONTAINS "\"decision\":\"reject\""
+OUT {"jsonrpc":"2.0","method":"thread/status/changed","params":{"threadId":"real-thread-file-change-deny","status":{"type":"active","activeFlags":[]}}}
+OUT {"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"fileChange","id":"call_file_deny_1","status":"rejected","changes":[{"path":"/tmp/repo/README.md","kind":"modify","unified_diff":"@@\n-old\n+new\n"}]}}}
+OUT {"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"turn-file-change-deny","status":"completed"}}}
+EXIT 0

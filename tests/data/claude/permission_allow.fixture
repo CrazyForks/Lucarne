@@ -1,0 +1,13 @@
+# Permission: assistant wants Bash; agent emits control_request; host must reply before more output
+OUT {"type":"system","subtype":"init","session_id":"sess-perm","model":"claude-sonnet-4"}
+EXPECT_IN_CONTAINS "delete logs"
+OUT {"type":"assistant","message":{"id":"msg_p1","content":[{"type":"text","text":"Running rm."}]}}
+OUT {"type":"control_request","request_id":"req_42","request":{"tool":"Bash","input":{"command":"rm -rf /tmp/logs"}}}
+# Block until amux writes the control_response on stdin.
+EXPECT_IN_CONTAINS "\"request_id\":\"req_42\""
+EXPECT_IN_CONTAINS "\"behavior\":\"allow\""
+OUT {"type":"assistant","message":{"id":"msg_p2","content":[{"type":"tool_use","id":"tu_42","name":"Bash","input":{"command":"rm -rf /tmp/logs"}}]}}
+OUT {"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu_42","content":[{"type":"text","text":""}]}]}}
+OUT {"type":"assistant","message":{"id":"msg_p3","content":[{"type":"text","text":"Done."}]}}
+OUT {"type":"result","subtype":"success","session_id":"sess-perm","num_turns":1,"duration_ms":300,"usage":{"input_tokens":30,"output_tokens":20}}
+EXIT 0

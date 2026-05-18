@@ -1,0 +1,8 @@
+# Pi RPC new_session command fixture
+EXPECT_IN_CONTAINS "get_state"
+OUT {"id":"0","type":"response","command":"get_state","success":true,"data":{"sessionId":"s1","sessionFile":"/tmp/pi-new-source.jsonl"}}
+EXPECT_IN_CONTAINS "prompt"
+OUT {"type":"agent_start"}
+EXPECT_IN_CONTAINS "\"type\":\"new_session\""
+OUT {"id":"2","type":"response","command":"new_session","success":true,"data":{"sessionId":"new-1","sessionFile":"/tmp/pi-new-session.jsonl"}}
+EXIT 0

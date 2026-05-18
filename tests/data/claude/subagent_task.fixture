@@ -1,0 +1,7 @@
+# Subagent Task tool_use preserves child identity metadata
+OUT {"type":"system","subtype":"init","session_id":"sess-subagent","model":"claude-opus-4"}
+EXPECT_IN_CONTAINS "delegate investigation"
+OUT {"type":"assistant","message":{"id":"msg_subagent_1","content":[{"type":"tool_use","id":"tu_subagent_1","name":"Task","input":{"prompt":"Inspect the parser","subagent_type":"explorer","model":"opus","thread_id":"child-thread-1","session_ref":"child-session-1","agent_id":"agent-1","nickname":"Parser","role":"explorer","status":"running","message":"child started"}}]}}
+OUT {"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu_subagent_1","content":[{"type":"text","text":"done"}]}]}}
+OUT {"type":"result","subtype":"success","session_id":"sess-subagent","num_turns":1,"duration_ms":250,"usage":{"input_tokens":20,"output_tokens":15}}
+EXIT 0

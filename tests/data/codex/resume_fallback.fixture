@@ -1,0 +1,21 @@
+# Codex resume fallback: stale thread/resume should fall back to fresh thread/start.
+#
+# Sequence:
+#   client → thread/resume (id=1)
+#   server → thread/resume error
+#   client → thread/start (id=2)
+#   server → thread/start response
+#   client → turn/start (id=3)
+#   server → assistant item + turn/completed
+
+EXPECT_IN_CONTAINS "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":0,"result":{}}
+EXPECT_IN_CONTAINS "\"method\":\"initialized\""
+EXPECT_IN_CONTAINS "thread/resume"
+OUT {"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"unknown thread"}}
+EXPECT_IN_CONTAINS "thread/start"
+OUT {"jsonrpc":"2.0","id":2,"result":{"threadId":"test-thread-fresh-after-resume"}}
+EXPECT_IN_CONTAINS "turn/start"
+OUT {"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"agent_message","id":"msg-resume-fallback","text":"Fresh thread after resume failure."}}}
+OUT {"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"turn-resume-fallback","status":"completed","usage":{"input_tokens":7,"output_tokens":4}}}}
+EXIT 0

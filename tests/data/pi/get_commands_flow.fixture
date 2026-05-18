@@ -1,0 +1,8 @@
+# Pi RPC get_commands/list_commands fixture
+EXPECT_IN_CONTAINS "get_state"
+OUT {"id":"0","type":"response","command":"get_state","success":true,"data":{"sessionId":"s1","sessionFile":"/tmp/pi-commands.jsonl"}}
+EXPECT_IN_CONTAINS "prompt"
+OUT {"type":"agent_start"}
+EXPECT_IN_CONTAINS "\"type\":\"get_commands\""
+OUT {"id":"2","type":"response","command":"get_commands","success":true,"data":{"commands":[{"name":"plan","description":"Create a plan","source":"skill","sourceInfo":"topic"},{"name":"status","description":"Show status","source":"builtin"}]}}
+EXIT 0

@@ -1,0 +1,3 @@
+{"type":"agent_start"}
+{"type":"auto_retry_end","success":true}
+{"type":"turn_end","message":{"role":"assistant","content":"Recovered","usage":{"input":12,"output":6}}}

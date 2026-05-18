@@ -1,0 +1,10 @@
+# Pi RPC status command fixture
+EXPECT_IN_CONTAINS_NEXT "get_state"
+OUT {"id":"0","type":"response","command":"get_state","success":true,"data":{"sessionId":"s1","sessionFile":"/tmp/pi-status.jsonl"}}
+EXPECT_IN_CONTAINS "prompt"
+OUT {"type":"agent_start"}
+EXPECT_IN_CONTAINS_NEXT "\"type\":\"get_state\""
+OUT {"id":"2","type":"response","command":"get_state","success":true,"data":{"sessionId":"s1","sessionFile":"/tmp/pi-status.jsonl"}}
+EXPECT_IN_CONTAINS "\"type\":\"get_session_stats\""
+OUT {"id":"3","type":"response","command":"get_session_stats","success":true,"data":{"inputTokens":4,"outputTokens":5,"totalTokens":9}}
+EXIT 0

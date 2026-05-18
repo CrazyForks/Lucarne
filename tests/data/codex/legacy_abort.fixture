@@ -1,0 +1,12 @@
+# Codex legacy abort flow.
+
+EXPECT_IN_CONTAINS "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":0,"result":{}}
+EXPECT_IN_CONTAINS "\"method\":\"initialized\""
+EXPECT_IN_CONTAINS "thread/start"
+OUT {"jsonrpc":"2.0","id":1,"result":{"threadId":"test-thread-legacy-abort"}}
+EXPECT_IN_CONTAINS "turn/start"
+OUT {"jsonrpc":"2.0","method":"codex/event","params":{"msg":{"type":"task_started"}}}
+OUT {"jsonrpc":"2.0","method":"codex/event","params":{"msg":{"type":"exec_command_begin","call_id":"c-abort","command":"sleep 30"}}}
+OUT {"jsonrpc":"2.0","method":"codex/event","params":{"msg":{"type":"turn_aborted"}}}
+EXIT 0

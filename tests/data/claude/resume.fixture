@@ -1,0 +1,8 @@
+# Resume echo: prints back the --resume argv value so tests can assert propagation.
+STDERR starting resume check
+ENV_ECHO AMUX_RESUMED
+OUT {"type":"system","subtype":"init","session_id":"sess-resumed","model":"claude-sonnet-4"}
+EXPECT_IN_CONTAINS "continue"
+OUT {"type":"assistant","message":{"id":"msg_r1","content":[{"type":"text","text":"Resumed OK."}]}}
+OUT {"type":"result","subtype":"success","session_id":"sess-resumed","num_turns":2,"duration_ms":80,"usage":{"input_tokens":5,"output_tokens":3}}
+EXIT 0

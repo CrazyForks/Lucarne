@@ -1,0 +1,7 @@
+{"type":"session.start","data":{"sessionId":"sess-1","selectedModel":"claude-sonnet-4"}}
+{"type":"assistant.turn_start","data":{"turnId":"0"}}
+{"type":"assistant.message_delta","data":{"messageId":"msg-1","deltaContent":"pong"}}
+{"type":"assistant.message","data":{"messageId":"msg-1","content":"pong","reasoningText":"thinking step","toolRequests":[{"toolCallId":"tool-1","name":"bash","arguments":{"command":"ls -1"}}],"outputTokens":7}}
+{"type":"tool.execution_complete","data":{"toolCallId":"tool-1","model":"claude-opus-4.6","success":true,"result":{"content":"AGENTS.md\n"}}}
+{"type":"session.warning","data":{"message":"approaching rate limit"}}
+{"type":"result","sessionId":"sess-1","exitCode":0}

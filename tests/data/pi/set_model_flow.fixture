@@ -1,0 +1,13 @@
+# Pi RPC set_model command fixture
+EXPECT_IN_CONTAINS "get_state"
+OUT {"id":"0","type":"response","command":"get_state","success":true,"data":{"sessionId":"s1","sessionFile":"/tmp/pi-model.jsonl"}}
+EXPECT_IN_CONTAINS "prompt"
+OUT {"type":"agent_start"}
+EXPECT_IN_CONTAINS "\"type\":\"set_model\""
+EXPECT_IN_CONTAINS "openai"
+EXPECT_IN_CONTAINS "gpt-5"
+OUT {"id":"2","type":"response","command":"set_model","success":true,"data":{}}
+EXPECT_IN_CONTAINS "\"type\":\"set_thinking_level\""
+EXPECT_IN_CONTAINS "high"
+OUT {"id":"3","type":"response","command":"set_thinking_level","success":true,"data":{}}
+EXIT 0

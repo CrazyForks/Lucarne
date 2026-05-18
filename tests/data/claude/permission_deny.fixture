@@ -1,0 +1,8 @@
+# Permission denied path: host replies deny, agent should acknowledge and end the turn.
+OUT {"type":"system","subtype":"init","session_id":"sess-deny","model":"claude-sonnet-4"}
+EXPECT_IN_CONTAINS "delete files"
+OUT {"type":"control_request","request_id":"req_99","request":{"tool":"Bash","input":{"command":"rm -rf /"}}}
+EXPECT_IN_CONTAINS "\"behavior\":\"deny\""
+OUT {"type":"assistant","message":{"id":"msg_d1","content":[{"type":"text","text":"Refused."}]}}
+OUT {"type":"result","subtype":"success","session_id":"sess-deny","num_turns":1,"duration_ms":100,"usage":{"input_tokens":10,"output_tokens":4}}
+EXIT 0

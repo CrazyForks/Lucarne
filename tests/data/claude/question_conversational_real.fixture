@@ -1,0 +1,6 @@
+OUT {"type":"system","subtype":"init","session_id":"sess-real-question","model":"claude-opus-4-6"}
+EXPECT_IN_CONTAINS "pick a theme"
+OUT {"type":"assistant","message":{"id":"msg_real_question_1","content":[{"type":"tool_use","id":"toolu_real_question_1","name":"AskUserQuestion","input":{"questions":[{"id":"layout_style","header":"布局风格","question":"你说的「左左右右的大字海报布局」是指什么样的风格？","multiSelect":false,"options":[{"label":"大字错落交替排版","description":"类似展览海报，左右交替放大字标题块，文案穿插其中，视觉冲击力强"},{"label":"左右分栏对称布局","description":"左侧放标题/关键词，右侧放详细文案，整齐对称"},{"label":"瀑布流大字排版","description":"从上到下大字标题依次排列，左右交替对齐"}]}]}}]}}
+OUT {"type":"result","subtype":"success","session_id":"sess-real-question","usage":{"input_tokens":0,"output_tokens":1}}
+EXPECT_IN_CONTAINS "大字错落交替排版"
+EXIT 0

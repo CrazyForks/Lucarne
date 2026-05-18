@@ -1,0 +1,2 @@
+{"type":"agent_start"}
+{"type":"turn_end","message":{"role":"assistant","content":"Done","usage":{"input":10,"output":5,"cacheRead":2,"cost":{"total":0.001}}},"toolResults":[{"toolCallId":"tool_1","content":"file contents","isError":false},{"toolCallId":"tool_2","content":"File not found","isError":true}]}

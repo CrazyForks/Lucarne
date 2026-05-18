@@ -1,0 +1,15 @@
+# Codex has /status in its native slash catalog. Public /commands status must
+# submit that slash command to Codex, not use amux's typed status() adapter path.
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":0,"result":{}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"initialized\""
+EXPECT_IN_CONTAINS "thread/start"
+OUT {"jsonrpc":"2.0","id":1,"result":{"threadId":"codex-native-status-thread"}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"experimentalFeature/list\""
+OUT {"jsonrpc":"2.0","id":2,"result":{"data":[]}}
+EXPECT_IN_CONTAINS_NEXT "\"method\":\"turn/start\""
+EXPECT_IN_CONTAINS "\"text\":\"/status\""
+OUT {"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"codex-native-status-thread","turn":{"id":"turn-status","items":[],"status":"inProgress","error":null,"startedAt":1,"completedAt":null,"durationMs":null}}}
+OUT {"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"codex-native-status-thread","turnId":"turn-status","item":{"type":"agent_message","id":"msg-native-status","text":"NATIVE_CODEX_STATUS_OK"}}}
+OUT {"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"codex-native-status-thread","turn":{"id":"turn-status","items":[],"status":"completed","error":null,"startedAt":1,"completedAt":2,"durationMs":1},"usage":{"input_tokens":0,"output_tokens":0}}}
+EXIT 0

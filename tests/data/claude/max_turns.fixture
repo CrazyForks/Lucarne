@@ -1,0 +1,6 @@
+# Claude max_turns: result arrives as "success" with stop_reason=max_turns, but should fail the turn.
+OUT {"type":"system","subtype":"init","session_id":"sess-max-turns","model":"claude-sonnet-4"}
+EXPECT_IN_CONTAINS "keep going"
+OUT {"type":"assistant","message":{"id":"msg_mt1","content":[{"type":"text","text":"I need one more turn."}]}}
+OUT {"type":"result","subtype":"success","stop_reason":"max_turns","session_id":"sess-max-turns","result":"Maximum turns reached","usage":{"input_tokens":8,"output_tokens":4,"cache_read_input_tokens":2},"total_cost_usd":0.12}
+EXIT 0

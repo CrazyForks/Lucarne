@@ -1,0 +1,4 @@
+{"type":"session.start","data":{"sessionId":"sess-fail","selectedModel":"claude-sonnet-4"}}
+{"type":"assistant.turn_start","data":{"turnId":"0"}}
+{"type":"session.error","data":{"message":"Rate limit exceeded"}}
+{"type":"result","sessionId":"sess-fail","exitCode":1}

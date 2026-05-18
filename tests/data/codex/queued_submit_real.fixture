@@ -1,0 +1,20 @@
+# Real-shape Codex queueing a second turn while the first command is still running.
+
+EXPECT_IN_CONTAINS "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1}}
+EXPECT_IN_CONTAINS "\"method\":\"initialized\""
+EXPECT_IN_CONTAINS "\"method\":\"thread/start\""
+OUT {"jsonrpc":"2.0","id":1,"result":{"thread":{"id":"real-thread-queue","status":{"type":"idle"}}}}
+EXPECT_IN_CONTAINS "\"method\":\"turn/start\""
+EXPECT_IN_CONTAINS "sleep 8"
+OUT {"jsonrpc":"2.0","method":"item/started","params":{"item":{"type":"commandExecution","id":"call_real_queue_1","command":"/bin/zsh -lc 'sleep 8'","cwd":"/tmp/repo","processId":"85150","source":"unifiedExecStartup","status":"inProgress","commandActions":[{"type":"unknown","command":"sleep 8"}],"aggregatedOutput":null,"exitCode":null,"durationMs":null},"threadId":"real-thread-queue","turnId":"turn-real-queue-1"}}
+EXPECT_IN_CONTAINS "\"method\":\"turn/start\""
+EXPECT_IN_CONTAINS "SECOND_DONE"
+OUT {"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"commandExecution","id":"call_real_queue_1","command":"/bin/zsh -lc 'sleep 8'","cwd":"/tmp/repo","aggregatedOutput":"","exitCode":0,"durationMs":7993},"threadId":"real-thread-queue","turnId":"turn-real-queue-1"}}
+OUT {"jsonrpc":"2.0","id":3,"result":{"turn":{"id":"turn-real-queue-2","items":[],"status":"inProgress","error":null}}}
+OUT {"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"agentMessage","id":"msg_real_queue_1","text":"FIRST_DONE","phase":"final_answer","memoryCitation":null},"threadId":"real-thread-queue","turnId":"turn-real-queue-1"}}
+OUT {"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"real-thread-queue","turn":{"id":"turn-real-queue-1","items":[],"status":"completed","error":null}}}
+OUT {"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"real-thread-queue","turn":{"id":"turn-real-queue-2","items":[],"status":"inProgress","error":null}}}
+OUT {"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"agentMessage","id":"msg_real_queue_2","text":"SECOND_DONE","phase":"final_answer","memoryCitation":null},"threadId":"real-thread-queue","turnId":"turn-real-queue-2"}}
+OUT {"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"real-thread-queue","turn":{"id":"turn-real-queue-2","items":[],"status":"completed","error":null}}}
+EXIT 0

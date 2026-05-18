@@ -1,0 +1,37 @@
+# Recorded live capture for pi
+EXPECT_IN_CONTAINS_NEXT "\"id\":\"0\""
+EXPECT_IN_CONTAINS_NEXT "\"type\":\"get_state\""
+OUT {"id":"0","type":"response","command":"get_state","success":true,"data":{"model":{"provider":"deepseek","id":"deepseek-v4-flash","name":"DeepSeek V4 Flash","reasoning":true},"thinkingLevel":"high","sessionFile":"/tmp/amux-pi-multi-turn/session.jsonl","sessionId":"pi-multi-turn","cwd":"/tmp/amux-pi-multi-turn"}}
+EXPECT_IN_CONTAINS_NEXT "\"id\":\"1\""
+EXPECT_IN_CONTAINS_NEXT "turn 1 of 5"
+EXPECT_IN_CONTAINS_NEXT "\"type\":\"prompt\""
+OUT {"id":"1","type":"response","command":"prompt","success":true}
+OUT {"type":"agent_start"}
+OUT {"type":"turn_start"}
+OUT {"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"TURN_1_OK"}],"usage":{"input":1,"output":1}},"toolResults":[]}
+EXPECT_IN_CONTAINS_NEXT "\"id\":\"2\""
+EXPECT_IN_CONTAINS_NEXT "turn 2 of 5"
+EXPECT_IN_CONTAINS_NEXT "\"type\":\"prompt\""
+OUT {"id":"2","type":"response","command":"prompt","success":true}
+OUT {"type":"turn_start"}
+OUT {"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"TURN_2_OK"}],"usage":{"input":1,"output":1}},"toolResults":[]}
+EXPECT_IN_CONTAINS_NEXT "\"id\":\"3\""
+EXPECT_IN_CONTAINS_NEXT "turn 3 of 5"
+EXPECT_IN_CONTAINS_NEXT "\"type\":\"prompt\""
+OUT {"id":"3","type":"response","command":"prompt","success":true}
+OUT {"type":"turn_start"}
+OUT {"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"TURN_3_OK"}],"usage":{"input":1,"output":1}},"toolResults":[]}
+EXPECT_IN_CONTAINS_NEXT "\"id\":\"4\""
+EXPECT_IN_CONTAINS_NEXT "turn 4 of 5"
+EXPECT_IN_CONTAINS_NEXT "\"type\":\"prompt\""
+OUT {"id":"4","type":"response","command":"prompt","success":true}
+OUT {"type":"turn_start"}
+OUT {"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"TURN_4_OK"}],"usage":{"input":1,"output":1}},"toolResults":[]}
+EXPECT_IN_CONTAINS_NEXT "\"id\":\"5\""
+EXPECT_IN_CONTAINS_NEXT "turn 5 of 5"
+EXPECT_IN_CONTAINS_NEXT "\"type\":\"prompt\""
+OUT {"id":"5","type":"response","command":"prompt","success":true}
+OUT {"type":"turn_start"}
+OUT {"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"TURN_5_OK"}],"usage":{"input":1,"output":1}},"toolResults":[]}
+EXPECT_SIGNAL_NEXT SIGTERM
+EXIT 0

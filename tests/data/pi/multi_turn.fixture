@@ -1,0 +1,11 @@
+# Pi RPC multi-turn fixture
+EXPECT_IN_CONTAINS "get_state"
+OUT {"id":"0","type":"response","command":"get_state","success":true,"data":{"sessionId":"s1","sessionFile":"/tmp/pi-mt.jsonl"}}
+EXPECT_IN_CONTAINS "prompt"
+OUT {"type":"agent_start"}
+OUT {"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"First reply"}],"usage":{"input":10,"output":5}}}
+EXPECT_IN_CONTAINS "prompt"
+OUT {"type":"turn_start"}
+OUT {"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"Second reply"}}
+OUT {"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"Second reply"}],"usage":{"input":15,"output":8}}}
+EXIT 0

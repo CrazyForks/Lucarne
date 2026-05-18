@@ -1,0 +1,10 @@
+EXPECT_IN_CONTAINS "\"method\":\"initialize\""
+OUT {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}
+EXPECT_IN_CONTAINS "\"method\":\"session/load\""
+EXPECT_IN_CONTAINS "\"sessionId\":\"resume-123\""
+OUT {"jsonrpc":"2.0","id":2,"result":{"modes":{"currentModeId":"default","availableModes":[{"id":"default","name":"Default"},{"id":"auto_edit","name":"Auto Edit"},{"id":"yolo","name":"YOLO"},{"id":"plan","name":"Plan"}]},"models":{"currentModelId":"gemini-2.5-flash-lite"}}}
+EXPECT_IN_CONTAINS "\"method\":\"session/prompt\""
+EXPECT_IN_CONTAINS "resume check"
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"resume-123","update":{"sessionUpdate":"agent_message_chunk","messageId":"msg-3","content":{"type":"text","text":"Resumed session."}}}}
+OUT {"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn","usage":{"inputTokens":3,"outputTokens":2,"cachedReadTokens":0,"totalTokens":5}}}
+EXIT 0
