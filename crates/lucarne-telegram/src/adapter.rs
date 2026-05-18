@@ -47,6 +47,7 @@ impl AdapterPlugin for TelegramAdapterPlugin {
         let config = telegram_config_from_adapter_config(&*ctx.config)?;
         let core = Arc::clone(&ctx.core);
         let http_client = ctx.http_client.clone();
+        let global_config_persistence = ctx.global_config_persistence.clone();
         info!(
             target: "lucarne_telegram::adapter",
             entry_chat_id = config.entry_chat_id,
@@ -55,9 +56,14 @@ impl AdapterPlugin for TelegramAdapterPlugin {
         );
         lucarne::memory_profile_snapshot!("lucarne_telegram.adapter.spawn.before_task_spawn");
         Ok(AdapterTask::spawn(self.id(), async move {
-            run_telegram_adapter_with_client(core, config, http_client)
-                .await
-                .map_err(|err| AdapterError::message(err.to_string()))
+            run_telegram_adapter_with_client_and_global_config_persistence(
+                core,
+                config,
+                http_client,
+                global_config_persistence,
+            )
+            .await
+            .map_err(|err| AdapterError::message(err.to_string()))
         }))
     }
 }
@@ -101,6 +107,16 @@ pub async fn run_telegram_adapter_with_client(
     config: TelegramConfig,
     http_client: reqwest::Client,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    run_telegram_adapter_with_client_and_global_config_persistence(core, config, http_client, None)
+        .await
+}
+
+pub async fn run_telegram_adapter_with_client_and_global_config_persistence(
+    core: Arc<LucarneCore>,
+    config: TelegramConfig,
+    http_client: reqwest::Client,
+    global_config_persistence: Option<Arc<dyn lucarne_adapter::GlobalConfigPersistence>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     lucarne::memory_profile_snapshot!("lucarne_telegram.adapter.run.start");
     info!(
         target: "lucarne_telegram::adapter",
@@ -114,7 +130,13 @@ pub async fn run_telegram_adapter_with_client(
     let entry = channel.entry_handle();
     let state = crate::state::BotState::new_with_core(Arc::clone(&core));
     lucarne::memory_profile_snapshot!("lucarne_telegram.adapter.run.after_state_new");
-    let bot = Arc::new(Bot::new_with_state(channel.clone(), core, entry, state));
+    let bot = Arc::new(Bot::new_with_state_and_global_config_persistence(
+        channel.clone(),
+        core,
+        entry,
+        state,
+        global_config_persistence,
+    ));
     lucarne::memory_profile_snapshot!("lucarne_telegram.adapter.run.after_bot_new");
     info!(target: "lucarne_telegram::adapter", "telegram adapter started");
     lucarne::memory_profile_snapshot!("lucarne_telegram.adapter.run.before_bot_run");
@@ -195,7 +217,7 @@ channels:
             source.contains("let http_client = ctx.http_client.clone();"),
             "adapter spawn should clone the shared reqwest client from AdapterContext"
         );
-        assert!(source.contains("run_telegram_adapter_with_client(core, config, http_client)"));
+        assert!(source.contains("run_telegram_adapter_with_client_and_global_config_persistence"));
         assert!(source.contains("TelegramChannel::start_with_client(config, http_client)"));
     }
 

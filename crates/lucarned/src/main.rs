@@ -8,8 +8,9 @@ use std::{
 use clap::{Parser, Subcommand};
 use lucarne::{default_lucarned_home_dir, default_state_db_path, CoreOptions, LucarneCore};
 use lucarne_adapter::{
-    default_http_client, AdapterConfig, AdapterContext, AdapterPlugin, AdapterRegistry,
-    AdapterStatusReader, AdapterSupervisorHandle, AdapterSupervisorOptions,
+    default_http_client, AdapterConfig, AdapterContext, AdapterError, AdapterPlugin,
+    AdapterRegistry, AdapterResult, AdapterStatusReader, AdapterSupervisorHandle,
+    AdapterSupervisorOptions, GlobalConfigPersistence, GlobalConfigUpdate,
 };
 use lucarne_telegram::telegram_plugin;
 use lucarne_wechat::wechat_plugin;
@@ -72,6 +73,11 @@ turn:
 
 session:
   idle_timeout_secs: 7200
+
+config:
+  global:
+    bypass: false
+    notifications: true
 
 channels:
   telegram:
@@ -136,8 +142,12 @@ async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
     let state_db_path = state_db_path_from_config(&file_config)?;
     lucarne::memory_profile_snapshot!("lucarned.main.before_open_sqlite");
     let core = open_core_from_config(&state_db_path, &file_config)?;
+    apply_global_config_from_file(&core, &file_config)?;
     lucarne::memory_profile_snapshot!("lucarned.main.after_open_sqlite");
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let global_config_persistence = config_path.as_ref().map(|path| {
+        Arc::new(YamlGlobalConfigPersistence::new(path.clone())) as Arc<dyn GlobalConfigPersistence>
+    });
 
     let (mut adapter_supervisor, adapter_status_reader) = if enabled_adapter_count > 0 {
         let http_client = default_http_client()?;
@@ -149,6 +159,7 @@ async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
                     config: Arc::clone(&config),
                     shutdown: shutdown_rx,
                     http_client,
+                    global_config_persistence: global_config_persistence.clone(),
                 },
                 AdapterSupervisorOptions::default(),
             )
@@ -294,6 +305,8 @@ struct LucarnedFileConfig {
     turn: TurnFileConfig,
     #[serde(default)]
     session: SessionFileConfig,
+    #[serde(default, rename = "config")]
+    runtime_config: RuntimeFileConfig,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -325,6 +338,18 @@ struct TurnFileConfig {
 #[derive(Clone, Debug, Default, Deserialize)]
 struct SessionFileConfig {
     idle_timeout_secs: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct RuntimeFileConfig {
+    #[serde(default)]
+    global: GlobalRuntimeFileConfig,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct GlobalRuntimeFileConfig {
+    bypass: Option<bool>,
+    notifications: Option<bool>,
 }
 
 impl LucarnedFileConfig {
@@ -370,6 +395,19 @@ fn open_core_from_config(
         )?),
         None => Ok(LucarneCore::open_sqlite_with_options(path, options)?),
     }
+}
+
+fn apply_global_config_from_file(
+    core: &LucarneCore,
+    config: &LucarnedFileConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(enabled) = config.runtime_config.global.bypass {
+        core.set_force_bypass_permissions(enabled)?;
+    }
+    if let Some(enabled) = config.runtime_config.global.notifications {
+        core.set_global_notifications_enabled(enabled)?;
+    }
+    Ok(())
 }
 
 fn core_options_from_config(
@@ -636,6 +674,83 @@ fn expand_home_path(value: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
+#[derive(Clone, Debug)]
+struct YamlGlobalConfigPersistence {
+    path: PathBuf,
+}
+
+impl YamlGlobalConfigPersistence {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl GlobalConfigPersistence for YamlGlobalConfigPersistence {
+    fn persist_global_config(&self, update: GlobalConfigUpdate) -> AdapterResult<()> {
+        persist_global_config_to_yaml(&self.path, update).map_err(|err| {
+            AdapterError::permanent(format!(
+                "failed to write lucarned config {}: {err}",
+                self.path.display()
+            ))
+        })
+    }
+}
+
+fn persist_global_config_to_yaml(
+    path: &Path,
+    update: GlobalConfigUpdate,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let raw = std::fs::read_to_string(path)?;
+    let yaml = update_global_config_yaml(&raw, update)?;
+    onboarding::config::write_config_with_backup(path, &yaml)
+}
+
+fn update_global_config_yaml(
+    raw: &str,
+    update: GlobalConfigUpdate,
+) -> Result<String, serde_yaml::Error> {
+    let mut value = serde_yaml::from_str::<serde_yaml::Value>(raw)?;
+    let root = ensure_yaml_mapping(&mut value);
+    let config = ensure_yaml_child_mapping(root, "config");
+    let global = ensure_yaml_child_mapping(config, "global");
+    global.insert(
+        serde_yaml::Value::String("bypass".to_string()),
+        serde_yaml::Value::Bool(update.bypass),
+    );
+    global.insert(
+        serde_yaml::Value::String("notifications".to_string()),
+        serde_yaml::Value::Bool(update.notifications),
+    );
+    serde_yaml::to_string(&value)
+}
+
+fn ensure_yaml_mapping(value: &mut serde_yaml::Value) -> &mut serde_yaml::Mapping {
+    if !matches!(value, serde_yaml::Value::Mapping(_)) {
+        *value = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+    }
+    match value {
+        serde_yaml::Value::Mapping(mapping) => mapping,
+        _ => unreachable!("value was forced to mapping"),
+    }
+}
+
+fn ensure_yaml_child_mapping<'a>(
+    mapping: &'a mut serde_yaml::Mapping,
+    key: &str,
+) -> &'a mut serde_yaml::Mapping {
+    let yaml_key = serde_yaml::Value::String(key.to_string());
+    if !matches!(mapping.get(&yaml_key), Some(serde_yaml::Value::Mapping(_))) {
+        mapping.insert(
+            yaml_key.clone(),
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        );
+    }
+    match mapping.get_mut(&yaml_key) {
+        Some(serde_yaml::Value::Mapping(child)) => child,
+        _ => unreachable!("child was forced to mapping"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -734,6 +849,10 @@ mod tests {
         assert!(raw.contains("deadline_secs: 3600"));
         assert!(raw.contains("session:"));
         assert!(raw.contains("idle_timeout_secs: 7200"));
+        assert!(raw.contains("config:"));
+        assert!(raw.contains("global:"));
+        assert!(raw.contains("bypass: false"));
+        assert!(raw.contains("notifications: true"));
         assert!(raw.contains("agents:"));
         assert!(raw.contains("  - claude"));
         assert!(raw.contains("  - codex"));
@@ -745,6 +864,11 @@ mod tests {
 
         let daemon_config = LucarnedFileConfig::from_yaml_str(&raw).expect("parse daemon config");
         assert_eq!(daemon_config.health.enabled, Some(false));
+        assert_eq!(daemon_config.runtime_config.global.bypass, Some(false));
+        assert_eq!(
+            daemon_config.runtime_config.global.notifications,
+            Some(true)
+        );
 
         let adapter_config =
             AdapterConfig::from_env_and_file(Vec::<(String, String)>::new(), Some(&config_path))
@@ -884,6 +1008,145 @@ session:
         assert_eq!(config.turn.inactivity_secs, Some(1800));
         assert_eq!(config.turn.deadline_secs, Some(3600));
         assert_eq!(config.session.idle_timeout_secs, Some(7200));
+    }
+
+    #[test]
+    fn lucarned_file_config_parses_optional_global_runtime_config() {
+        let config = LucarnedFileConfig::from_yaml_str(
+            r#"
+config:
+  global:
+    bypass: true
+    notifications: false
+"#,
+        )
+        .expect("parse runtime config");
+
+        assert_eq!(config.runtime_config.global.bypass, Some(true));
+        assert_eq!(config.runtime_config.global.notifications, Some(false));
+
+        let missing = LucarnedFileConfig::from_yaml_str("channels: {}\n")
+            .expect("parse missing runtime config");
+        assert_eq!(missing.runtime_config.global.bypass, None);
+        assert_eq!(missing.runtime_config.global.notifications, None);
+    }
+
+    #[tokio::test]
+    async fn apply_global_config_from_file_overrides_only_explicit_values() {
+        let temp_dir = tempfile::tempdir().expect("create temp state dir");
+        let core =
+            LucarneCore::open_sqlite(temp_dir.path().join("state.sqlite3")).expect("open core");
+        core.set_force_bypass_permissions(true)
+            .expect("set initial bypass");
+        core.set_global_notifications_enabled(false)
+            .expect("set initial notifications");
+
+        let missing = LucarnedFileConfig::from_yaml_str("channels: {}\n")
+            .expect("parse missing runtime config");
+        apply_global_config_from_file(&core, &missing).expect("apply missing config");
+        assert!(core.system_settings().session.force_bypass_permissions);
+        assert!(!core.system_settings().notifications.enabled);
+
+        let explicit = LucarnedFileConfig::from_yaml_str(
+            r#"
+config:
+  global:
+    bypass: false
+    notifications: true
+"#,
+        )
+        .expect("parse explicit runtime config");
+        apply_global_config_from_file(&core, &explicit).expect("apply explicit config");
+        assert!(!core.system_settings().session.force_bypass_permissions);
+        assert!(core.system_settings().notifications.enabled);
+    }
+
+    #[test]
+    fn update_global_config_yaml_upserts_global_values_and_preserves_channels() {
+        let raw = r#"
+channels:
+  telegram:
+    enabled: true
+    token: keep-me
+config:
+  other: keep
+"#;
+
+        let updated = update_global_config_yaml(
+            raw,
+            GlobalConfigUpdate {
+                bypass: true,
+                notifications: false,
+            },
+        )
+        .expect("update yaml");
+        let value: serde_json::Value = serde_yaml::from_str(&updated).expect("parse updated yaml");
+
+        assert_eq!(
+            value
+                .pointer("/channels/telegram/token")
+                .and_then(serde_json::Value::as_str),
+            Some("keep-me")
+        );
+        assert_eq!(
+            value
+                .pointer("/config/other")
+                .and_then(serde_json::Value::as_str),
+            Some("keep")
+        );
+        assert_eq!(
+            value
+                .pointer("/config/global/bypass")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            value
+                .pointer("/config/global/notifications")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn yaml_global_config_persistence_writes_backup_and_config_file() {
+        let temp_dir = tempfile::tempdir().expect("create temp config dir");
+        let config_path = temp_dir.path().join("lucarned.yaml");
+        std::fs::write(&config_path, "channels:\n  wechat:\n    enabled: true\n")
+            .expect("write config");
+        let persistence = YamlGlobalConfigPersistence::new(config_path.clone());
+
+        persistence
+            .persist_global_config(GlobalConfigUpdate {
+                bypass: true,
+                notifications: false,
+            })
+            .expect("persist global config");
+
+        let updated = std::fs::read_to_string(&config_path).expect("read updated config");
+        let value: serde_json::Value = serde_yaml::from_str(&updated).expect("parse updated yaml");
+        assert_eq!(
+            value
+                .pointer("/config/global/bypass")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            value
+                .pointer("/config/global/notifications")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert!(
+            std::fs::read_dir(temp_dir.path())
+                .expect("read temp dir")
+                .any(|entry| entry
+                    .expect("dir entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("lucarned.yaml.bak-")),
+            "persisting should create a backup for existing config"
+        );
     }
 
     #[test]

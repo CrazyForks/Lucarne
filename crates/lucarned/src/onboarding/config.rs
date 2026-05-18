@@ -238,6 +238,7 @@ struct ConfigYaml<'a> {
     health: HealthYaml,
     turn: TurnYaml,
     session: SessionYaml,
+    config: RuntimeConfigYaml,
     channels: ChannelsYaml<'a>,
 }
 
@@ -271,6 +272,12 @@ impl<'a> From<&'a InitConfigDraft> for ConfigYaml<'a> {
             },
             session: SessionYaml {
                 idle_timeout_secs: 7200,
+            },
+            config: RuntimeConfigYaml {
+                global: GlobalRuntimeConfigYaml {
+                    bypass: false,
+                    notifications: true,
+                },
             },
             channels: ChannelsYaml {
                 telegram: TelegramYaml::from(&draft.telegram),
@@ -309,6 +316,17 @@ struct TurnYaml {
 #[derive(Serialize)]
 struct SessionYaml {
     idle_timeout_secs: u64,
+}
+
+#[derive(Serialize)]
+struct RuntimeConfigYaml {
+    global: GlobalRuntimeConfigYaml,
+}
+
+#[derive(Serialize)]
+struct GlobalRuntimeConfigYaml {
+    bypass: bool,
+    notifications: bool,
 }
 
 #[derive(Serialize)]
@@ -424,6 +442,10 @@ mod tests {
         assert!(yaml.contains("deadline_secs: 3600"));
         assert!(yaml.contains("session:"));
         assert!(yaml.contains("idle_timeout_secs: 7200"));
+        assert!(yaml.contains("config:"));
+        assert!(yaml.contains("global:"));
+        assert!(yaml.contains("bypass: false"));
+        assert!(yaml.contains("notifications: true"));
         assert!(yaml.contains("telegram:"));
         assert!(yaml.contains("wechat:"));
         assert!(yaml.contains("enabled: false"));

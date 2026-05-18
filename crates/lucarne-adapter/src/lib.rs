@@ -231,12 +231,23 @@ fn parse_bool(value: &str) -> Option<bool> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GlobalConfigUpdate {
+    pub bypass: bool,
+    pub notifications: bool,
+}
+
+pub trait GlobalConfigPersistence: Send + Sync {
+    fn persist_global_config(&self, update: GlobalConfigUpdate) -> AdapterResult<()>;
+}
+
 #[derive(Clone)]
 pub struct AdapterContext {
     pub core: Arc<LucarneCore>,
     pub config: Arc<AdapterConfig>,
     pub shutdown: watch::Receiver<bool>,
     pub http_client: reqwest::Client,
+    pub global_config_persistence: Option<Arc<dyn GlobalConfigPersistence>>,
 }
 
 pub fn default_http_client() -> Result<reqwest::Client, reqwest::Error> {
@@ -1223,6 +1234,7 @@ channels:
                         config: Arc::new(AdapterConfig::default()),
                         shutdown: shutdown_rx,
                         http_client: reqwest::Client::new(),
+                        global_config_persistence: None,
                     })
                     .await
             }
@@ -1262,6 +1274,7 @@ channels:
                     config: Arc::new(AdapterConfig::default()),
                     shutdown: shutdown_rx,
                     http_client: reqwest::Client::new(),
+                    global_config_persistence: None,
                 },
                 options,
             )
@@ -1290,6 +1303,7 @@ channels:
                     config: Arc::new(AdapterConfig::default()),
                     shutdown: shutdown_rx,
                     http_client: reqwest::Client::new(),
+                    global_config_persistence: None,
                 },
                 AdapterSupervisorOptions::for_tests(),
             )
@@ -1332,6 +1346,7 @@ channels:
                     config: Arc::new(AdapterConfig::default()),
                     shutdown: shutdown_rx,
                     http_client: reqwest::Client::new(),
+                    global_config_persistence: None,
                 },
                 AdapterSupervisorOptions::for_tests(),
             )
@@ -1371,6 +1386,7 @@ channels:
                     config: Arc::new(AdapterConfig::default()),
                     shutdown: shutdown_rx,
                     http_client: reqwest::Client::new(),
+                    global_config_persistence: None,
                 },
                 AdapterSupervisorOptions::for_tests(),
             )
@@ -1406,6 +1422,7 @@ channels:
                     config: Arc::new(AdapterConfig::default()),
                     shutdown: shutdown_rx,
                     http_client: reqwest::Client::new(),
+                    global_config_persistence: None,
                 },
                 AdapterSupervisorOptions::for_tests(),
             )
@@ -1446,6 +1463,7 @@ channels:
                     config: Arc::new(AdapterConfig::default()),
                     shutdown: shutdown_rx,
                     http_client: reqwest::Client::new(),
+                    global_config_persistence: None,
                 },
                 AdapterSupervisorOptions::for_tests(),
             )

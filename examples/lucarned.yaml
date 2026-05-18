@@ -20,6 +20,11 @@ turn:
 session:
   idle_timeout_secs: 7200 # 2h 闲置自动关闭
 
+config:
+  global:
+    bypass: false
+    notifications: true
+
 channels:
   telegram:
     enabled: true

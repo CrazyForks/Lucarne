@@ -50,6 +50,7 @@
 | `/status` | 查看全局或单 workspace 状态 |
 | `/kill all` | 终止所有 Agent 进程 |
 | `/kill <session_id:pid>` | 终止指定 Agent 进程 |
+| `/help` | 查看 WeChat 命令帮助 |
 | `/config` | 查看当前 bypass、notifications 状态 |
 | `/config global notifications on\|off` | 开关全局通知 |
 | `/config global bypass on\|off` | 开关全局权限绕过 |

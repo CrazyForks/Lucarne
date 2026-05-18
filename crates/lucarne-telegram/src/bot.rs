@@ -38,6 +38,7 @@ use lucarne::{
         TurnPermit, TurnScheduler,
     },
 };
+use lucarne_adapter::{GlobalConfigPersistence, GlobalConfigUpdate};
 use lucarne_channel::{
     agent_message::{render_agent_message_markdown, AgentMessageFooter},
     ingest,
@@ -164,6 +165,7 @@ pub struct Bot {
     notification_handle_lock: AsyncMutex<()>,
     workspace_topic_repair_lock: AsyncMutex<()>,
     recent_unbound_topic_creations: AsyncMutex<Vec<(String, String)>>,
+    global_config_persistence: Option<Arc<dyn GlobalConfigPersistence>>,
 }
 
 #[derive(Clone)]
@@ -336,12 +338,47 @@ impl Bot {
         Self::new_with_state_and_history_watch(channel, core, entry, state, true)
     }
 
+    pub fn new_with_state_and_global_config_persistence(
+        channel: Arc<dyn Channel>,
+        core: Arc<LucarneCore>,
+        entry: WorkspaceHandle,
+        state: Arc<BotState>,
+        global_config_persistence: Option<Arc<dyn GlobalConfigPersistence>>,
+    ) -> Self {
+        Self::new_with_state_and_history_watch_and_global_config_persistence(
+            channel,
+            core,
+            entry,
+            state,
+            true,
+            global_config_persistence,
+        )
+    }
+
     pub fn new_with_state_and_history_watch(
         channel: Arc<dyn Channel>,
         core: Arc<LucarneCore>,
         entry: WorkspaceHandle,
         state: Arc<BotState>,
+        start_history_watch: bool,
+    ) -> Self {
+        Self::new_with_state_and_history_watch_and_global_config_persistence(
+            channel,
+            core,
+            entry,
+            state,
+            start_history_watch,
+            None,
+        )
+    }
+
+    pub fn new_with_state_and_history_watch_and_global_config_persistence(
+        channel: Arc<dyn Channel>,
+        core: Arc<LucarneCore>,
+        entry: WorkspaceHandle,
+        state: Arc<BotState>,
         _start_history_watch: bool,
+        global_config_persistence: Option<Arc<dyn GlobalConfigPersistence>>,
     ) -> Self {
         state.hydrate_notification_handle(&entry.chat);
         Self {
@@ -353,6 +390,7 @@ impl Bot {
             notification_handle_lock: AsyncMutex::new(()),
             workspace_topic_repair_lock: AsyncMutex::new(()),
             recent_unbound_topic_creations: AsyncMutex::new(Vec::new()),
+            global_config_persistence,
         }
     }
 
@@ -920,16 +958,20 @@ impl Bot {
         update: ConfigUpdate,
     ) -> Result<(), String> {
         match (update.scope, update.setting) {
-            (ConfigScope::Global, ConfigSetting::Notifications) => self
-                .core
-                .set_global_notifications_enabled(update.enabled)
-                .map(|_| ())
-                .map_err(|err| err.to_string()),
-            (ConfigScope::Global, ConfigSetting::Bypass) => self
-                .core
-                .set_force_bypass_permissions(update.enabled)
-                .map(|_| ())
-                .map_err(|err| err.to_string()),
+            (ConfigScope::Global, ConfigSetting::Notifications) => {
+                self.persist_global_config_update(update.setting, update.enabled)?;
+                self.core
+                    .set_global_notifications_enabled(update.enabled)
+                    .map(|_| ())
+                    .map_err(|err| err.to_string())
+            }
+            (ConfigScope::Global, ConfigSetting::Bypass) => {
+                self.persist_global_config_update(update.setting, update.enabled)?;
+                self.core
+                    .set_force_bypass_permissions(update.enabled)
+                    .map(|_| ())
+                    .map_err(|err| err.to_string())
+            }
             (ConfigScope::Workspace, ConfigSetting::Notifications) => {
                 let project_path = config_project_path(session)?;
                 self.core
@@ -959,6 +1001,28 @@ impl Bot {
                     .map_err(|err| err.to_string())
             }
         }
+    }
+
+    fn persist_global_config_update(
+        &self,
+        setting: ConfigSetting,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let Some(persistence) = self.global_config_persistence.as_ref() else {
+            return Ok(());
+        };
+        let settings = self.core.effective_settings(None, None);
+        let mut update = GlobalConfigUpdate {
+            bypass: settings.session.force_bypass_permissions,
+            notifications: settings.notifications.enabled,
+        };
+        match setting {
+            ConfigSetting::Bypass => update.bypass = enabled,
+            ConfigSetting::Notifications => update.notifications = enabled,
+        }
+        persistence
+            .persist_global_config(update)
+            .map_err(|err| err.to_string())
     }
 
     fn effective_config_for_scope(

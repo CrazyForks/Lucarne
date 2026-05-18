@@ -115,6 +115,7 @@ impl AdapterPlugin for WechatAdapterPlugin {
         let config = wechat_config_from_adapter_config(&*ctx.config);
         let core = Arc::clone(&ctx.core);
         let shutdown = ctx.shutdown.clone();
+        let global_config_persistence = ctx.global_config_persistence.clone();
         lucarne::memory_profile_snapshot!("lucarne_wechat.adapter.spawn.before_transport_new");
         let transport = Arc::new(
             WechatIlinkTransport::new_with_client(
@@ -144,9 +145,15 @@ impl AdapterPlugin for WechatAdapterPlugin {
 
         lucarne::memory_profile_snapshot!("lucarne_wechat.adapter.spawn.before_task_spawn");
         Ok(AdapterTask::spawn(self.id(), async move {
-            run_wechat_adapter_with_transport(core, config, shutdown, transport)
-                .await
-                .map_err(|err| AdapterError::message(err.to_string()))
+            run_wechat_adapter_with_transport(
+                core,
+                config,
+                shutdown,
+                transport,
+                global_config_persistence,
+            )
+            .await
+            .map_err(|err| AdapterError::message(err.to_string()))
         }))
     }
 }
@@ -268,7 +275,7 @@ pub async fn run_wechat_adapter(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let transport = Arc::new(WechatIlinkTransport::new(&config, core.sqlite_connection()).await);
     transport.login(config.force_login).await?;
-    run_wechat_adapter_with_transport(core, config, shutdown, transport).await
+    run_wechat_adapter_with_transport(core, config, shutdown, transport, None).await
 }
 
 async fn run_wechat_adapter_with_transport(
@@ -276,6 +283,7 @@ async fn run_wechat_adapter_with_transport(
     config: WechatConfig,
     shutdown: watch::Receiver<bool>,
     transport: Arc<WechatIlinkTransport>,
+    global_config_persistence: Option<Arc<dyn lucarne_adapter::GlobalConfigPersistence>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let poll_transport = Arc::clone(&transport);
     let poll_task = tokio::spawn(async move { poll_transport.run().await });
@@ -295,6 +303,7 @@ async fn run_wechat_adapter_with_transport(
         WechatServiceOptions {
             initial_user_ids,
             rate_limit_interaction_prompt: config.rate_limit_interaction_prompt.clone(),
+            global_config_persistence,
             ..WechatServiceOptions::default()
         },
     );

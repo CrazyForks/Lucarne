@@ -27,6 +27,7 @@ use lucarne::{
         LucarneCore, ResumeWorkspaceRequest, SubmitTurnRequest,
     },
 };
+use lucarne_adapter::{GlobalConfigPersistence, GlobalConfigUpdate};
 use lucarne_channel::agent_message::{
     format_cost_duration, render_agent_message_markdown, AgentMessageFooter,
 };
@@ -148,12 +149,13 @@ pub trait WechatTransport: Send + Sync {
     async fn stop(&self) -> Result<(), WechatError>;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct WechatServiceOptions {
     pub initial_user_ids: Vec<String>,
     pub typing_keepalive_interval: Duration,
     pub pending_reply_retry_interval: Duration,
     pub rate_limit_interaction_prompt: Option<String>,
+    pub global_config_persistence: Option<Arc<dyn GlobalConfigPersistence>>,
 }
 
 impl Default for WechatServiceOptions {
@@ -163,6 +165,7 @@ impl Default for WechatServiceOptions {
             typing_keepalive_interval: DEFAULT_TYPING_KEEPALIVE_INTERVAL,
             pending_reply_retry_interval: DEFAULT_PENDING_REPLY_RETRY_INTERVAL,
             rate_limit_interaction_prompt: None,
+            global_config_persistence: None,
         }
     }
 }
@@ -176,6 +179,7 @@ pub struct WechatNotificationService<T> {
     pending_reply_retry_interval: Duration,
     context_expiry_reminder: Option<crate::adapter::WechatContextExpiryReminderConfig>,
     rate_limit_interaction_prompt: Option<SmolStr>,
+    global_config_persistence: Option<Arc<dyn GlobalConfigPersistence>>,
 }
 
 #[derive(Default)]
@@ -289,6 +293,7 @@ where
             pending_reply_retry_interval: options.pending_reply_retry_interval,
             context_expiry_reminder: None,
             rate_limit_interaction_prompt: options.rate_limit_interaction_prompt.map(SmolStr::from),
+            global_config_persistence: options.global_config_persistence,
         }
     }
 
@@ -451,11 +456,14 @@ where
         let has_quote = message.quoted_message_id.is_some() || message.quoted_text.is_some();
         let Some(binding) = self.resolve_quoted_binding(&message) else {
             let body = if has_quote {
-                "That notification is no longer routable."
+                "That notification is no longer routable.".to_string()
             } else {
-                "Reply to an agent notification to continue that session."
+                format!(
+                    "Reply to an agent notification to continue that session.\n\n{}",
+                    render_wechat_help()
+                )
             };
-            self.transport.reply(&message, body).await?;
+            self.transport.reply(&message, &body).await?;
             return Ok(());
         };
         let Some(workspace) = self
@@ -1054,6 +1062,7 @@ where
                     .await?;
             }
             ConfigCommand::SetGlobalBypass(enabled) => {
+                self.persist_global_config_update(Some(enabled), None)?;
                 self.core
                     .set_force_bypass_permissions(enabled)
                     .map_err(|err| WechatError::Core(err.to_string()))?;
@@ -1063,6 +1072,7 @@ where
                     .await?;
             }
             ConfigCommand::SetGlobalNotifications(enabled) => {
+                self.persist_global_config_update(None, Some(enabled))?;
                 self.core
                     .set_global_notifications_enabled(enabled)
                     .map_err(|err| WechatError::Core(err.to_string()))?;
@@ -1075,12 +1085,33 @@ where
         Ok(())
     }
 
+    fn persist_global_config_update(
+        &self,
+        bypass: Option<bool>,
+        notifications: Option<bool>,
+    ) -> Result<(), WechatError> {
+        let Some(persistence) = self.global_config_persistence.as_ref() else {
+            return Ok(());
+        };
+        let settings = self.core.effective_settings(None, None);
+        let update = GlobalConfigUpdate {
+            bypass: bypass.unwrap_or(settings.session.force_bypass_permissions),
+            notifications: notifications.unwrap_or(settings.notifications.enabled),
+        };
+        persistence
+            .persist_global_config(update)
+            .map_err(|err| WechatError::Core(err.to_string()))
+    }
+
     async fn handle_slash_command(
         &self,
         message: &WechatIncoming,
         command: SlashCommand,
     ) -> Result<(), WechatError> {
         match command {
+            SlashCommand::Help => {
+                self.transport.reply(message, render_wechat_help()).await?;
+            }
             SlashCommand::Status => {
                 let Some(scope) = self.slash_scope(message)? else {
                     self.transport
@@ -1961,6 +1992,7 @@ enum ConfigCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SlashCommand {
+    Help,
     Status,
     Kill(KillAgentTarget),
     InvalidKill,
@@ -2002,6 +2034,7 @@ fn parse_slash_command(text: &str) -> Option<SlashCommand> {
         .unwrap_or("")
         .to_ascii_lowercase();
     match name.as_str() {
+        "help" => Some(SlashCommand::Help),
         "status" => Some(SlashCommand::Status),
         "kill" => {
             let args = parts.collect::<Vec<_>>().join(" ");
@@ -2050,6 +2083,17 @@ fn render_global_config(settings: &lucarne::control_plane::EffectiveSettings) ->
         on_off(settings.session.force_bypass_permissions),
         on_off(settings.notifications.enabled)
     )
+}
+
+fn render_wechat_help() -> &'static str {
+    "commands\n\
+/help — show this help\n\
+/config — show global config\n\
+/config global bypass on|off — toggle global permission bypass\n\
+/config global notifications on|off — toggle global notifications\n\
+/status — show global status, or quoted workspace status\n\
+/kill all|<session_id:pid> — kill agent processes\n\n\
+Reply to an agent notification to continue that session."
 }
 
 #[cfg(test)]
@@ -2609,6 +2653,75 @@ mod tests {
             assert!(reply.text.contains("bypass: on"));
             assert!(reply.text.contains("notifications: on"));
         }
+    }
+
+    #[tokio::test]
+    async fn config_global_notifications_toggle_persists_yaml_update_when_hook_present() {
+        let provider = Arc::new(FakeProvider::default());
+        let core = test_core(provider);
+        core.set_force_bypass_permissions(true)
+            .expect("set initial bypass");
+        let transport = Arc::new(FakeTransport::default());
+        let persistence = Arc::new(RecordingGlobalConfigPersistence::default());
+        let persistence_hook: Arc<dyn GlobalConfigPersistence> = persistence.clone();
+        let service = WechatNotificationService::new(
+            Arc::clone(&core),
+            Arc::clone(&transport),
+            WechatServiceOptions {
+                global_config_persistence: Some(persistence_hook),
+                ..WechatServiceOptions::default()
+            },
+        );
+
+        service
+            .handle_incoming(WechatIncoming::new(
+                "config-1",
+                "user-1",
+                "/config global notifications off",
+                Option::<String>::None,
+            ))
+            .await
+            .expect("handle config notifications");
+
+        assert!(!core.system_settings().notifications.enabled);
+        assert_eq!(
+            persistence.updates(),
+            vec![GlobalConfigUpdate {
+                bypass: true,
+                notifications: false,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn slash_help_replies_with_wechat_commands() {
+        let provider = Arc::new(FakeProvider::default());
+        let core = test_core(provider);
+        let transport = Arc::new(FakeTransport::default());
+        let service = WechatNotificationService::new(
+            Arc::clone(&core),
+            Arc::clone(&transport),
+            WechatServiceOptions::default(),
+        );
+
+        service
+            .handle_incoming(WechatIncoming::new(
+                "help-1",
+                "user-1",
+                "/help",
+                Option::<String>::None,
+            ))
+            .await
+            .expect("handle help");
+
+        let replies = transport.replies();
+        assert_eq!(replies.len(), 1);
+        assert!(replies[0].text.contains("commands"));
+        assert!(replies[0].text.contains("/config global bypass on|off"));
+        assert!(replies[0].text.contains("/status"));
+        assert!(replies[0]
+            .text
+            .contains("Reply to an agent notification to continue that session."));
     }
 
     #[tokio::test]
@@ -4190,10 +4303,11 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
         assert_eq!(service.notification_users(), vec!["user-1".to_string()]);
         let replies = transport.replies();
         assert_eq!(replies.len(), 1);
-        assert_eq!(
-            replies[0].text,
-            "Reply to an agent notification to continue that session."
-        );
+        assert!(replies[0]
+            .text
+            .starts_with("Reply to an agent notification to continue that session.\n\ncommands"));
+        assert!(replies[0].text.contains("/help — show this help"));
+        assert!(replies[0].text.contains("/config — show global config"));
 
         provider.emit_assistant("thread-1", "later notification");
         service
@@ -4813,6 +4927,30 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
         message_id: String,
         reply_to_message_id: String,
         text: String,
+    }
+
+    #[derive(Default)]
+    struct RecordingGlobalConfigPersistence {
+        updates: StdMutex<Vec<GlobalConfigUpdate>>,
+    }
+
+    impl RecordingGlobalConfigPersistence {
+        fn updates(&self) -> Vec<GlobalConfigUpdate> {
+            self.updates.lock().expect("global config lock").clone()
+        }
+    }
+
+    impl GlobalConfigPersistence for RecordingGlobalConfigPersistence {
+        fn persist_global_config(
+            &self,
+            update: GlobalConfigUpdate,
+        ) -> lucarne_adapter::AdapterResult<()> {
+            self.updates
+                .lock()
+                .expect("global config lock")
+                .push(update);
+            Ok(())
+        }
     }
 
     #[derive(Default)]
