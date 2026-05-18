@@ -10,8 +10,7 @@ use std::{
 
 use agent_sessions::{
     agent_session::OperationPhase as WatchedOperationPhase, ParseSelection, SessionWatcher,
-    WatchChange, WatchConfig, WatchError, WatchEvent, WatchTurnCompleted, WatchTurnFailed,
-    WatchUpdate,
+    WatchChange, WatchConfig, WatchError, WatchEvent, WatchTurnCompleted, WatchUpdate,
 };
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
@@ -96,8 +95,6 @@ pub struct LucarneCore {
     next_live_generation: AtomicU64,
     submitted_turns: Arc<RwLock<HashMap<WorkspaceId, VecDeque<TurnId>>>>,
     submitted_turn_activity: Arc<RwLock<HashMap<TurnId, SubmittedTurnActivity>>>,
-    live_runtime_turn_claims:
-        Arc<RwLock<HashMap<ProviderSessionId, HashMap<SmolStr, LiveRuntimeTurnClaim>>>>,
     next_submitted_turn: AtomicU64,
     notification_suppression: RwLock<HashMap<WorkspaceId, usize>>,
     history_watch_started: AtomicBool,
@@ -113,13 +110,6 @@ struct SubmittedTurnActivity {
     last_event_at: Instant,
     waiting_intervention: bool,
 }
-
-#[derive(Debug, Clone)]
-struct LiveRuntimeTurnClaim {
-    expires_at: Instant,
-}
-
-const LIVE_RUNTIME_TURN_CLAIM_TTL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistoryWatchState {
@@ -301,7 +291,6 @@ impl LucarneCore {
             next_live_generation: AtomicU64::new(0),
             submitted_turns: Arc::new(RwLock::new(HashMap::new())),
             submitted_turn_activity: Arc::new(RwLock::new(HashMap::new())),
-            live_runtime_turn_claims: Arc::new(RwLock::new(HashMap::new())),
             next_submitted_turn: AtomicU64::new(0),
             notification_suppression: RwLock::new(HashMap::new()),
             history_watch_started: AtomicBool::new(false),
@@ -1072,15 +1061,8 @@ impl LucarneCore {
         )?;
         let live_generation =
             self.bind_live_session_runtime(workspace.workspace_id.clone(), Arc::clone(&session));
-        let provider_session_id =
-            provider_session_id(workspace.provider_id, workspace.session_id.0.as_str());
         let events = self.watch_workspace_events(workspace.workspace_id.clone());
-        self.spawn_event_pump(
-            workspace.workspace_id.clone(),
-            live_generation,
-            provider_session_id,
-            events_source,
-        );
+        self.spawn_event_pump(workspace.workspace_id.clone(), live_generation, events_source);
         info!(
             target: "lucarne::core_service",
             provider = workspace.provider_id,
@@ -1181,15 +1163,8 @@ impl LucarneCore {
         )?;
         let live_generation =
             self.bind_live_session_runtime(req.workspace_id, Arc::clone(&session));
-        let provider_session_id =
-            provider_session_id(workspace.provider_id, workspace.session_id.0.as_str());
         let events = self.watch_workspace_events(workspace.workspace_id.clone());
-        self.spawn_event_pump(
-            workspace.workspace_id.clone(),
-            live_generation,
-            provider_session_id,
-            events_source,
-        );
+        self.spawn_event_pump(workspace.workspace_id.clone(), live_generation, events_source);
         info!(
             target: "lucarne::core_service",
             provider = workspace.provider_id,
@@ -1480,7 +1455,7 @@ impl LucarneCore {
         }
     }
 
-    fn handle_history_watch_update(&self, mut update: WatchUpdate) -> Result<(), CoreError> {
+    fn handle_history_watch_update(&self, update: WatchUpdate) -> Result<(), CoreError> {
         if !matches!(update.change, WatchChange::Created | WatchChange::Updated) {
             return Ok(());
         }
@@ -1497,113 +1472,19 @@ impl LucarneCore {
             .expect("live session registry lock")
             .contains_key(&workspace_id);
         if has_live_session {
-            let (events, live_runtime_events) = retain_events_not_claimed_by_live_runtime(
-                &self.live_runtime_turn_claims,
-                &provider_session_id,
-                update.events,
-                Instant::now(),
+            // A live session has a single user-visible event source: the live event
+            // pump, with the submitted-turn watchdog as its failure path. History
+            // watch may observe the same rollout file, including external resume
+            // writes, but it must not project a second live-session event chain.
+            debug!(
+                target: "lucarne::core_service",
+                provider = entry.provider_id,
+                session_id = %entry.session_id,
+                provider_session_id = %provider_session_id.as_str(),
+                workspace_id = %workspace_id.as_str(),
+                "history watch update skipped for live session"
             );
-            if live_runtime_events > 0 {
-                debug!(
-                    target: "lucarne::core_service",
-                    provider = entry.provider_id,
-                    session_id = %entry.session_id,
-                    workspace_id = %workspace_id.as_str(),
-                    live_runtime_events,
-                    "history watch update contained live runtime-owned turn events"
-                );
-                if events.is_empty() {
-                    return Ok(());
-                }
-            }
-            update.events = events;
-            if let Some(turn_id) = current_submitted_turn(&self.submitted_turns, &workspace_id) {
-                let workspace_events = self.workspace_event_sender(&workspace_id);
-                let mut projected = 0usize;
-                let mut lifecycle = None;
-                for watched_event in &update.events {
-                    match watched_event {
-                        WatchEvent::TurnCompleted(completion) => {
-                            if let Some(text) = watch_turn_completed_text(completion, false) {
-                                projected += 1;
-                                let event =
-                                    AgentEvent::Message(crate::agent_runtime::MessageEvent {
-                                        role: crate::agent_runtime::MessageRole::Assistant,
-                                        text: text.into(),
-                                        streaming: false,
-                                    });
-                                let _ = self.events.send(CoreEvent::TimelineEvent {
-                                    workspace_id: workspace_id.clone(),
-                                    turn_id: Some(turn_id.clone()),
-                                    event: event.clone(),
-                                });
-                                let _ = workspace_events.send(event);
-                                lifecycle = Some(AgentEvent::TurnCompleted(
-                                    crate::agent_runtime::events::TurnCompletedEvent {
-                                        turn_id: "".into(),
-                                        usage: None,
-                                    },
-                                ));
-                            }
-                        }
-                        WatchEvent::TurnFailed(failed) => {
-                            lifecycle = Some(AgentEvent::TurnFailed(
-                                crate::agent_runtime::events::TurnFailedEvent {
-                                    turn_id: "".into(),
-                                    error: watch_turn_failed_reason(failed).into(),
-                                    code: "".into(),
-                                },
-                            ));
-                        }
-                        _ => {}
-                    }
-                }
-                if let Some(lifecycle) = lifecycle {
-                    let _ = self.events.send(CoreEvent::TimelineEvent {
-                        workspace_id: workspace_id.clone(),
-                        turn_id: Some(turn_id.clone()),
-                        event: lifecycle.clone(),
-                    });
-                    let _ = workspace_events.send(lifecycle.clone());
-                    match lifecycle {
-                        AgentEvent::TurnCompleted(_) => {
-                            let _ = self.events.send(CoreEvent::TurnCompleted {
-                                workspace_id: workspace_id.clone(),
-                            });
-                        }
-                        AgentEvent::TurnFailed(failed) => {
-                            let _ = self.events.send(CoreEvent::TurnFailed {
-                                workspace_id: workspace_id.clone(),
-                                error: failed.error.to_string(),
-                            });
-                        }
-                        _ => {}
-                    }
-                    pop_submitted_turn(
-                        &self.submitted_turns,
-                        &self.submitted_turn_activity,
-                        &workspace_id,
-                    );
-                    debug!(
-                        target: "lucarne::core_service",
-                        provider = entry.provider_id,
-                        session_id = %entry.session_id,
-                        workspace_id = %workspace_id.as_str(),
-                        turn_id = %turn_id.as_str(),
-                        projected,
-                        "history watch terminal event associated with live submitted turn"
-                    );
-                    return Ok(());
-                }
-                debug!(
-                    target: "lucarne::core_service",
-                    provider = entry.provider_id,
-                    session_id = %entry.session_id,
-                    workspace_id = %workspace_id.as_str(),
-                    "history watch update skipped for core-owned live submitted turn"
-                );
-                return Ok(());
-            }
+            return Ok(());
         }
 
         self.record_observed_watch_update(&entry, &workspace_id, &update)?;
@@ -1838,14 +1719,12 @@ impl LucarneCore {
         &self,
         workspace_id: WorkspaceId,
         live_generation: u64,
-        provider_session_id: ProviderSessionId,
         mut source_events: AgentEventStream,
     ) {
         let events = self.events.clone();
         let workspace_events = self.workspace_event_sender(&workspace_id);
         let submitted_turns = Arc::clone(&self.submitted_turns);
         let submitted_turn_activity = Arc::clone(&self.submitted_turn_activity);
-        let live_runtime_turn_claims = Arc::clone(&self.live_runtime_turn_claims);
         let live_sessions = Arc::clone(&self.live_sessions);
         let live_session_generations = Arc::clone(&self.live_session_generations);
         tokio::spawn(async move {
@@ -1883,7 +1762,6 @@ impl LucarneCore {
                     }),
                     _ => None,
                 };
-                let live_provider_turn_id = live_terminal_provider_turn_id(&event);
                 let workspace_event = event.clone();
                 let _ = events.send(CoreEvent::TimelineEvent {
                     workspace_id: workspace_id.clone(),
@@ -1899,14 +1777,6 @@ impl LucarneCore {
                 if let Some(lifecycle) = lifecycle {
                     let _ = events.send(lifecycle);
                     if turn_id.is_some() {
-                        if let Some(provider_turn_id) = live_provider_turn_id {
-                            remember_live_runtime_turn_claim(
-                                &live_runtime_turn_claims,
-                                provider_session_id.clone(),
-                                provider_turn_id,
-                                Instant::now(),
-                            );
-                        }
                         pop_submitted_turn(
                             &submitted_turns,
                             &submitted_turn_activity,
@@ -3082,12 +2952,22 @@ impl LucarneCore {
         let live_sessions = Arc::clone(&self.live_sessions);
         let live_session_generations = Arc::clone(&self.live_session_generations);
         let options = self.options.clone();
-        let watchdog_interval = options.turn_inactivity.min(options.turn_deadline);
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(watchdog_interval).await;
                 if !submitted_turn_is_current(&submitted_turns, &workspace_id, &turn_id) {
                     return;
+                }
+                let Some(delay) = submitted_turn_timeout_delay(
+                    &submitted_turn_activity,
+                    &turn_id,
+                    Instant::now(),
+                    &options,
+                ) else {
+                    return;
+                };
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                    continue;
                 }
                 let Some(error) = submitted_turn_timeout_error(
                     &submitted_turn_activity,
@@ -3357,81 +3237,6 @@ fn submitted_turn_is_current(
     current_submitted_turn(submitted_turns, workspace_id).as_ref() == Some(turn_id)
 }
 
-fn live_terminal_provider_turn_id(event: &AgentEvent) -> Option<SmolStr> {
-    let turn_id = match event {
-        AgentEvent::TurnCompleted(completed) => &completed.turn_id,
-        AgentEvent::TurnFailed(failed) => &failed.turn_id,
-        _ => return None,
-    };
-    if turn_id.trim().is_empty() {
-        return None;
-    }
-    Some(turn_id.clone())
-}
-
-fn remember_live_runtime_turn_claim(
-    claims: &Arc<RwLock<HashMap<ProviderSessionId, HashMap<SmolStr, LiveRuntimeTurnClaim>>>>,
-    provider_session_id: ProviderSessionId,
-    provider_turn_id: SmolStr,
-    now: Instant,
-) {
-    let mut claims = claims.write().expect("live runtime turn claim lock");
-    claims.entry(provider_session_id).or_default().insert(
-        provider_turn_id,
-        LiveRuntimeTurnClaim {
-            expires_at: now + LIVE_RUNTIME_TURN_CLAIM_TTL,
-        },
-    );
-}
-
-fn retain_events_not_claimed_by_live_runtime(
-    claims: &Arc<RwLock<HashMap<ProviderSessionId, HashMap<SmolStr, LiveRuntimeTurnClaim>>>>,
-    provider_session_id: &ProviderSessionId,
-    events: Box<[WatchEvent]>,
-    now: Instant,
-) -> (Box<[WatchEvent]>, usize) {
-    let mut claims = claims.write().expect("live runtime turn claim lock");
-    let Some(session_claims) = claims.get_mut(provider_session_id) else {
-        return (events, 0);
-    };
-    session_claims.retain(|_, claim| claim.expires_at > now);
-    if session_claims.is_empty() {
-        claims.remove(provider_session_id);
-        return (events, 0);
-    }
-
-    let mut visible = Vec::new();
-    let mut completed_claims = HashSet::new();
-    let mut claimed = 0usize;
-    for event in Vec::from(events) {
-        let claimed_turn_id = event
-            .meta()
-            .turn_id
-            .as_ref()
-            .filter(|turn_id| session_claims.contains_key(*turn_id))
-            .cloned();
-        let Some(turn_id) = claimed_turn_id else {
-            visible.push(event);
-            continue;
-        };
-        claimed += 1;
-        if matches!(
-            event,
-            WatchEvent::TurnCompleted(_) | WatchEvent::TurnFailed(_)
-        ) {
-            completed_claims.insert(turn_id);
-        }
-    }
-
-    for turn_id in completed_claims {
-        session_claims.remove(&turn_id);
-    }
-    if session_claims.is_empty() {
-        claims.remove(provider_session_id);
-    }
-    (visible.into_boxed_slice(), claimed)
-}
-
 fn pop_submitted_turn(
     submitted_turns: &Arc<RwLock<HashMap<WorkspaceId, VecDeque<TurnId>>>>,
     activity: &Arc<RwLock<HashMap<TurnId, SubmittedTurnActivity>>>,
@@ -3549,6 +3354,27 @@ fn submitted_turn_timeout_error(
         ));
     }
     None
+}
+
+fn submitted_turn_timeout_delay(
+    activity: &Arc<RwLock<HashMap<TurnId, SubmittedTurnActivity>>>,
+    turn_id: &TurnId,
+    now: Instant,
+    options: &CoreOptions,
+) -> Option<Duration> {
+    let turn = activity
+        .read()
+        .expect("submitted turn activity lock")
+        .get(turn_id)
+        .cloned()?;
+    let total = now.saturating_duration_since(turn.started_at);
+    let deadline_remaining = options.turn_deadline.saturating_sub(total);
+    if deadline_remaining.is_zero() || turn.waiting_intervention {
+        return Some(deadline_remaining);
+    }
+    let idle = now.saturating_duration_since(turn.last_event_at);
+    let inactivity_remaining = options.turn_inactivity.saturating_sub(idle);
+    Some(deadline_remaining.min(inactivity_remaining))
 }
 
 fn emit_submitted_turn_failure(
@@ -3817,16 +3643,6 @@ fn watch_turn_completed_text(
     Some(text)
 }
 
-fn watch_turn_failed_reason(failed: &WatchTurnFailed) -> String {
-    let reason = failed
-        .reason
-        .as_deref()
-        .map(str::trim)
-        .map(str::to_string)
-        .filter(|reason| !reason.is_empty());
-    reason.unwrap_or_else(|| "aborted".to_string())
-}
-
 fn format_duration_ms(duration_ms: u64) -> String {
     let total_seconds = duration_ms / 1000;
     let hours = total_seconds / 3600;
@@ -3911,7 +3727,7 @@ mod tests {
     };
     use crate::control_plane::LiveInstanceState;
     use crate::ProviderId;
-    use agent_sessions::{WatchAssistantMessage, WatchEventMeta, WatchMessage};
+    use agent_sessions::{WatchAssistantMessage, WatchEventMeta, WatchMessage, WatchTurnFailed};
 
     static ENV_LOCK: StdMutex<()> = StdMutex::new(());
 
@@ -4252,6 +4068,42 @@ mod tests {
         let error = submitted_turn_timeout_error(&activity, &turn_id, check_at, &test_opts)
             .expect("provider progress should re-enable inactivity timeout");
         assert!(error.contains("agent went silent"));
+    }
+
+    #[test]
+    fn submitted_turn_watchdog_delay_uses_remaining_inactivity_window() {
+        let activity = Arc::new(RwLock::new(HashMap::new()));
+        let turn_id = TurnId::new("turn-progress-before-first-watchdog-wake");
+        let now = Instant::now();
+        activity.write().expect("activity lock").insert(
+            turn_id.clone(),
+            SubmittedTurnActivity {
+                started_at: now,
+                last_event_at: now + Duration::from_millis(40),
+                waiting_intervention: false,
+            },
+        );
+        let test_opts = CoreOptions {
+            turn_inactivity: Duration::from_millis(50),
+            turn_deadline: Duration::from_millis(250),
+            session_idle_timeout: Duration::from_millis(500),
+        };
+
+        let check_at = now + Duration::from_millis(50);
+        assert!(
+            submitted_turn_timeout_error(&activity, &turn_id, check_at, &test_opts).is_none()
+        );
+        assert_eq!(
+            submitted_turn_timeout_delay(&activity, &turn_id, check_at, &test_opts),
+            Some(Duration::from_millis(40)),
+            "watchdog must reschedule to the remaining idle window, not sleep another full interval"
+        );
+
+        let timeout_at = now + Duration::from_millis(90);
+        assert_eq!(
+            submitted_turn_timeout_delay(&activity, &turn_id, timeout_at, &test_opts),
+            Some(Duration::ZERO)
+        );
     }
 
     #[tokio::test]
@@ -5053,7 +4905,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn idle_live_session_does_not_hide_external_history_update() {
+    async fn history_watch_update_does_not_notify_idle_live_session() {
         let _env_lock = ENV_LOCK.lock().expect("env lock");
         let fixture = live_history_fixture("external-thread").await;
         let mut events = fixture.core.watch_events();
@@ -5068,32 +4920,14 @@ mod tests {
             ))
             .expect("ingest external watch update");
 
-        let text = tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                let event = events.recv().await.expect("core event");
-                if let CoreEvent::TimelineEvent {
-                    turn_id: None,
-                    event:
-                        AgentEvent::Message(crate::agent_runtime::MessageEvent {
-                            role: crate::agent_runtime::MessageRole::Assistant,
-                            text,
-                            streaming: false,
-                        }),
-                    ..
-                } = event
-                {
-                    return text;
-                }
-            }
-        })
-        .await
-        .expect("external history event");
-
-        assert_eq!(text.as_str(), "external assistant output\n\ncost: 2m 5s");
+        assert!(
+            events.try_recv().is_err(),
+            "history watch must not project events for an idle live session"
+        );
     }
 
     #[tokio::test]
-    async fn completed_live_runtime_turn_owns_lagging_history_echo() {
+    async fn completed_live_runtime_turn_does_not_enable_history_projection() {
         let _env_lock = ENV_LOCK.lock().expect("env lock");
         let temp = tempfile::TempDir::new().expect("temp dir");
         let codex_home = temp.path().join("codex");
@@ -5177,29 +5011,9 @@ mod tests {
         ))
         .expect("ingest different provider turn update");
 
-        let external_text = tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                let event = external_events.recv().await.expect("core event");
-                if let CoreEvent::TimelineEvent {
-                    turn_id: None,
-                    event:
-                        AgentEvent::Message(crate::agent_runtime::MessageEvent {
-                            role: crate::agent_runtime::MessageRole::Assistant,
-                            text,
-                            streaming: false,
-                        }),
-                    ..
-                } = event
-                {
-                    return text;
-                }
-            }
-        })
-        .await
-        .expect("different provider turn remains visible");
-        assert_eq!(
-            external_text.as_str(),
-            "external assistant output\n\ncost: 2m 5s"
+        assert!(
+            external_events.try_recv().is_err(),
+            "history watch must stay silent while the live session remains owned by the event pump"
         );
 
         let mut background_events = core.watch_events();
@@ -5311,11 +5125,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_submitted_turn_can_complete_from_history_task_complete() {
+    async fn history_terminal_update_does_not_complete_live_submitted_turn() {
         let _env_lock = ENV_LOCK.lock().expect("env lock");
         let fixture = live_history_fixture("live-thread").await;
-        let mut events = fixture.core.watch_events();
         let submitted = submit_noop_turn(&fixture.core, &fixture.workspace_id).await;
+        let mut events = fixture.core.watch_events();
         fixture
             .core
             .handle_history_watch_update(codex_watch_update(
@@ -5326,52 +5140,22 @@ mod tests {
             ))
             .expect("ingest watch update");
 
-        let (message_turn_id, text, completed_turn_id) =
-            tokio::time::timeout(Duration::from_secs(1), async {
-                let mut message = None;
-                let mut completed = None;
-                while message.is_none() || completed.is_none() {
-                    let event = events.recv().await.expect("core event");
-                    match event {
-                        CoreEvent::TimelineEvent {
-                            turn_id,
-                            event:
-                                AgentEvent::Message(crate::agent_runtime::MessageEvent {
-                                    role: crate::agent_runtime::MessageRole::Assistant,
-                                    text,
-                                    streaming: false,
-                                }),
-                            ..
-                        } => {
-                            message = Some((turn_id.expect("message turn id"), text.to_string()));
-                        }
-                        CoreEvent::TimelineEvent {
-                            turn_id,
-                            event: AgentEvent::TurnCompleted(_),
-                            ..
-                        } => {
-                            completed = Some(turn_id.expect("completion turn id"));
-                        }
-                        _ => {}
-                    }
-                }
-                let (message_turn_id, text) = message.expect("message");
-                (message_turn_id, text, completed.expect("completed"))
-            })
-            .await
-            .expect("live history completion event");
-
-        assert_eq!(message_turn_id, submitted.turn_id);
-        assert_eq!(completed_turn_id, submitted.turn_id);
-        assert_eq!(text, "assistant received");
+        assert_eq!(
+            current_submitted_turn(&fixture.core.submitted_turns, &fixture.workspace_id),
+            Some(submitted.turn_id)
+        );
+        assert!(
+            events.try_recv().is_err(),
+            "history terminal events from a live rollout must not echo as submitted-turn output"
+        );
     }
 
     #[tokio::test]
-    async fn live_submitted_turn_can_fail_from_history_turn_aborted() {
+    async fn history_failed_update_does_not_fail_live_submitted_turn() {
         let _env_lock = ENV_LOCK.lock().expect("env lock");
         let fixture = live_history_fixture("live-thread").await;
-        let mut events = fixture.core.watch_events();
         let submitted = submit_noop_turn(&fixture.core, &fixture.workspace_id).await;
+        let mut events = fixture.core.watch_events();
         fixture
             .core
             .handle_history_watch_update(codex_abort_watch_update(
@@ -5382,24 +5166,14 @@ mod tests {
             ))
             .expect("ingest watch update");
 
-        let (failed_turn_id, error) = tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                let event = events.recv().await.expect("core event");
-                if let CoreEvent::TimelineEvent {
-                    turn_id,
-                    event: AgentEvent::TurnFailed(failed),
-                    ..
-                } = event
-                {
-                    return (turn_id.expect("failed turn id"), failed.error.to_string());
-                }
-            }
-        })
-        .await
-        .expect("live history failed event");
-
-        assert_eq!(failed_turn_id, submitted.turn_id);
-        assert_eq!(error, "interrupted");
+        assert_eq!(
+            current_submitted_turn(&fixture.core.submitted_turns, &fixture.workspace_id),
+            Some(submitted.turn_id)
+        );
+        assert!(
+            events.try_recv().is_err(),
+            "history failure events from a live rollout must not fail the submitted turn"
+        );
     }
 
     #[tokio::test]
