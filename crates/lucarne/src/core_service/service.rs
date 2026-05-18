@@ -3746,9 +3746,7 @@ fn observed_activity_time(events: &[WatchEvent]) -> (i64, String) {
     let last_active_unix = timestamp
         .and_then(parse_rfc3339_unix)
         .unwrap_or_else(current_unix_seconds);
-    let last_active_display = timestamp
-        .map(str::to_string)
-        .unwrap_or_else(|| format_unix_utc(last_active_unix));
+    let last_active_display = crate::time_display::format_last_active_display(last_active_unix);
     (last_active_unix, last_active_display)
 }
 
@@ -3763,12 +3761,6 @@ fn current_unix_seconds() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
-}
-
-fn format_unix_utc(unix: i64) -> String {
-    chrono::DateTime::<chrono::Utc>::from_timestamp(unix, 0)
-        .map(|datetime| datetime.to_rfc3339())
-        .unwrap_or_else(|| "unknown".into())
 }
 
 fn observed_session_process_alive(session: &ObservedAgentSession) -> bool {
@@ -3944,6 +3936,36 @@ mod tests {
         assert!(core.direct_notification_suppressed(&workspace_id));
         core.end_direct_notification_suppression(&workspace_id);
         assert!(!core.direct_notification_suppressed(&workspace_id));
+    }
+
+    #[test]
+    fn observed_activity_time_formats_display_for_local_timezone_without_year() {
+        let timestamp = "2026-04-25T00:01:00.000Z";
+        let events = vec![WatchEvent::UserMessage(WatchMessage {
+            meta: WatchEventMeta {
+                timestamp: Some(timestamp.into()),
+                ..WatchEventMeta::default()
+            },
+            text: Some("prompt".into()),
+        })];
+
+        let (unix, display) = observed_activity_time(&events);
+        let expected = chrono::DateTime::parse_from_rfc3339(timestamp)
+            .expect("timestamp")
+            .with_timezone(&chrono::Local)
+            .format("%m-%d %H:%M:%S")
+            .to_string();
+
+        assert_eq!(
+            unix,
+            chrono::DateTime::parse_from_rfc3339(timestamp)
+                .expect("timestamp")
+                .timestamp()
+        );
+        assert_eq!(display, expected);
+        assert!(!display.contains("2026"));
+        assert!(!display.contains('T'));
+        assert!(!display.ends_with('Z'));
     }
 
     #[test]
@@ -4440,13 +4462,14 @@ mod tests {
         assert_eq!(entry.provider_session_id.as_str(), "codex:observed-thread");
         assert_eq!(entry.cwd.as_deref(), Some(project_path.as_path()));
         assert_eq!(entry.session_path, session_path);
+        let initial_unix = chrono::DateTime::parse_from_rfc3339("2026-04-25T00:01:00.000Z")
+            .expect("timestamp")
+            .timestamp();
+        assert_eq!(entry.last_active_unix, initial_unix);
         assert_eq!(
-            entry.last_active_unix,
-            chrono::DateTime::parse_from_rfc3339("2026-04-25T00:01:00.000Z")
-                .expect("timestamp")
-                .timestamp()
+            entry.last_active_display,
+            crate::time_display::format_last_active_display(initial_unix)
         );
-        assert_eq!(entry.last_active_display, "2026-04-25T00:01:00.000Z");
 
         let snapshot = core
             .agent_resource_snapshot(AgentResourceScope::All)
@@ -4473,7 +4496,13 @@ mod tests {
             observed[0].title.as_str(),
             "fix checkout bug on status page"
         );
-        assert_eq!(observed[0].last_active_display, "2026-04-25T00:01:01.000Z");
+        let completion_unix = chrono::DateTime::parse_from_rfc3339("2026-04-25T00:01:01.000Z")
+            .expect("timestamp")
+            .timestamp();
+        assert_eq!(
+            observed[0].last_active_display,
+            crate::time_display::format_last_active_display(completion_unix)
+        );
     }
 
     #[tokio::test]

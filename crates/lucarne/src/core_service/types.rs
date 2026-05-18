@@ -226,11 +226,13 @@ pub fn render_agent_resource_snapshot(snapshot: &AgentResourceSnapshot) -> Strin
         body.push_str("\n\n");
         body.push_str(agent.identity.as_deref().unwrap_or("unidentified"));
         body.push('\n');
+        let last_active_display = observed_last_active_display(snapshot, agent);
         body.push_str(&format!(
-            "workspace: `{}`\nprovider: `{}`\nsession: `{}`\npid: `{}`\nprocesses: `{}`\ncpu: `{}`\nmemory: `{}`",
+            "workspace: `{}`\nprovider: `{}`\nsession: `{}`\nlast active: `{}`\npid: `{}`\nprocesses: `{}`\ncpu: `{}`\nmemory: `{}`",
             agent.workspace_id.as_str(),
             agent.provider_id,
             agent.native_resume_ref,
+            last_active_display,
             agent
                 .pid
                 .map(|pid| pid.to_string())
@@ -283,6 +285,19 @@ pub fn render_kill_agent_report(report: &KillAgentReport) -> String {
     body
 }
 
+fn observed_last_active_display<'a>(
+    snapshot: &'a AgentResourceSnapshot,
+    agent: &AgentResourceEntry,
+) -> &'a str {
+    snapshot
+        .observed_sessions
+        .iter()
+        .find(|session| session.provider_session_id == agent.provider_session_id)
+        .map(|session| session.last_active_display.as_str())
+        .filter(|display| !display.trim().is_empty())
+        .unwrap_or("unknown")
+}
+
 fn format_cpu(value: f32) -> String {
     format!("{value:.1}%")
 }
@@ -308,13 +323,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resource_snapshot_renderer_shows_observed_recent_without_process_counts() {
+    fn resource_snapshot_renderer_shows_managed_last_active_from_observed_watch() {
         let snapshot = AgentResourceSnapshot {
-            managed_agent_count: 0,
-            process_count: 0,
-            total_cpu_percent: 0.0,
-            total_memory_bytes: 0,
-            agents: Vec::new(),
+            managed_agent_count: 1,
+            process_count: 2,
+            total_cpu_percent: 0.6,
+            total_memory_bytes: 221_800_000,
+            agents: vec![AgentResourceEntry {
+                workspace_id: WorkspaceId::new("codex:resume:observed"),
+                title: "fix checkout bug".into(),
+                provider_id: "codex",
+                provider_session_id: ProviderSessionId::new("codex:observed-thread"),
+                native_resume_ref: "observed-thread".into(),
+                live_instance_id: LiveInstanceId::new("live-observed"),
+                pid: Some(98_844),
+                identity: Some("observed-thread:98844".into()),
+                process_count: 2,
+                cpu_percent: 0.6,
+                memory_bytes: 221_800_000,
+            }],
             observed_sessions: vec![
                 ObservedAgentSession {
                     workspace_id: WorkspaceId::new("codex:resume:observed"),
@@ -325,7 +352,7 @@ mod tests {
                     cwd: Some(PathBuf::from("/tmp/lucarnex")),
                     session_path: PathBuf::from("/tmp/rollout-observed-thread.jsonl"),
                     last_active_unix: 1_776_960_000,
-                    last_active_display: "2026-05-01T00:00:00Z".into(),
+                    last_active_display: "05-01 00:00:00".into(),
                     observed_pid: None,
                 },
                 ObservedAgentSession {
@@ -337,26 +364,36 @@ mod tests {
                     cwd: None,
                     session_path: PathBuf::from("/tmp/rollout-observed-thread-two.jsonl"),
                     last_active_unix: 1_776_960_001,
-                    last_active_display: "2026-05-01T00:00:01Z".into(),
+                    last_active_display: "05-01 00:00:01".into(),
                     observed_pid: None,
                 },
             ],
         };
 
         let rendered = render_agent_resource_snapshot(&snapshot);
+        let managed_block = rendered
+            .split("\n\nobserved recent")
+            .next()
+            .expect("managed block");
+        let observed_block = rendered
+            .split("\n\nobserved recent")
+            .nth(1)
+            .expect("observed block");
 
-        assert!(rendered.contains("managed agents: `0`"));
+        assert!(rendered.contains("managed agents: `1`"));
         assert!(rendered.contains("observed recent: `2`"));
-        assert!(rendered.contains("observed recent\n\nfix checkout bug"));
+        assert!(managed_block.contains("observed-thread:98844"));
+        assert!(managed_block.contains("last active: `05-01 00:00:00`"));
+        assert!(observed_block.contains("fix checkout bug"));
         assert!(
-            rendered.contains("cwd: `/tmp/lucarnex`\n\nreview spacing"),
+            observed_block.contains("cwd: `/tmp/lucarnex`\n\nreview spacing"),
             "observed session items should be separated by a blank line"
         );
-        assert!(rendered.contains("provider: `codex`"));
-        assert!(rendered.contains("session: `observed-thread`"));
-        assert!(rendered.contains("last active: `2026-05-01T00:00:00Z`"));
-        assert!(rendered.contains("cwd: `/tmp/lucarnex`"));
-        assert!(!rendered.contains("pid:"));
+        assert!(observed_block.contains("provider: `codex`"));
+        assert!(observed_block.contains("session: `observed-thread`"));
+        assert!(observed_block.contains("last active: `05-01 00:00:00`"));
+        assert!(observed_block.contains("cwd: `/tmp/lucarnex`"));
+        assert!(!observed_block.contains("pid:"));
     }
 }
 

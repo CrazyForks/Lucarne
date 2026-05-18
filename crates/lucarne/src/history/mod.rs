@@ -39,7 +39,7 @@ pub struct HistoryEntry {
     pub summary: String,
     /// Last-active time as unix seconds.
     pub last_active_unix: i64,
-    /// Last-active timestamp for display (RFC3339-ish).
+    /// Last-active timestamp for display (`MM-DD HH:MM:SS` in local time).
     pub last_active_display: String,
 }
 
@@ -110,7 +110,7 @@ impl HistorySessionMeta {
             .filter(|ts| !ts.trim().is_empty())
         {
             if let Some(unix) = parse_rfc3339_unix(ts) {
-                return (unix, ts.to_string());
+                return (unix, format_unix(unix));
             }
         }
         if candidate.last_modified_unix > 0 {
@@ -123,7 +123,7 @@ impl HistorySessionMeta {
             .filter(|ts| !ts.trim().is_empty())
         {
             if let Some(unix) = parse_rfc3339_unix(ts) {
-                return (unix, ts.to_string());
+                return (unix, format_unix(unix));
             }
         }
         (0, format_unix(0))
@@ -915,9 +915,7 @@ fn parse_rfc3339_unix(s: &str) -> Option<i64> {
 }
 
 fn format_unix(unix: i64) -> String {
-    chrono::DateTime::<chrono::Utc>::from_timestamp(unix, 0)
-        .map(|dt| dt.to_rfc3339())
-        .unwrap_or_else(|| "unknown".into())
+    crate::time_display::format_last_active_display(unix)
 }
 
 #[cfg(test)]
@@ -957,6 +955,28 @@ mod tests {
         assert_eq!(stats.read_failures, 0);
         assert_eq!(stats.parse_failures, 1);
         assert_eq!(stats.skipped(), 1);
+    }
+
+    #[test]
+    fn history_session_meta_formats_last_active_display_short_local() {
+        let timestamp = "2026-05-18T05:43:59.985Z";
+        let unix = parse_rfc3339_unix(timestamp).expect("timestamp");
+        let candidate = HistoryCandidate::new("codex", PathBuf::from("/tmp/session.jsonl"), 0);
+        let meta = HistorySessionMeta {
+            session_id: "session".into(),
+            title: None,
+            cwd: None,
+            created_at: None,
+            updated_at: Some(timestamp.into()),
+        };
+
+        let (last_active_unix, display) = meta.last_active(&candidate);
+
+        assert_eq!(last_active_unix, unix);
+        assert_eq!(display, crate::time_display::format_last_active_display(unix));
+        assert!(!display.contains("2026"));
+        assert!(!display.contains('T'));
+        assert!(!display.ends_with('Z'));
     }
 
     #[test]
