@@ -2874,13 +2874,20 @@ impl LucarneCore {
             let provider_id = session.provider_id();
             let provider_session_id =
                 provider_session_id(provider_id.as_str(), native_resume_ref.as_str());
+            let live_instance_id = live_instance_id(session.instance_id().0.as_str());
+            let (last_active_unix, last_active_display) = state
+                .get_live_instance(&live_instance_id)
+                .map(live_instance_last_active)
+                .unwrap_or_else(|| (0, String::new()));
             targets.push(AgentProcessTarget {
                 workspace_id,
                 title: workspace.title.clone(),
                 provider_id: provider_id.as_str(),
                 provider_session_id,
                 native_resume_ref,
-                live_instance_id: live_instance_id(session.instance_id().0.as_str()),
+                live_instance_id,
+                last_active_unix,
+                last_active_display,
                 pid: session.process_id(),
             });
         }
@@ -3039,6 +3046,8 @@ struct AgentProcessTarget {
     provider_session_id: ProviderSessionId,
     native_resume_ref: SmolStr,
     live_instance_id: LiveInstanceId,
+    last_active_unix: i64,
+    last_active_display: String,
     pid: Option<i32>,
 }
 
@@ -3150,6 +3159,8 @@ fn build_agent_resource_snapshot(
             process_count: aggregate.process_count,
             cpu_percent: aggregate.cpu_percent,
             memory_bytes: aggregate.memory_bytes,
+            last_active_unix: target.last_active_unix,
+            last_active_display: target.last_active_display,
         });
     }
     let process_count = agents.iter().map(|agent| agent.process_count).sum();
@@ -3582,11 +3593,18 @@ fn parse_rfc3339_unix(timestamp: &str) -> Option<i64> {
         .map(|datetime| datetime.timestamp())
 }
 
+fn live_instance_last_active(live: &LiveInstanceRecord) -> (i64, String) {
+    let last_active_unix = system_time_unix(live.last_seen_at);
+    let last_active_display = crate::time_display::format_last_active_display(last_active_unix);
+    (last_active_unix, last_active_display)
+}
+
+fn system_time_unix(time: SystemTime) -> i64 {
+    time.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64
+}
+
 fn current_unix_seconds() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
+    system_time_unix(SystemTime::now())
 }
 
 fn observed_session_process_alive(session: &ObservedAgentSession) -> bool {
@@ -3866,6 +3884,12 @@ mod tests {
             Some(expected_identity.as_str())
         );
         assert!(snapshot.process_count >= 1);
+        assert!(snapshot.observed_sessions.is_empty());
+        let rendered = crate::core_service::render_agent_resource_snapshot(&snapshot);
+        assert!(
+            !rendered.contains("last active: `unknown`"),
+            "managed live agents should render last active from live session state"
+        );
     }
 
     #[tokio::test]

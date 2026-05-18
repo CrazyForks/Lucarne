@@ -169,6 +169,8 @@ pub struct AgentResourceEntry {
     pub process_count: usize,
     pub cpu_percent: f32,
     pub memory_bytes: u64,
+    pub last_active_unix: i64,
+    pub last_active_display: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,7 +228,7 @@ pub fn render_agent_resource_snapshot(snapshot: &AgentResourceSnapshot) -> Strin
         body.push_str("\n\n");
         body.push_str(agent.identity.as_deref().unwrap_or("unidentified"));
         body.push('\n');
-        let last_active_display = observed_last_active_display(snapshot, agent);
+        let last_active_display = agent_last_active_display(snapshot, agent);
         body.push_str(&format!(
             "workspace: `{}`\nprovider: `{}`\nsession: `{}`\nlast active: `{}`\npid: `{}`\nprocesses: `{}`\ncpu: `{}`\nmemory: `{}`",
             agent.workspace_id.as_str(),
@@ -285,10 +287,13 @@ pub fn render_kill_agent_report(report: &KillAgentReport) -> String {
     body
 }
 
-fn observed_last_active_display<'a>(
+fn agent_last_active_display<'a>(
     snapshot: &'a AgentResourceSnapshot,
-    agent: &AgentResourceEntry,
+    agent: &'a AgentResourceEntry,
 ) -> &'a str {
+    if !agent.last_active_display.trim().is_empty() {
+        return agent.last_active_display.as_str();
+    }
     snapshot
         .observed_sessions
         .iter()
@@ -341,6 +346,8 @@ mod tests {
                 process_count: 2,
                 cpu_percent: 0.6,
                 memory_bytes: 221_800_000,
+                last_active_unix: 1_776_960_000,
+                last_active_display: "05-01 00:00:00".into(),
             }],
             observed_sessions: vec![
                 ObservedAgentSession {

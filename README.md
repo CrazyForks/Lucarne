@@ -188,6 +188,7 @@ cargo +nightly test -Zbuild-dir-new-layout
 ## Roadmap
 - [ ] Linux 支持：补齐安装说明、服务管理、发布包与 smoke test
 - [ ] Windows 支持：补齐安装说明、后台运行、路径 / 进程兼容与发布包
+- [ ] 消息模式 steer/queue
 - [ ] agent-sessions 整理为独立crate
 - [ ] 支持远程 agent 环境
 - [ ] More channels：Discord、Slack、飞书、钉钉、Matrix、QQ 等更多入口

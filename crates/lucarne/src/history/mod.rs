@@ -973,7 +973,10 @@ mod tests {
         let (last_active_unix, display) = meta.last_active(&candidate);
 
         assert_eq!(last_active_unix, unix);
-        assert_eq!(display, crate::time_display::format_last_active_display(unix));
+        assert_eq!(
+            display,
+            crate::time_display::format_last_active_display(unix)
+        );
         assert!(!display.contains("2026"));
         assert!(!display.contains('T'));
         assert!(!display.ends_with('Z'));
