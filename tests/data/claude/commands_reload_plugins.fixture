@@ -1,7 +1,7 @@
 # Command catalog: initialize can omit commands; reload_plugins response supplies them.
 OUT {"type":"system","subtype":"init","session_id":"sess-commands-reload","model":"default","permissionMode":"default","slash_commands":["context","review"],"skills":["review"]}
-OUT {"type":"control_response","response":{"subtype":"success","request_id":"amux-control-1","response":{"models":[{"value":"default","displayName":"Default (recommended)","description":"Use the default model","supportsEffort":true,"supportedEffortLevels":["low","medium","high","max"]}]}}}
-EXPECT_IN_CONTAINS_NEXT "\"request_id\":\"amux-control-2\""
+OUT {"type":"control_response","response":{"subtype":"success","request_id":"lucarne-control-1","response":{"models":[{"value":"default","displayName":"Default (recommended)","description":"Use the default model","supportsEffort":true,"supportedEffortLevels":["low","medium","high","max"]}]}}}
+EXPECT_IN_CONTAINS_NEXT "\"request_id\":\"lucarne-control-2\""
 EXPECT_IN_CONTAINS "\"subtype\":\"reload_plugins\""
-OUT {"type":"control_response","response":{"subtype":"success","request_id":"amux-control-2","response":{"commands":[{"name":"context","description":"Show current context usage","argumentHint":""},{"name":"review","description":"Review a pull request","argumentHint":"[review focus]"}]}}}
+OUT {"type":"control_response","response":{"subtype":"success","request_id":"lucarne-control-2","response":{"commands":[{"name":"context","description":"Show current context usage","argumentHint":""},{"name":"review","description":"Review a pull request","argumentHint":"[review focus]"}]}}}
 EXIT 0

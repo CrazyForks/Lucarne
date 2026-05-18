@@ -62,6 +62,7 @@ pub fn new(opts: Options) -> Arc<ProtocolAdapter> {
         },
         arg_profile: ArgProfile {
             resume_session_key: "thread_id".into(),
+            resume_session_id_hint: true,
             ..Default::default()
         },
         config_schema: ConfigSchema {
@@ -117,4 +118,16 @@ pub fn new(opts: Options) -> Arc<ProtocolAdapter> {
             move || probe_version(DESCRIPTOR.id.as_str(), &bin, Some("0.100.0"))
         })),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_resume_ref_is_known_session_id_hint() {
+        let adapter = new(Options::default());
+
+        assert!(adapter.spec().arg_profile.resume_session_id_hint);
+    }
 }

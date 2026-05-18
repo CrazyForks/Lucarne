@@ -215,7 +215,7 @@ async fn next_runtime_event(live: &mut LiveRuntimeSession) -> Event {
 
 async fn collect_until_quiet(live: &mut LiveRuntimeSession, events: &mut Vec<Event>) {
     loop {
-        match timeout(live.provider.post_turn_quiet(), live.events.recv()).await {
+        match timeout(live.post_turn_quiet(), live.events.recv()).await {
             Ok(Some(event)) => events.push(event),
             Ok(None) | Err(_) => break,
         }
@@ -302,6 +302,18 @@ fn register_live_provider(
 }
 
 impl RegisteredLiveProvider {
+    fn post_turn_quiet(&self) -> Duration {
+        if self
+            .recording
+            .as_ref()
+            .is_some_and(PreparedRecordingRun::is_replay)
+        {
+            live::LIVE_REPLAY_POST_TURN_QUIET
+        } else {
+            self.provider.post_turn_quiet()
+        }
+    }
+
     fn apply_recorded_effects(&mut self, workdir: &std::path::Path) {
         if let Some(recording) = self.recording.as_mut() {
             recording
@@ -680,7 +692,7 @@ async fn assert_live_command_round_trips(
             }
         }
         loop {
-            match timeout(registered.provider.post_turn_quiet(), events.recv()).await {
+            match timeout(registered.post_turn_quiet(), events.recv()).await {
                 Ok(Some(event)) => {
                     let failure = match &event {
                         Event::TurnFailed(failure) => {
@@ -785,7 +797,7 @@ async fn assert_live_command_round_trips(
         }
 
         loop {
-            match timeout(registered.provider.post_turn_quiet(), events.recv()).await {
+            match timeout(registered.post_turn_quiet(), events.recv()).await {
                 Ok(Some(event)) => {
                     let failure = match &event {
                         Event::TurnFailed(failure) => {
@@ -1742,6 +1754,10 @@ async fn assert_live_multi_turn_conversation(provider_name: &'static str, case_i
         panic!("open multi-turn live session failed for {provider_name} case {case_id}: {err}")
     });
     let mut events: Vec<Event> = Vec::new();
+    // Codex ACP recordings in this suite do not include native `turn/completed`
+    // after every reply; later prompts are accepted after the final answer item.
+    // Keep the stronger completion-boundary assertion for providers that emit it.
+    let requires_turn_completed_boundary = provider_name != "codex";
 
     for turn in 1..=TURN_COUNT {
         let prompt = prompt_for(turn);
@@ -1766,14 +1782,24 @@ async fn assert_live_multi_turn_conversation(provider_name: &'static str, case_i
             let event = timeout(remaining, live.events.recv())
                 .await
                 .unwrap_or_else(|_| {
+                    let boundary = if requires_turn_completed_boundary {
+                        "TurnCompleted"
+                    } else {
+                        "assistant token"
+                    };
                     panic!(
-                        "{provider_name} turn {turn} timed out before TurnCompleted; events: {}",
+                        "{provider_name} turn {turn} timed out before {boundary}; events: {}",
                         summarize_runtime_events(&events)
                     )
                 })
                 .unwrap_or_else(|| {
+                    let boundary = if requires_turn_completed_boundary {
+                        "TurnCompleted"
+                    } else {
+                        "assistant token"
+                    };
                     panic!(
-                        "{provider_name} turn {turn} stream closed before TurnCompleted; events: {}",
+                        "{provider_name} turn {turn} stream closed before {boundary}; events: {}",
                         summarize_runtime_events(&events)
                     )
                 });
@@ -1792,11 +1818,17 @@ async fn assert_live_multi_turn_conversation(provider_name: &'static str, case_i
                         summarize_runtime_events(&events)
                     );
                 }
-                Event::TurnCompleted(_) => {
+                Event::TurnCompleted(_) if requires_turn_completed_boundary => {
                     events.push(event);
                     break;
                 }
                 _ => events.push(event),
+            }
+            if !requires_turn_completed_boundary {
+                let turn_reply = assistant_transcript(&events[turn_start_idx..]);
+                if turn_reply.contains(&token) {
+                    break;
+                }
             }
         }
         let turn_slice = &events[turn_start_idx..];
@@ -1817,11 +1849,13 @@ async fn assert_live_multi_turn_conversation(provider_name: &'static str, case_i
         .iter()
         .filter(|e| matches!(e, Event::TurnCompleted(_)))
         .count();
-    assert_eq!(
-        completed_turns, TURN_COUNT,
-        "{provider_name} expected {TURN_COUNT} TurnCompleted events, saw {completed_turns}; events: {}",
-        summarize_runtime_events(&events)
-    );
+    if requires_turn_completed_boundary {
+        assert_eq!(
+            completed_turns, TURN_COUNT,
+            "{provider_name} expected {TURN_COUNT} TurnCompleted events, saw {completed_turns}; events: {}",
+            summarize_runtime_events(&events)
+        );
+    }
 
     let closed = close_live_runtime_session(
         &mut live,
@@ -2027,7 +2061,16 @@ async fn agent_runtime_live_tool_flow_codex() {
         summarize_runtime_events(&res.events)
     );
     let raw = fs::read_to_string(&output_path).unwrap();
-    assert_eq!(raw.trim(), "lucarne-live-tool");
+    assert_eq!(
+        raw.trim(),
+        live::expected_live_tool_contents(
+            "codex",
+            "agent_runtime_live_e2e",
+            "agent_runtime_live_tool_flow_codex",
+            "live-runtime-output.txt"
+        )
+        .trim()
+    );
     assert!(
         assistant_transcript(&res.events).contains("TOOL_OK"),
         "missing TOOL_OK assistant reply; events: {}",
@@ -2103,7 +2146,16 @@ async fn agent_runtime_live_tool_flow_gemini() {
         summarize_runtime_events(&events)
     );
     let raw = fs::read_to_string(&output_path).unwrap();
-    assert_eq!(raw.trim(), "lucarne-live-tool");
+    assert_eq!(
+        raw.trim(),
+        live::expected_live_tool_contents(
+            "gemini",
+            "agent_runtime_live_e2e",
+            "agent_runtime_live_tool_flow_gemini",
+            "live-runtime-gemini-tool-output.txt"
+        )
+        .trim()
+    );
     assert!(
         assistant_transcript(&events).contains("TOOL_OK"),
         "missing TOOL_OK assistant reply; events: {}",
@@ -2157,7 +2209,13 @@ async fn agent_runtime_live_tool_flow_pi() {
     );
     assert_eq!(
         fs::read_to_string(&output_path).unwrap().trim(),
-        "lucarne-live-tool"
+        live::expected_live_tool_contents(
+            "pi",
+            "agent_runtime_live_e2e",
+            "agent_runtime_live_tool_flow_pi",
+            "live-runtime-output.txt"
+        )
+        .trim()
     );
     assert!(
         assistant_transcript(&res.events).contains("TOOL_OK"),
@@ -2399,7 +2457,16 @@ async fn agent_runtime_live_approval_flow_gemini_body() {
         summarize_runtime_events(&events)
     );
     let raw = fs::read_to_string(&output_path).unwrap();
-    assert_eq!(raw.trim(), "lucarne-live-tool");
+    assert_eq!(
+        raw.trim(),
+        live::expected_live_tool_contents(
+            "gemini",
+            "agent_runtime_live_e2e",
+            "agent_runtime_live_approval_flow_gemini",
+            "live-runtime-gemini-output.txt"
+        )
+        .trim()
+    );
     assert!(
         has_success_tool_result(&events),
         "missing successful tool result after approval; events: {}",
@@ -3100,7 +3167,9 @@ async fn agent_runtime_live_interrupt_flow_gemini_body() {
                     .await
                     .expect("manual gemini approval resolve");
             }
-            Event::ToolCall(tool_call) if tool_call.name == "shell" => {
+            Event::ToolCall(tool_call)
+                if tool_call.name == "shell" || tool_call.name == "execute" =>
+            {
                 live.session
                     .interrupt()
                     .await
@@ -3130,8 +3199,8 @@ async fn agent_runtime_live_interrupt_flow_gemini_body() {
         summarize_runtime_events(&events)
     );
     assert!(
-        has_tool_call_named(&events, "shell"),
-        "expected shell tool call; events: {}",
+        has_tool_call_named(&events, "shell") || has_tool_call_named(&events, "execute"),
+        "expected shell/execute tool call; events: {}",
         summarize_runtime_events(&events)
     );
     assert!(
@@ -3377,7 +3446,13 @@ async fn agent_runtime_live_shared_runtime_manages_multiple_sessions() {
     );
     assert_eq!(
         fs::read_to_string(&gemini_output).unwrap().trim(),
-        "lucarne-live-tool"
+        live::expected_live_tool_contents(
+            "gemini",
+            "agent_runtime_live_e2e",
+            "agent_runtime_live_shared_runtime_manages_multiple_sessions_gemini",
+            "live-runtime-shared-gemini-output.txt"
+        )
+        .trim()
     );
     assert!(closed_instances.contains(&codex_instance));
     assert!(closed_instances.contains(&gemini_instance));

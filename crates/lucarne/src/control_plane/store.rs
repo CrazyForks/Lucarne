@@ -191,10 +191,8 @@ impl ControlPlaneSqliteStore {
         Ok(())
     }
 
-    /// Replace all non-timeline entities in one transaction.
-    /// Uses bulk DELETE + INSERT instead of per-row SELECT + diff.
-    /// O(n) writes instead of O(n) reads — faster for small tables (~hundreds
-    /// of rows) and avoids the HashMap allocation on every call.
+    /// Replace non-timeline snapshot entities in one transaction while preserving
+    /// rows whose serialized state did not change.
     pub fn replace_non_timeline_entities(
         &self,
         entities: Vec<ControlPlanePersistenceEntity>,
@@ -205,16 +203,46 @@ impl ControlPlaneSqliteStore {
         let tx = conn.transaction()?;
         {
             tx.execute(
-                "DELETE FROM control_plane_entities WHERE kind != 'timeline'",
+                "CREATE TEMP TABLE IF NOT EXISTS control_plane_replace_keys (
+                    kind TEXT NOT NULL,
+                    entity_id TEXT NOT NULL,
+                    PRIMARY KEY(kind, entity_id)
+                 ) WITHOUT ROWID",
+                [],
+            )?;
+            tx.execute("DELETE FROM control_plane_replace_keys", [])?;
+            {
+                let mut key_stmt = tx.prepare(
+                    "INSERT INTO control_plane_replace_keys (kind, entity_id)
+                     VALUES (?1, ?2)",
+                )?;
+                for entity in &entities {
+                    debug_assert_ne!(entity.kind, "timeline");
+                    key_stmt.execute(params![entity.kind, entity.entity_id])?;
+                }
+            }
+            tx.execute(
+                "DELETE FROM control_plane_entities
+                 WHERE kind != 'timeline'
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM control_plane_replace_keys keys
+                       WHERE keys.kind = control_plane_entities.kind
+                         AND keys.entity_id = control_plane_entities.entity_id
+                   )",
                 [],
             )?;
             let mut stmt = tx.prepare(
                 "INSERT INTO control_plane_entities
                     (kind, entity_id, workspace_id, state_json)
-                 VALUES (?1, ?2, ?3, ?4)",
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(kind, entity_id) DO UPDATE SET
+                    workspace_id = excluded.workspace_id,
+                    state_json = excluded.state_json
+                 WHERE control_plane_entities.workspace_id IS NOT excluded.workspace_id
+                    OR control_plane_entities.state_json IS NOT excluded.state_json",
             )?;
             for entity in &entities {
-                debug_assert_ne!(entity.kind, "timeline");
                 stmt.execute(params![
                     entity.kind,
                     entity.entity_id,
@@ -222,6 +250,7 @@ impl ControlPlaneSqliteStore {
                     entity.state_json
                 ])?;
             }
+            tx.execute("DELETE FROM control_plane_replace_keys", [])?;
         }
         tx.commit()?;
         debug!(

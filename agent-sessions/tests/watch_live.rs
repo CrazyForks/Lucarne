@@ -89,7 +89,6 @@ async fn wait_for_assistant_response(watcher: &mut SessionWatcher, expected: &st
 }
 
 #[cfg(feature = "codex")]
-#[ignore]
 #[tokio::test]
 async fn live_codex_watch_emits_appended_assistant_response() {
     let temp = tempfile::tempdir().unwrap();
@@ -115,7 +114,6 @@ async fn live_codex_watch_emits_appended_assistant_response() {
 }
 
 #[cfg(feature = "claude")]
-#[ignore]
 #[tokio::test]
 async fn live_claude_watch_emits_appended_assistant_response() {
     let temp = tempfile::tempdir().unwrap();
@@ -139,7 +137,6 @@ async fn live_claude_watch_emits_appended_assistant_response() {
 }
 
 #[cfg(feature = "copilot")]
-#[ignore]
 #[tokio::test]
 async fn live_copilot_watch_emits_appended_assistant_response() {
     let temp = tempfile::tempdir().unwrap();
@@ -163,7 +160,6 @@ async fn live_copilot_watch_emits_appended_assistant_response() {
 }
 
 #[cfg(feature = "cursor")]
-#[ignore]
 #[tokio::test]
 async fn live_cursor_watch_emits_appended_assistant_response() {
     let temp = tempfile::tempdir().unwrap();
@@ -187,9 +183,8 @@ async fn live_cursor_watch_emits_appended_assistant_response() {
 }
 
 #[cfg(feature = "gemini")]
-#[ignore]
 #[tokio::test]
-async fn live_gemini_watch_emits_rewritten_assistant_response() {
+async fn live_gemini_watch_ignores_rewritten_assistant_response_without_incremental_target() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("gemini-live.json");
     write_parent(
@@ -204,6 +199,11 @@ async fn live_gemini_watch_emits_rewritten_assistant_response() {
     )
     .unwrap();
 
-    let update = wait_for_assistant_response(&mut watcher, "gemini pong").await;
-    assert_eq!(update.provider, watch_provider("gemini"));
+    let updates = recv_timeout(&mut watcher, Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert!(
+        updates.is_empty(),
+        "Gemini rewritten JSON must not be full-reparsed by live watch; updates={updates:?}"
+    );
 }

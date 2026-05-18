@@ -87,6 +87,12 @@ struct WatchTarget {
     recursive_mode: RecursiveMode,
 }
 
+#[derive(Debug)]
+struct JsonlTail {
+    complete: Vec<u8>,
+    pending_partial: Vec<u8>,
+}
+
 impl WatchTarget {
     fn non_recursive(path: PathBuf) -> Self {
         Self {
@@ -544,33 +550,100 @@ impl SessionWatcher {
         let incremental = provider_supports_incremental_watch_events(provider);
         if incremental {
             return match self.read_metadata(provider, &path) {
-                Ok(parsed) => {
-                    let watch_state = self.baseline_watch_state(provider, &path);
+                Ok(metadata) => {
+                    let tail = match self.read_latest_jsonl_tail(&path, len) {
+                        Ok(tail) => tail,
+                        Err(error) => {
+                            warn!(
+                                target: "agent_sessions::watch",
+                                provider = provider.as_str(),
+                                path = %path.display(),
+                                error = %error,
+                                "failed to read new jsonl session tail"
+                            );
+                            return Some(WatchUpdate {
+                                provider,
+                                path,
+                                session_id: metadata.session_id,
+                                cwd: metadata.cwd,
+                                change: WatchChange::ParseError,
+                                events: Vec::new().into_boxed_slice(),
+                                error: Some(error.to_string().into()),
+                            });
+                        }
+                    };
+                    let mut watch_state = ProviderWatchState::default();
+                    let (session_id, cwd, events) = if tail.complete.is_empty() {
+                        (
+                            metadata.session_id.clone(),
+                            metadata.cwd.clone(),
+                            Vec::new().into_boxed_slice(),
+                        )
+                    } else {
+                        match self.parse_delta(provider, &path, tail.complete) {
+                            Ok(parsed) => {
+                                let events = dedupe_provider_watch_events(
+                                    provider,
+                                    parsed.events,
+                                    &mut watch_state,
+                                );
+                                let events = normalize_provider_watch_events(
+                                    provider,
+                                    events,
+                                    &mut watch_state,
+                                );
+                                let events = created_watch_tail_visible_events(events);
+                                (
+                                    metadata.session_id.clone().or(parsed.session_id),
+                                    metadata.cwd.clone().or(parsed.cwd),
+                                    events,
+                                )
+                            }
+                            Err(error) => {
+                                warn!(
+                                    target: "agent_sessions::watch",
+                                    provider = provider.as_str(),
+                                    path = %path.display(),
+                                    error = %error,
+                                    "failed to parse new jsonl session tail"
+                                );
+                                return Some(WatchUpdate {
+                                    provider,
+                                    path,
+                                    session_id: metadata.session_id,
+                                    cwd: metadata.cwd,
+                                    change: WatchChange::ParseError,
+                                    events: Vec::new().into_boxed_slice(),
+                                    error: Some(error.to_string().into()),
+                                });
+                            }
+                        }
+                    };
                     self.baselines.insert(
                         path.clone(),
                         FileSnapshot {
                             len,
                             has_subscriber,
-                            session_id: parsed.session_id.clone(),
-                            cwd: parsed.cwd.clone(),
+                            session_id: session_id.clone(),
+                            cwd: cwd.clone(),
                             watch_state,
-                            pending_partial: Vec::new(),
+                            pending_partial: tail.pending_partial,
                         },
                     );
                     debug!(
                         target: "agent_sessions::watch",
                         provider = provider.as_str(),
                         path = %path.display(),
-                        events = parsed.events.len(),
+                        events = events.len(),
                         "new jsonl session file parsed",
                     );
                     Some(WatchUpdate {
                         provider,
                         path,
-                        session_id: parsed.session_id,
-                        cwd: parsed.cwd,
+                        session_id,
+                        cwd,
                         change: WatchChange::Created,
-                        events: Vec::new().into_boxed_slice(),
+                        events,
                         error: None,
                     })
                 }
@@ -779,23 +852,119 @@ impl SessionWatcher {
         len: u64,
     ) -> std::io::Result<(u64, Vec<u8>)> {
         let mut file = fs::File::open(path)?;
-        let delta_len = len.saturating_sub(old.len);
-        let start = if delta_len > MAX_WATCH_READ_BYTES {
-            len.saturating_sub(MAX_WATCH_READ_BYTES)
-        } else {
-            old.len
-        };
-        file.seek(SeekFrom::Start(start))?;
-        let mut bytes = if start == old.len {
-            old.pending_partial.clone()
-        } else {
-            Vec::new()
-        };
-        file.take(len - start).read_to_end(&mut bytes)?;
-        if start > old.len {
-            drop_leading_partial_line(&mut bytes);
+        let mut start = len;
+        let lower = old.len;
+        let mut bytes = Vec::new();
+        while start > lower {
+            let chunk_start = start.saturating_sub(MAX_WATCH_READ_BYTES).max(lower);
+            file.seek(SeekFrom::Start(chunk_start))?;
+            let mut chunk = Vec::new();
+            (&mut file)
+                .take(start.saturating_sub(chunk_start))
+                .read_to_end(&mut chunk)?;
+            chunk.extend_from_slice(&bytes);
+            bytes = chunk;
+            if chunk_start == lower {
+                if !old.pending_partial.is_empty() {
+                    let mut combined = old.pending_partial.clone();
+                    combined.extend_from_slice(&bytes);
+                    bytes = combined;
+                }
+                break;
+            }
+            if has_complete_jsonl_record_after_leading_boundary(&bytes) {
+                drop_leading_partial_line(&mut bytes);
+                break;
+            }
+            start = chunk_start;
         }
         Ok((len, bytes))
+    }
+
+    fn read_latest_jsonl_tail(&self, path: &Path, len: u64) -> std::io::Result<JsonlTail> {
+        let mut file = fs::File::open(path)?;
+        let mut start = len;
+        let mut bytes = Vec::new();
+        while start > 0 {
+            let chunk_start = start.saturating_sub(MAX_WATCH_READ_BYTES);
+            file.seek(SeekFrom::Start(chunk_start))?;
+            let mut chunk = Vec::new();
+            (&mut file)
+                .take(start.saturating_sub(chunk_start))
+                .read_to_end(&mut chunk)?;
+            chunk.extend_from_slice(&bytes);
+            bytes = chunk;
+
+            if bytes.ends_with(b"\n") {
+                if chunk_start == 0 {
+                    keep_last_complete_jsonl_record(&mut bytes);
+                    return Ok(JsonlTail {
+                        complete: bytes,
+                        pending_partial: Vec::new(),
+                    });
+                }
+                if has_complete_jsonl_record_after_leading_boundary(&bytes) {
+                    drop_leading_partial_line(&mut bytes);
+                    keep_last_complete_jsonl_record(&mut bytes);
+                    return Ok(JsonlTail {
+                        complete: bytes,
+                        pending_partial: Vec::new(),
+                    });
+                }
+            } else if let Some(last_newline) = bytes.iter().rposition(|byte| *byte == b'\n') {
+                return Ok(JsonlTail {
+                    complete: Vec::new(),
+                    pending_partial: bytes.split_off(last_newline + 1),
+                });
+            }
+
+            start = chunk_start;
+        }
+
+        Ok(if bytes.ends_with(b"\n") {
+            keep_last_complete_jsonl_record(&mut bytes);
+            JsonlTail {
+                complete: bytes,
+                pending_partial: Vec::new(),
+            }
+        } else {
+            JsonlTail {
+                complete: Vec::new(),
+                pending_partial: bytes,
+            }
+        })
+    }
+
+    fn read_trailing_partial_jsonl(&self, path: &Path, len: u64) -> std::io::Result<Vec<u8>> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let mut file = fs::File::open(path)?;
+        file.seek(SeekFrom::Start(len - 1))?;
+        let mut last = [0_u8; 1];
+        file.read_exact(&mut last)?;
+        if last[0] == b'\n' {
+            return Ok(Vec::new());
+        }
+
+        let mut start = len;
+        let mut bytes = Vec::new();
+        while start > 0 {
+            let chunk_start = start.saturating_sub(MAX_WATCH_READ_BYTES);
+            file.seek(SeekFrom::Start(chunk_start))?;
+            let mut chunk = Vec::new();
+            (&mut file)
+                .take(start.saturating_sub(chunk_start))
+                .read_to_end(&mut chunk)?;
+            chunk.extend_from_slice(&bytes);
+            bytes = chunk;
+
+            if let Some(last_newline) = bytes.iter().rposition(|byte| *byte == b'\n') {
+                return Ok(bytes.split_off(last_newline + 1));
+            }
+            start = chunk_start;
+        }
+        Ok(bytes)
     }
 
     fn parse_delta(
@@ -1074,7 +1243,9 @@ impl SessionWatcher {
                 session_id: parsed.session_id,
                 cwd: parsed.cwd,
                 watch_state: self.baseline_watch_state(provider, path),
-                pending_partial: Vec::new(),
+                pending_partial: self
+                    .read_trailing_partial_jsonl(path, metadata.len())
+                    .unwrap_or_default(),
             });
         }
         Some(FileSnapshot {
@@ -1209,6 +1380,52 @@ fn poll_sleep(
             Poll::Ready(())
         }
         Poll::Pending => Poll::Pending,
+    }
+}
+
+fn has_complete_jsonl_record_after_leading_boundary(bytes: &[u8]) -> bool {
+    bytes
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .is_some_and(|newline| newline + 1 < bytes.len())
+}
+
+fn created_watch_tail_visible_events(events: Box<[WatchEvent]>) -> Box<[WatchEvent]> {
+    events
+        .into_vec()
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event,
+                WatchEvent::AssistantMessage(_)
+                    | WatchEvent::ToolCall(_)
+                    | WatchEvent::ToolResult(_)
+                    | WatchEvent::Usage(_)
+                    | WatchEvent::TurnCompleted(_)
+                    | WatchEvent::TurnFailed(_)
+            )
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice()
+}
+
+fn keep_last_complete_jsonl_record(bytes: &mut Vec<u8>) {
+    if !bytes.ends_with(b"\n") {
+        return;
+    }
+    let before_final_newline = bytes.len().saturating_sub(1);
+    let second_last_start = bytes[..before_final_newline]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .and_then(|last_newline| {
+            bytes[..last_newline]
+                .iter()
+                .rposition(|byte| *byte == b'\n')
+                .map(|second_last_newline| second_last_newline + 1)
+        })
+        .unwrap_or(0);
+    if second_last_start > 0 {
+        bytes.drain(..second_last_start);
     }
 }
 

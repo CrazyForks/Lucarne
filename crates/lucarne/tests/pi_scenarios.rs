@@ -374,7 +374,7 @@ async fn fork_flow() {
             CommandResultData::Forked(result) => Some(result),
             _ => None,
         })
-        .expect("fork result");
+        .unwrap_or_else(|| panic!("fork result; events = {:?}", r.events));
     assert_eq!(
         fork.session_ref.as_ref().map(|r| r.0.as_str()),
         Some("forked-1")
@@ -425,7 +425,7 @@ async fn fork_unpersisted_flow_is_live_only_until_pi_writes_session_file() {
             CommandResultData::Forked(result) => Some(result),
             _ => None,
         })
-        .expect("fork result");
+        .unwrap_or_else(|| panic!("fork result; events = {:?}", r.events));
     assert!(
         fork.session_ref.is_none(),
         "unpersisted Pi forks must not be advertised as resumable"

@@ -1,5 +1,5 @@
 use super::providers::{configured_live_providers, preflight_live_provider, LiveProvider};
-use super::recording::{prepare_recorded_provider, RecordedLiveCase};
+use super::recording::{prepare_recorded_provider, PreparedRecordingRun, RecordedLiveCase};
 use crate::dialect::{Input, SessionParams};
 use crate::event::{
     Decision, Event, Kind, Payload, PermissionAnswer, PermissionRequest, PermissionResponse,
@@ -140,6 +140,14 @@ pub async fn run_live_turn_with_hooks(
         .await
         .map_err(|err| format!("send: {err}"))?;
 
+    let post_turn_quiet = if recorded
+        .as_ref()
+        .is_some_and(PreparedRecordingRun::is_replay)
+    {
+        super::providers::LIVE_REPLAY_POST_TURN_QUIET
+    } else {
+        provider.post_turn_quiet()
+    };
     let hard_deadline = Instant::now() + timeout;
     let mut events = Vec::new();
     let mut terminal_observed = false;
@@ -208,9 +216,9 @@ pub async fn run_live_turn_with_hooks(
                 recorded.apply_recorded_effects(&spec.workdir)?;
             }
             terminal_observed = true;
-            quiet_deadline = Some(Instant::now() + provider.post_turn_quiet());
+            quiet_deadline = Some(Instant::now() + post_turn_quiet);
         } else if terminal_observed {
-            quiet_deadline = Some(Instant::now() + provider.post_turn_quiet());
+            quiet_deadline = Some(Instant::now() + post_turn_quiet);
         }
         events.push(event);
     }

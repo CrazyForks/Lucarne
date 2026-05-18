@@ -22,6 +22,8 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
+
+pub const LIVE_REPLAY_POST_TURN_QUIET: Duration = Duration::from_millis(50);
 #[cfg(any(feature = "codex", feature = "gemini"))]
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 #[cfg(any(feature = "codex", feature = "gemini"))]

@@ -85,6 +85,29 @@ mod tests {
             value.pointer("/request/subtype").and_then(|v| v.as_str()),
             Some("initialize")
         );
+        assert_eq!(
+            value.get("request_id").and_then(|v| v.as_str()),
+            Some("lucarne-control-1")
+        );
+    }
+
+    #[test]
+    fn legacy_amux_control_response_matches_current_lucarne_request() {
+        let mut claude = Claude::new();
+        claude.pending_controls.insert(
+            "lucarne-control-1".into(),
+            super::PendingControlCommand::ReloadPlugins,
+        );
+
+        let events = claude.translate(
+            br#"{"type":"control_response","response":{"subtype":"success","request_id":"amux-control-1","response":{}}}"#,
+        );
+
+        assert!(events.is_empty());
+        assert!(
+            claude.pending_controls.is_empty(),
+            "legacy replay response id should complete current lucarne control request"
+        );
     }
 
     #[test]
@@ -966,9 +989,13 @@ impl Claude {
                 self.account = Some(account.clone());
             }
         }
-        let Some(pending) = self.pending_controls.remove(request_id) else {
+        let Some(pending_key) = self.control_pending_key(request_id) else {
             return Vec::new();
         };
+        let Some(pending) = self.pending_controls.remove(pending_key.as_str()) else {
+            return Vec::new();
+        };
+        let request_id = pending_key.as_str();
         if response.get("subtype").and_then(Value::as_str) != Some("success") {
             if matches!(
                 pending,
@@ -1076,6 +1103,16 @@ impl Claude {
             }
             pending => self.finish_control_command(request_id, pending, response.get("response")),
         }
+    }
+
+    fn control_pending_key(&self, request_id: &str) -> Option<String> {
+        if self.pending_controls.contains_key(request_id) {
+            return Some(request_id.to_string());
+        }
+        request_id
+            .strip_prefix("amux-control-")
+            .map(|suffix| format!("lucarne-control-{suffix}"))
+            .filter(|key| self.pending_controls.contains_key(key))
     }
 
     fn finish_control_command(

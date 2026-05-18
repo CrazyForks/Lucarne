@@ -178,7 +178,16 @@ async fn tool_flow_codex() {
         live::summarize_live_events(&res.events)
     );
     let raw = fs::read_to_string(&output_path).unwrap();
-    assert_eq!(raw.trim(), "lucarne-live-tool");
+    assert_eq!(
+        raw.trim(),
+        live::expected_live_tool_contents(
+            "codex",
+            "live_e2e",
+            "tool_flow_codex",
+            "live-output.txt"
+        )
+        .trim()
+    );
     let transcript = assistant_transcript(&collect_timelines(
         &res.events,
         TimelineType::AssistantMessage,
@@ -236,7 +245,16 @@ async fn tool_flow_gemini() {
         live::summarize_live_events(&res.events)
     );
     let raw = fs::read_to_string(&output_path).unwrap();
-    assert_eq!(raw.trim(), "lucarne-live-tool");
+    assert_eq!(
+        raw.trim(),
+        live::expected_live_tool_contents(
+            "gemini",
+            "live_e2e",
+            "tool_flow_gemini",
+            "live-output.txt"
+        )
+        .trim()
+    );
     let transcript = assistant_transcript(&collect_timelines(
         &res.events,
         TimelineType::AssistantMessage,
@@ -286,7 +304,11 @@ async fn tool_flow_pi() {
         live::summarize_live_events(&res.events)
     );
     let raw = fs::read_to_string(&output_path).unwrap();
-    assert_eq!(raw.trim(), "lucarne-live-tool");
+    assert_eq!(
+        raw.trim(),
+        live::expected_live_tool_contents("pi", "live_e2e", "tool_flow_pi", "live-output.txt")
+            .trim()
+    );
     let transcript = assistant_transcript(&collect_timelines(
         &res.events,
         TimelineType::AssistantMessage,
@@ -497,13 +519,20 @@ async fn gemini_cancelled_flow() {
                                 .tool_call
                                 .as_ref()
                                 .is_some_and(|tool| {
-                                    tool.call.name == "shell"
+                                    (tool.call.name == "shell"
                                         && tool
                                             .call
                                             .input
                                             .get("command")
                                             .and_then(serde_json::Value::as_str)
-                                            .is_some_and(|command| command.contains("sleep 30"))
+                                            .is_some_and(|command| command.contains("sleep 30")))
+                                        || (tool.call.name == "execute"
+                                            && tool
+                                                .call
+                                                .input
+                                                .get("title")
+                                                .and_then(serde_json::Value::as_str)
+                                                .is_some_and(|title| title.contains("sleep 30")))
                                 })
                 )
             })),

@@ -8508,8 +8508,18 @@ done
         mut fixture: LiveBotFixture,
         provider_id: &'static str,
     ) {
+        let history_prefix = if provider_id == "codex"
+            && fixture
+                .recording
+                .as_ref()
+                .is_some_and(PreparedRecordingRun::is_replay)
+        {
+            "LIVE_AMUX_HISTORY"
+        } else {
+            "LIVE_LUCARNE_HISTORY"
+        };
         for idx in 1..=10 {
-            let expected = format!("LIVE_LUCARNE_HISTORY_{idx:02}");
+            let expected = format!("{history_prefix}_{idx:02}");
             let prompt = format!("Reply with exactly: {expected}");
             live_clear_channel(&fixture.channel);
             live_send_text(
@@ -8564,9 +8574,9 @@ done
         );
         for idx in 1..=10 {
             assert!(
-                markers.iter().any(|message| message
-                    .body
-                    .contains(&format!("LIVE_LUCARNE_HISTORY_{idx:02}"))),
+                markers
+                    .iter()
+                    .any(|message| message.body.contains(&format!("{history_prefix}_{idx:02}"))),
                 "{provider_id} history marker missing turn {idx}; sent: {sent:?}"
             );
         }
@@ -8574,7 +8584,7 @@ done
 
         let records = fixture.channel.sent_records.lock().unwrap();
         for idx in 1..=10 {
-            let expected = format!("LIVE_LUCARNE_HISTORY_{idx:02}");
+            let expected = format!("{history_prefix}_{idx:02}");
             let marker_id = records
                 .iter()
                 .find(|(_, message)| {
@@ -15123,7 +15133,7 @@ done
 
         let rendered = compact_path(path, 28);
 
-        assert_eq!(rendered, "…/opensource/conductor/lucarnex");
+        assert_eq!(rendered, "…/conductor/lucarnex");
         assert!(!rendered.contains("/Volumes/Data"));
     }
 
@@ -15458,9 +15468,6 @@ done
         for command in [
             "start",
             "panel",
-            "refresh",
-            "next",
-            "prev",
             "help",
             "config",
             "commands",

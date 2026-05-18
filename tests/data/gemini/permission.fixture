@@ -5,7 +5,7 @@ OUT {"jsonrpc":"2.0","id":2,"result":{"sessionId":"gemini-sess-permission","mode
 EXPECT_IN_CONTAINS "\"method\":\"session/prompt\""
 EXPECT_IN_CONTAINS "Use tools"
 OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"gemini-sess-permission","update":{"sessionUpdate":"tool_call","toolCallId":"tool-1","title":"Read README.md","kind":"read","locations":[{"path":"README.md"}]}}}
-OUT {"jsonrpc":"2.0","id":77,"method":"session/request_permission","params":{"sessionId":"gemini-sess-permission","options":[{"optionId":"allow_once","kind":"allow_once","name":"Allow once"},{"optionId":"reject_once","kind":"reject_once","name":"Reject once"}],"toolCall":{"toolCallId":"tool-2","title":"Write live-output.txt","kind":"edit","locations":[{"path":"live-output.txt"}],"content":[{"type":"diff","path":"live-output.txt","oldText":"","newText":"amux-live-tool\n"}]}}}
+OUT {"jsonrpc":"2.0","id":77,"method":"session/request_permission","params":{"sessionId":"gemini-sess-permission","options":[{"optionId":"allow_once","kind":"allow_once","name":"Allow once"},{"optionId":"reject_once","kind":"reject_once","name":"Reject once"}],"toolCall":{"toolCallId":"tool-2","title":"Write live-output.txt","kind":"edit","locations":[{"path":"live-output.txt"}],"content":[{"type":"diff","path":"live-output.txt","oldText":"","newText":"lucarne-live-tool\n"}]}}}
 EXPECT_IN_CONTAINS "\"id\":77"
 EXPECT_IN_CONTAINS "\"optionId\":\"allow_once\""
 OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"gemini-sess-permission","update":{"sessionUpdate":"tool_call_update","toolCallId":"tool-2","title":"Write live-output.txt","kind":"edit","status":"completed","rawOutput":"wrote live-output.txt"}}}

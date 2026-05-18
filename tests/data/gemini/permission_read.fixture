@@ -7,7 +7,7 @@ EXPECT_IN_CONTAINS "Read the README"
 OUT {"jsonrpc":"2.0","id":77,"method":"session/request_permission","params":{"sessionId":"gemini-sess-permission-read","options":[{"optionId":"allow_once","kind":"allow_once","name":"Allow once"},{"optionId":"reject_once","kind":"reject_once","name":"Reject once"}],"toolCall":{"toolCallId":"tool-read-1","title":"Read README.md","kind":"read","locations":[{"path":"README.md"}]}}}
 EXPECT_IN_CONTAINS "\"id\":77"
 EXPECT_IN_CONTAINS "\"optionId\":\"allow_once\""
-OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"gemini-sess-permission-read","update":{"sessionUpdate":"tool_call_update","toolCallId":"tool-read-1","title":"Read README.md","kind":"read","locations":[{"path":"README.md"}],"status":"completed","rawOutput":"# README\namux-live-read\n"}}}
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"gemini-sess-permission-read","update":{"sessionUpdate":"tool_call_update","toolCallId":"tool-read-1","title":"Read README.md","kind":"read","locations":[{"path":"README.md"}],"status":"completed","rawOutput":"# README\nlucarne-live-read\n"}}}
 OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"gemini-sess-permission-read","update":{"sessionUpdate":"agent_message_chunk","messageId":"msg-read-1","content":{"type":"text","text":"READ_OK"}}}}
 OUT {"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn","usage":{"inputTokens":6,"outputTokens":3,"cachedReadTokens":1,"totalTokens":10}}}
 EXIT 0

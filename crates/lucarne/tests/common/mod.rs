@@ -184,7 +184,15 @@ pub async fn run_scenario(mut sc: Scenario) -> ScenarioResult {
     let sess = Arc::new(sc.adapter.start(req).await.expect("adapter.start"));
     let mut rx = sess.events().await.expect("events");
 
-    let drive = sc.drive_send;
+    if sc.drive_send {
+        let _ = sess
+            .send(Input {
+                text: sess_first_prompt.clone(),
+                images: vec![],
+            })
+            .await;
+    }
+
     let on_perm = sc.on_permission;
     let on_event = sc.on_event;
 
@@ -212,15 +220,6 @@ pub async fn run_scenario(mut sc: Scenario) -> ScenarioResult {
             Ok((events, closed))
         })
     };
-
-    if drive {
-        let _ = sess
-            .send(Input {
-                text: sess_first_prompt.clone(),
-                images: vec![],
-            })
-            .await;
-    }
 
     let res = timeout(sc.timeout, collector).await;
     sess.close().await;

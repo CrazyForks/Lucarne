@@ -2,7 +2,7 @@
 # /commands status must invoke the provider-native /status entry, not the
 # adapter's normalized status() method.
 OUT {"type":"system","subtype":"init","session_id":"sess-native-status","model":"default","permissionMode":"default","slash_commands":["status"],"skills":[]}
-OUT {"type":"control_response","response":{"subtype":"success","request_id":"amux-control-1","response":{"commands":[{"name":"status","description":"Provider-native status","argumentHint":""}]}}}
+OUT {"type":"control_response","response":{"subtype":"success","request_id":"lucarne-control-1","response":{"commands":[{"name":"status","description":"Provider-native status","argumentHint":""}]}}}
 EXPECT_IN_CONTAINS_NEXT "\"text\":\"/status\""
 OUT {"type":"user","message":{"role":"user","content":[{"type":"text","text":"/status"}]},"uuid":"user_status","isReplay":true}
 OUT {"type":"assistant","message":{"id":"msg_status","model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"NATIVE_STATUS_OK"}],"usage":{"input_tokens":0,"output_tokens":0}}}

@@ -2070,7 +2070,7 @@ mod tests {
     };
     use std::fs::{self, OpenOptions};
     use std::io::Write;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::Mutex as StdMutex;
     use tokio::sync::mpsc;
 
@@ -2612,6 +2612,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pi_created_history_watch_reaches_wechat_as_single_costed_notification() {
+        let temp = tempfile::TempDir::new().expect("pi chain temp dir");
+        let root = temp.path().join("pi-sessions");
+        let project = temp.path().join("project");
+        fs::create_dir_all(&root).expect("pi sessions dir");
+        fs::create_dir_all(&project).expect("project dir");
+        let provider = Arc::new(FakeProvider::new("pi", ""));
+        let core = test_core(Arc::clone(&provider));
+        let mut events = core.watch_events();
+        let transport = Arc::new(FakeTransport::default());
+        let service = WechatNotificationService::new(
+            Arc::clone(&core),
+            Arc::clone(&transport),
+            WechatServiceOptions {
+                initial_user_ids: vec!["user-1".into()],
+                ..WechatServiceOptions::default()
+            },
+        );
+        start_pi_history_watch(&core, &root).await;
+        wait_for_history_watch_baseline().await;
+
+        write_completed_pi_history_session(
+            &root,
+            "pi-created-complete",
+            &project,
+            "现在几点了",
+            "现在 22:15:05 CST（UTC+8）。",
+        );
+        assert!(
+            poll_core_event_for_wechat(&service, &mut events, Duration::from_secs(2)).await,
+            "created Pi history completion should reach WeChat"
+        );
+
+        let sends = transport.sends();
+        assert_eq!(sends.len(), 1, "created Pi completion should send once");
+        assert!(
+            sends[0].text.contains("现在 22:15:05 CST（UTC+8）。"),
+            "created Pi notification should contain assistant text: {}",
+            sends[0].text
+        );
+        assert!(
+            sends[0].text.contains("\n\n==========\ncost: 14s"),
+            "created Pi notification should use synthesized completion cost: {}",
+            sends[0].text
+        );
+    }
+
+    #[tokio::test]
+    async fn pi_wechat_reply_does_not_duplicate_after_history_watch_echo() {
+        let temp = tempfile::TempDir::new().expect("pi duplicate temp dir");
+        let root = temp.path().join("pi-sessions");
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).expect("project dir");
+        let provider = Arc::new(FakeProvider::new("pi", ""));
+        let core = test_core(Arc::clone(&provider));
+        let opened = core
+            .open_workspace_with_events(OpenWorkspaceRequest {
+                provider_id: "pi",
+                project_path: Some(project.clone()),
+                title: "pi workspace".into(),
+            })
+            .await
+            .expect("open pi workspace");
+        let workspace_id = opened.workspace.workspace_id.clone();
+        let session_id = opened.workspace.session_id.0.to_string();
+        let session_path = write_pi_history_session(&root, &session_id, &project, "现在呢");
+        let mut events = core.watch_events();
+        let transport = Arc::new(FakeTransport::default());
+        let service = WechatNotificationService::new(
+            Arc::clone(&core),
+            Arc::clone(&transport),
+            WechatServiceOptions {
+                initial_user_ids: vec!["user-1".into()],
+                ..WechatServiceOptions::default()
+            },
+        );
+        start_pi_history_watch(&core, &root).await;
+        wait_for_history_watch_baseline().await;
+
+        provider.emit_assistant(&session_id, "background complete");
+        service
+            .handle_core_event(next_timeline_event(&mut events).await)
+            .await
+            .expect("deliver initial notification");
+        let notification = transport.sends()[0].message_id.clone();
+
+        service
+            .handle_incoming(WechatIncoming::new(
+                "user-reply-1",
+                "user-1",
+                "please continue",
+                Some(notification),
+            ))
+            .await
+            .expect("submit pi reply");
+        deliver_until_reply_count(&service, &mut events, &transport, 1).await;
+        assert_eq!(transport.replies().len(), 1);
+        assert_eq!(transport.sends().len(), 1);
+        assert!(
+            !core.direct_notification_suppressed(&workspace_id),
+            "pending reply delivery should release direct suppression"
+        );
+
+        append_pi_assistant_response(
+            &session_path,
+            "2026-05-18T14:15:35.000Z",
+            "reply: please continue",
+        );
+        if poll_core_event_for_wechat(&service, &mut events, Duration::from_millis(500)).await {
+            panic!("lagging Pi history echo reached WeChat and would duplicate the reply");
+        }
+        assert_eq!(transport.replies().len(), 1);
+        assert_eq!(transport.sends().len(), 1);
+    }
+
+    #[tokio::test]
     async fn notification_reply_waits_for_turn_completed_before_delivering_latest_agent_message() {
         let provider = Arc::new(FakeProvider::default());
         provider.set_submit_prefix_messages(vec!["working first"]);
@@ -3015,11 +3131,8 @@ cost: 13s
 session: 019e027d-a5c5-78d0-baab-e6c70dc5d693
 cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
 
-        assert_eq!(sent_quote_binding_id(sent_body), "quote:e2ce6021939f2dff");
-        assert_eq!(
-            visible_quote_binding_id(quoted_text),
-            "quote:e2ce6021939f2dff"
-        );
+        let sent_id = sent_quote_binding_id(sent_body);
+        assert_eq!(visible_quote_binding_id(quoted_text), sent_id);
     }
 
     #[tokio::test]
@@ -4287,6 +4400,89 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
         file.sync_all().expect("sync assistant response");
     }
 
+    fn write_pi_history_session(
+        root: &Path,
+        session_id: &str,
+        cwd: &Path,
+        prompt: &str,
+    ) -> PathBuf {
+        fs::create_dir_all(root).expect("create pi sessions dir");
+        let path = root.join(format!("{session_id}.jsonl"));
+        fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                format_args!(
+                    r#"{{"type":"session","version":3,"id":"{session_id}","timestamp":"2026-05-18T14:15:00.000Z","cwd":"{}"}}"#,
+                    cwd.display()
+                ),
+                format_args!(
+                    r#"{{"type":"message","id":"u-{session_id}","timestamp":"2026-05-18T14:15:01.000Z","message":{{"role":"user","content":[{{"type":"text","text":"{prompt}"}}]}}}}"#
+                ),
+            ),
+        )
+        .expect("write pi session");
+        path
+    }
+
+    fn write_completed_pi_history_session(
+        root: &Path,
+        session_id: &str,
+        cwd: &Path,
+        prompt: &str,
+        answer: &str,
+    ) -> PathBuf {
+        let path = write_pi_history_session(root, session_id, cwd, prompt);
+        append_pi_assistant_response(&path, "2026-05-18T14:15:15.000Z", answer);
+        path
+    }
+
+    fn append_pi_assistant_response(path: &Path, timestamp: &str, text: &str) {
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(path)
+            .expect("open pi session");
+        writeln!(
+            file,
+            r#"{{"type":"message","id":"a-{timestamp}","parentId":"u1","timestamp":"{timestamp}","message":{{"role":"assistant","model":"gpt-5.5","stopReason":"stop","content":[{{"type":"text","text":"{text}"}}]}}}}"#
+        )
+        .expect("append pi assistant response");
+        file.sync_all().expect("sync pi assistant response");
+    }
+
+    async fn start_pi_history_watch(core: &Arc<LucarneCore>, root: &Path) {
+        let pi = agent_provider("pi").expect("pi provider descriptor");
+        core.start_history_session_watch_with_config(
+            WatchConfig::new()
+                .providers([pi])
+                .provider_roots(pi, [root.to_path_buf()])
+                .selection(ParseSelection::empty().with_meta().with_messages())
+                .debounce(Duration::from_millis(25)),
+        )
+        .expect("start pi history watch");
+    }
+
+    async fn wait_for_history_watch_baseline() {
+        tokio::time::sleep(Duration::from_millis(75)).await;
+    }
+
+    async fn poll_core_event_for_wechat(
+        service: &WechatNotificationService<FakeTransport>,
+        events: &mut lucarne::core_service::CoreEventReceiver,
+        timeout_duration: Duration,
+    ) -> bool {
+        match tokio::time::timeout(timeout_duration, next_timeline_event(events)).await {
+            Ok(event) => {
+                service
+                    .handle_core_event(event)
+                    .await
+                    .expect("handle core event");
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
     fn test_core(provider: Arc<FakeProvider>) -> Arc<LucarneCore> {
         test_core_with_store(
             provider,
@@ -4303,8 +4499,9 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
         LucarneCore::from_runtime_and_store(runtime, store).expect("core")
     }
 
-    #[derive(Default)]
     struct FakeProvider {
+        provider_id: ProviderId,
+        completion_turn_id: SmolStr,
         sessions: StdMutex<HashMap<String, mpsc::Sender<AgentEvent>>>,
         next: StdMutex<u64>,
         resume_delay: StdMutex<Option<Duration>>,
@@ -4316,7 +4513,29 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
         resolved_interventions: Arc<StdMutex<Vec<(String, InterventionResponse)>>>,
     }
 
+    impl Default for FakeProvider {
+        fn default() -> Self {
+            Self::new("codex", "provider-turn")
+        }
+    }
+
     impl FakeProvider {
+        fn new(provider_id: &'static str, completion_turn_id: &'static str) -> Self {
+            Self {
+                provider_id: ProviderId::from_static(provider_id),
+                completion_turn_id: completion_turn_id.into(),
+                sessions: StdMutex::new(HashMap::new()),
+                next: StdMutex::new(0),
+                resume_delay: StdMutex::new(None),
+                resume_args: StdMutex::new(Vec::new()),
+                submit_prefix_messages: StdMutex::new(Vec::new()),
+                submit_failure: StdMutex::new(None),
+                status: AgentStatus::default(),
+                status_calls: Arc::new(StdMutex::new(0)),
+                resolved_interventions: Arc::new(StdMutex::new(Vec::new())),
+            }
+        }
+
         fn with_status(status: AgentStatus) -> Self {
             Self {
                 status,
@@ -4387,12 +4606,12 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
     #[async_trait]
     impl AgentProvider for FakeProvider {
         fn id(&self) -> ProviderId {
-            ProviderId::from_static("codex")
+            self.provider_id.clone()
         }
 
         async fn probe(&self) -> Result<ProbeResult, AgentError> {
             Ok(ProbeResult {
-                provider_id: ProviderId::from_static("codex"),
+                provider_id: self.provider_id.clone(),
                 provider_version: Some("fake".into()),
                 capabilities: Default::default(),
             })
@@ -4439,6 +4658,8 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
             FakeSession {
                 session_id: SessionId(session_id.into()),
                 instance_id: InstanceId(format!("instance-{}", uuid_suffix()).into()),
+                provider_id: self.provider_id.clone(),
+                completion_turn_id: self.completion_turn_id.clone(),
                 process_id: Some(std::process::id() as i32),
                 tx,
                 rx: StdMutex::new(Some(rx)),
@@ -4454,6 +4675,8 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
     struct FakeSession {
         session_id: SessionId,
         instance_id: InstanceId,
+        provider_id: ProviderId,
+        completion_turn_id: SmolStr,
         process_id: Option<i32>,
         tx: mpsc::Sender<AgentEvent>,
         rx: StdMutex<Option<AgentEventStream>>,
@@ -4475,7 +4698,7 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
         }
 
         fn provider_id(&self) -> ProviderId {
-            ProviderId::from_static("codex")
+            self.provider_id.clone()
         }
 
         fn process_id(&self) -> Option<i32> {
@@ -4500,7 +4723,7 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
                 return self
                     .tx
                     .send(AgentEvent::TurnFailed(TurnFailedEvent {
-                        turn_id: "provider-turn".into(),
+                        turn_id: self.completion_turn_id.clone(),
                         error: error.clone().into(),
                         code: "test".into(),
                     }))
@@ -4523,7 +4746,7 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
                 })?;
             self.tx
                 .send(AgentEvent::TurnCompleted(TurnCompletedEvent {
-                    turn_id: "provider-turn".into(),
+                    turn_id: self.completion_turn_id.clone(),
                     usage: None,
                 }))
                 .await

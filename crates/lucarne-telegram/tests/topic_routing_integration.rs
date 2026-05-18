@@ -3730,9 +3730,7 @@ async fn entry_menu_help_and_pagination_commands_run_through_public_bot_flow() {
 
     channel.push_event(ChannelEvent::Message(entry_message("m-help", "/help")));
     let help = eventually_topic_message(&channel, "", |message| {
-        message.format == TextFormat::Plain
-            && message.body.contains("commands")
-            && message.body.contains("/next /prev")
+        message.format == TextFormat::Plain && message.body.contains("commands")
     })
     .await;
     assert_eq!(help.format, TextFormat::Plain);

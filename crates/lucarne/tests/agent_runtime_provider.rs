@@ -323,6 +323,48 @@ async fn agent_runtime_provider_resume_translates_session_ref_to_internal_resume
     assert_eq!(data["cwd"], json!("/tmp/provider-resume"));
 }
 
+#[tokio::test(start_paused = true)]
+async fn agent_runtime_provider_resume_session_id_hint_survives_provider_ready_timeout() {
+    let adapter = Arc::new(NoReadyAdapter::new(Spec {
+        id: ProviderId::from_static("codex"),
+        label: "Codex".into(),
+        protocol: Protocol::StdioJsonrpc,
+        arg_profile: ArgProfile {
+            resume_session_key: "thread_id".into(),
+            resume_session_id_hint: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    }));
+    let provider = ProtocolProvider::new(adapter.protocol_adapter()).expect("provider");
+    let task = tokio::spawn(async move {
+        provider
+            .resume(ResumeSession {
+                session_ref: SessionRef(SmolStr::new("019e3925-5892-7163-bc90-553af11c982c")),
+                idle_timeout_ms: None,
+                args: json!({}),
+            })
+            .await
+    });
+
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(5)).await;
+    let session = task.await.expect("resume task").expect("resume");
+
+    assert_eq!(
+        session.id().0.as_str(),
+        "019e3925-5892-7163-bc90-553af11c982c"
+    );
+    assert_eq!(
+        session
+            .provider_session_id()
+            .await
+            .map(|id| id.0.to_string()),
+        Some("019e3925-5892-7163-bc90-553af11c982c".to_string())
+    );
+    session.close().await.expect("close session");
+}
+
 #[tokio::test]
 async fn agent_runtime_provider_resume_uses_adapter_arg_profile_not_provider_name() {
     let adapter = Arc::new(MockAdapter::new(
@@ -696,6 +738,73 @@ impl MockAdapter {
 
 fn mock_provider(adapter: &Arc<MockAdapter>) -> ProtocolProvider {
     ProtocolProvider::new(adapter.protocol_adapter()).expect("provider")
+}
+
+struct NoReadyAdapter {
+    spec: Spec,
+}
+
+impl NoReadyAdapter {
+    fn new(spec: Spec) -> Self {
+        Self { spec }
+    }
+
+    fn protocol_adapter(self: &Arc<Self>) -> Arc<ProtocolAdapter> {
+        Arc::new(ProtocolAdapter::new(ProtocolOptions {
+            spec: self.spec.clone(),
+            binary: "/bin/sh".into(),
+            launcher: Some(Arc::new(LocalLauncher::new())),
+            framer: Some(Framer::newline_json()),
+            dialect_factory: Arc::new(|| Box::new(NoReadyDialect)),
+            build_args: None,
+            build_session: Some(Arc::new(move |_req, _files, launcher| {
+                Ok(ProtocolSessionParts {
+                    launcher,
+                    args: vec!["-c".into(), "cat".into()],
+                    dialect: Box::new(NoReadyDialect),
+                })
+            })),
+            prepare_start: Some(Arc::new(|req, binary| {
+                Ok((launchable_params(req), binary.to_string()))
+            })),
+            probe: Some(Arc::new(|| lucarne::adapter::ProbeResult::default())),
+        }))
+    }
+}
+
+struct NoReadyDialect;
+
+impl Dialect for NoReadyDialect {
+    fn name(&self) -> &'static str {
+        "provider-no-ready"
+    }
+
+    fn init(&mut self, _cfg: &SessionParams) -> Vec<OutFrame> {
+        Vec::new()
+    }
+
+    fn translate(&mut self, frame_bytes: &[u8]) -> Vec<CanonicalEvent> {
+        panic!(
+            "no-ready fixture should not receive provider frames: {}",
+            String::from_utf8_lossy(frame_bytes)
+        )
+    }
+
+    fn encode_user_message(&mut self, _input: &Input) -> lucarne::Result<Vec<OutFrame>> {
+        panic!("user messages are not used in this test fixture")
+    }
+
+    fn encode_permission_response(
+        &mut self,
+        _req_id: &str,
+        _resp: &lucarne::event::PermissionResponse,
+    ) -> lucarne::Result<Vec<OutFrame>> {
+        panic!("permission responses are not used in this test fixture")
+    }
+
+    fn encode_interrupt(&mut self) -> lucarne::Result<Vec<OutFrame>> {
+        panic!("interrupt is not used in this test fixture")
+    }
 }
 
 #[derive(Default)]

@@ -53,11 +53,7 @@ static DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 // ---------------------------------------------------------------------------
 
 pub fn new(opts: Options) -> Arc<ProtocolAdapter> {
-    let binary_override = std::env::var("LUCARNE_PI_BIN").unwrap_or_else(|_| opts.binary);
-    let binary = match binary_override.trim() {
-        "" => "pi".into(),
-        path => path.to_string(),
-    };
+    let binary = select_pi_binary(opts.binary, std::env::var("LUCARNE_PI_BIN").ok());
 
     let spec = Spec {
         id: DESCRIPTOR.id,
@@ -229,6 +225,19 @@ fn split_pi_model_thinking(s: &str) -> (String, Option<String>) {
     (model.to_string(), Some(thinking.to_string()))
 }
 
+fn select_pi_binary(configured: String, env_override: Option<String>) -> String {
+    let configured = configured.trim();
+    let chosen = if configured.is_empty() || configured == "pi" {
+        env_override.as_deref().unwrap_or(configured)
+    } else {
+        configured
+    };
+    match chosen.trim() {
+        "" => "pi".into(),
+        path => path.to_string(),
+    }
+}
+
 fn detect_pi_cli_version(binary: &str) -> Option<String> {
     short_cli_version(&probe_version(DESCRIPTOR.id.as_str(), binary, Some("0.74.0")).version)
 }
@@ -238,4 +247,25 @@ fn short_cli_version(raw: &str) -> Option<String> {
         .map(|part| part.trim_start_matches('v'))
         .find(|part| part.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
         .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::select_pi_binary;
+
+    #[test]
+    fn explicit_pi_binary_overrides_env_binary() {
+        assert_eq!(
+            select_pi_binary("/tmp/fake-pi".into(), Some("/tmp/env-pi".into())),
+            "/tmp/fake-pi"
+        );
+    }
+
+    #[test]
+    fn default_pi_binary_uses_env_binary() {
+        assert_eq!(
+            select_pi_binary("pi".into(), Some("/tmp/env-pi".into())),
+            "/tmp/env-pi"
+        );
+    }
 }

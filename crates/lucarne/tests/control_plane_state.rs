@@ -367,7 +367,7 @@ fn command_invocation_plan_uses_provider_catalog_semantics() {
 }
 
 #[test]
-fn control_plane_persistence_entities_round_trip_indexed_records() {
+fn control_plane_persistence_entities_round_trip_state_records_without_loading_timeline() {
     let mut state = ControlPlaneState::default();
     seed_workspace_session_and_live(&mut state);
     let turn = state
@@ -422,11 +422,11 @@ fn control_plane_persistence_entities_round_trip_indexed_records() {
         Some(LiveInstanceId::new("live-a"))
     );
     assert_eq!(snapshot.last_reconcile_outcome, Some(ReconcileOutcome::Ok));
-    assert_eq!(
+    assert!(
         restored
             .timeline_for_workspace(&WorkspaceId::new("workspace-a"))
-            .len(),
-        1
+            .is_empty(),
+        "timeline persistence entities are loaded lazily by the store, not from the state snapshot"
     );
 }
 

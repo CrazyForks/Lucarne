@@ -617,7 +617,7 @@ async fn unsubscribed_codex_delta_advances_baseline_without_parsing() {
 
 #[cfg(feature = "codex")]
 #[tokio::test]
-async fn created_codex_jsonl_baselines_without_replaying_existing_events() {
+async fn created_codex_jsonl_emits_latest_complete_record_without_replaying_history() {
     let temp = tempfile::tempdir().unwrap();
     let root = codex_root(temp.path());
     fs::create_dir_all(&root).unwrap();
@@ -642,8 +642,20 @@ async fn created_codex_jsonl_baselines_without_replaying_existing_events() {
     assert_eq!(updates[0].session_id.as_deref(), Some("sess-watch"));
     assert_eq!(updates[0].cwd.as_deref(), Some("/tmp/project"));
     assert!(
-        updates[0].events.is_empty(),
-        "new JSONL baselines must not replay historical transcript events"
+        updates[0].events.iter().any(|event| {
+            matches!(
+                event,
+                WatchEvent::AssistantMessage(message)
+                    if message.text.as_deref() == Some("historical pong")
+            )
+        }),
+        "created JSONL tail should include latest assistant response"
+    );
+    assert!(
+        updates[0].events.iter().all(|event| {
+            !matches!(event, WatchEvent::UserMessage(message) if message.text.as_deref() == Some("ping"))
+        }),
+        "new JSONL tail reads must not replay older user prompt records"
     );
 
     append_line(
@@ -1048,6 +1060,63 @@ async fn claude_watch_task_complete_includes_elapsed_duration_across_deltas() {
 
 #[cfg(feature = "claude")]
 #[tokio::test]
+async fn streams_claude_terminal_line_larger_than_single_read_window() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("claude.jsonl");
+    fs::write(
+        &path,
+        concat!(
+            r#"{"type":"user","sessionId":"claude-large-line","cwd":"/tmp/project","timestamp":"2026-05-03T00:00:01.000Z","message":{"id":"u1","content":[{"type":"text","text":"ping"}]}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let canonical = fs::canonicalize(&path).unwrap();
+    let (mut watcher, tx) = test_watcher_for(
+        watch_provider("claude"),
+        &path,
+        crate::ParseSelection::full(),
+        Duration::from_millis(10),
+    );
+    let text = "claude-done".repeat((MAX_WATCH_READ_BYTES as usize / 11) + 128);
+    let line = serde_json::json!({
+        "type": "assistant",
+        "sessionId": "claude-large-line",
+        "cwd": "/tmp/project",
+        "timestamp": "2026-05-03T00:00:16.000Z",
+        "message": {
+            "id": "a-large",
+            "model": "claude",
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": text}],
+        },
+    })
+    .to_string();
+    assert!(line.len() > MAX_WATCH_READ_BYTES as usize);
+
+    append_line(&path, &line);
+    tx.send(RawWatchEvent::Paths(vec![canonical])).unwrap();
+
+    let updates = recv_timeout(&mut watcher, Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_eq!(updates.len(), 1);
+    let completion = updates[0]
+        .events
+        .iter()
+        .find_map(|event| match event {
+            WatchEvent::TurnCompleted(completion) => Some(completion),
+            _ => None,
+        })
+        .expect("large Claude terminal line should be streamed across read chunks");
+    assert_eq!(
+        completion.last_agent_message.as_deref(),
+        Some(text.as_str())
+    );
+}
+
+#[cfg(feature = "claude")]
+#[tokio::test]
 async fn message_selection_suppresses_appended_claude_usage() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("claude.jsonl");
@@ -1185,6 +1254,65 @@ async fn pi_watch_task_complete_includes_elapsed_duration_across_deltas() {
             )
         }),
         "pi response should stay in transcript but not be projected as a duplicate notification"
+    );
+}
+
+#[cfg(feature = "pi")]
+#[tokio::test]
+async fn streams_pi_terminal_line_larger_than_single_read_window() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("pi.jsonl");
+    fs::write(
+        &path,
+        concat!(
+            r#"{"type":"session","version":3,"id":"pi-large-line","timestamp":"2026-05-03T00:00:00.000Z","cwd":"/tmp/project"}"#,
+            "\n",
+            r#"{"type":"message","id":"u1","timestamp":"2026-05-03T00:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"ping"}]}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let canonical = fs::canonicalize(&path).unwrap();
+    let (mut watcher, tx) = test_watcher_for(
+        watch_provider("pi"),
+        &path,
+        crate::ParseSelection::full(),
+        Duration::from_millis(10),
+    );
+    let text = "pi-done".repeat((MAX_WATCH_READ_BYTES as usize / 7) + 128);
+    let line = serde_json::json!({
+        "type": "message",
+        "id": "a-large",
+        "parentId": "u1",
+        "timestamp": "2026-05-03T00:00:15.000Z",
+        "message": {
+            "role": "assistant",
+            "model": "deepseek-v4-pro",
+            "stopReason": "stop",
+            "content": [{"type": "text", "text": text}],
+        },
+    })
+    .to_string();
+    assert!(line.len() > MAX_WATCH_READ_BYTES as usize);
+
+    append_line(&path, &line);
+    tx.send(RawWatchEvent::Paths(vec![canonical])).unwrap();
+
+    let updates = recv_timeout(&mut watcher, Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_eq!(updates.len(), 1);
+    let completion = updates[0]
+        .events
+        .iter()
+        .find_map(|event| match event {
+            WatchEvent::TurnCompleted(completion) => Some(completion),
+            _ => None,
+        })
+        .expect("large Pi terminal line should be streamed across read chunks");
+    assert_eq!(
+        completion.last_agent_message.as_deref(),
+        Some(text.as_str())
     );
 }
 
@@ -1558,5 +1686,205 @@ async fn message_selection_keeps_codex_task_complete_without_operations() {
             .iter()
             .all(|event| !matches!(event, WatchEvent::ToolCall(_) | WatchEvent::ToolResult(_))),
         "message selection must not emit operation payloads"
+    );
+}
+
+#[cfg(feature = "codex")]
+#[tokio::test]
+async fn streams_codex_task_complete_line_larger_than_single_read_window() {
+    use futures::StreamExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = codex_root(temp.path());
+    let session_path = codex_session_path(&root);
+    write_initial_codex_session(&session_path);
+    let canonical = fs::canonicalize(&session_path).unwrap();
+    let (mut watcher, tx) = test_watcher_for(
+        watch_provider("codex"),
+        &root,
+        crate::ParseSelection::empty().with_messages(),
+        Duration::from_millis(10),
+    );
+    let text = "done".repeat((MAX_WATCH_READ_BYTES as usize / 4) + 128);
+    let line = serde_json::json!({
+        "timestamp": "2026-05-03T00:00:20.000Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "task_complete",
+            "turn_id": "turn-large-line",
+            "last_agent_message": text,
+            "duration_ms": 15000,
+        },
+    })
+    .to_string();
+    assert!(line.len() > MAX_WATCH_READ_BYTES as usize);
+
+    append_line(&session_path, &line);
+    tx.send(RawWatchEvent::Paths(vec![canonical])).unwrap();
+
+    let completion = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let updates = watcher
+                .next()
+                .await
+                .expect("watch stream update")
+                .expect("watch update");
+            if let Some(completion) = updates.iter().find_map(|update| {
+                update.events.iter().find_map(|event| match event {
+                    WatchEvent::TurnCompleted(completion) => Some(completion.clone()),
+                    _ => None,
+                })
+            }) {
+                break completion;
+            }
+        }
+    })
+    .await
+    .expect("large task_complete line should be streamed across read chunks");
+    assert_eq!(completion.meta.turn_id.as_deref(), Some("turn-large-line"));
+    assert_eq!(completion.last_agent_message.as_deref(), Some(text.trim()));
+}
+
+#[cfg(feature = "codex")]
+#[tokio::test]
+async fn created_codex_jsonl_preserves_trailing_partial_for_next_delta() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = codex_root(temp.path());
+    fs::create_dir_all(&root).unwrap();
+    let (mut watcher, tx) = test_watcher_for(
+        watch_provider("codex"),
+        &root,
+        crate::ParseSelection::empty().with_messages(),
+        Duration::from_millis(10),
+    );
+    let session_path = codex_session_path(&root);
+    fs::create_dir_all(session_path.parent().unwrap()).unwrap();
+    let partial = serde_json::json!({
+        "timestamp": "2026-05-03T00:00:20.000Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "task_complete",
+            "turn_id": "turn-created-partial",
+            "last_agent_message": "created partial done",
+            "duration_ms": 15000,
+        },
+    })
+    .to_string();
+    fs::write(
+        &session_path,
+        format!(
+            "{}\n{}\n{}",
+            r#"{"timestamp":"2026-05-03T00:00:00.000Z","type":"session_meta","payload":{"session_id":"sess-watch","cwd":"/tmp/project","model":"gpt-5"}}"#,
+            r#"{"timestamp":"2026-05-03T00:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"ping"}]}}"#,
+            partial
+        ),
+    )
+    .unwrap();
+    let canonical = fs::canonicalize(&session_path).unwrap();
+    tx.send(RawWatchEvent::Paths(vec![canonical.clone()]))
+        .unwrap();
+
+    let created = recv_timeout(&mut watcher, Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_eq!(created.len(), 1);
+    assert_eq!(created[0].change, WatchChange::Created);
+    assert!(created[0].events.is_empty());
+
+    {
+        let mut file = OpenOptions::new().append(true).open(&session_path).unwrap();
+        writeln!(file).unwrap();
+        file.sync_all().unwrap();
+    }
+    tx.send(RawWatchEvent::Paths(vec![canonical])).unwrap();
+    let updates = recv_timeout(&mut watcher, Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_eq!(updates.len(), 1);
+    let completion = updates[0]
+        .events
+        .iter()
+        .find_map(|event| match event {
+            WatchEvent::TurnCompleted(completion) => Some(completion),
+            _ => None,
+        })
+        .expect("created trailing partial should complete on the next delta");
+    assert_eq!(
+        completion.meta.turn_id.as_deref(),
+        Some("turn-created-partial")
+    );
+    assert_eq!(
+        completion.last_agent_message.as_deref(),
+        Some("created partial done")
+    );
+}
+
+#[cfg(feature = "codex")]
+#[tokio::test]
+async fn initial_codex_jsonl_preserves_trailing_partial_for_next_delta() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = codex_root(temp.path());
+    let session_path = codex_session_path(&root);
+    write_initial_codex_session(&session_path);
+    let partial = serde_json::json!({
+        "timestamp": "2026-05-03T00:00:20.000Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "task_complete",
+            "turn_id": "turn-initial-partial",
+            "last_agent_message": "initial partial done",
+            "duration_ms": 15000,
+        },
+    })
+    .to_string();
+    {
+        let mut file = OpenOptions::new().append(true).open(&session_path).unwrap();
+        write!(file, "{partial}").unwrap();
+        file.sync_all().unwrap();
+    }
+    let canonical = fs::canonicalize(&session_path).unwrap();
+
+    let (mut watcher, tx) = test_watcher_for(
+        watch_provider("codex"),
+        &root,
+        crate::ParseSelection::empty().with_messages(),
+        Duration::from_millis(10),
+    );
+    assert!(
+        !watcher
+            .baselines
+            .get(&canonical)
+            .expect("initial codex baseline")
+            .pending_partial
+            .is_empty(),
+        "startup baselines must remember an incomplete trailing JSONL record"
+    );
+
+    {
+        let mut file = OpenOptions::new().append(true).open(&session_path).unwrap();
+        writeln!(file).unwrap();
+        file.sync_all().unwrap();
+    }
+    tx.send(RawWatchEvent::Paths(vec![canonical])).unwrap();
+
+    let updates = recv_timeout(&mut watcher, Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_eq!(updates.len(), 1);
+    let completion = updates[0]
+        .events
+        .iter()
+        .find_map(|event| match event {
+            WatchEvent::TurnCompleted(completion) => Some(completion),
+            _ => None,
+        })
+        .expect("initial trailing partial should complete on the next delta");
+    assert_eq!(
+        completion.meta.turn_id.as_deref(),
+        Some("turn-initial-partial")
+    );
+    assert_eq!(
+        completion.last_agent_message.as_deref(),
+        Some("initial partial done")
     );
 }

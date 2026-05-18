@@ -14,7 +14,7 @@
 //! agt -> result {stopReason, usage}            (for id=3)
 //! ```
 //!
-//! Cancellation: `session/cancel` notification. When the agent returns
+//! Cancellation: `session/cancel` request. When the agent returns
 //! `stopReason=cancelled`, we emit `TurnFailed{code="cancelled"}`.
 
 use crate::{
@@ -394,14 +394,8 @@ impl Dialect for Gemini {
         if self.session_id.is_empty() {
             return Ok(vec![OutFrame::signal("SIGINT")]);
         }
-        let rpc = json!({
-            "jsonrpc": "2.0",
-            "method": M_CANCEL,
-            "params": {"sessionId": self.session_id},
-        });
-        let mut bytes = serde_json::to_vec(&rpc)?;
-        bytes.push(b'\n');
-        Ok(vec![OutFrame::rpc_request(bytes)])
+        self.queue_request(M_CANCEL, json!({"sessionId": self.session_id}))?;
+        Ok(std::mem::take(&mut self.pending_out))
     }
 
     fn translate(&mut self, raw: &[u8]) -> Vec<Event> {
@@ -479,6 +473,7 @@ impl Gemini {
                 self.handle_session_response(&result, &fallback)
             }
             M_PROMPT => self.handle_prompt_response(&result),
+            M_CANCEL => self.handle_cancel_response(&result),
             method if method.starts_with(&format!("{M_SET_MODEL}|command|")) => {
                 let model = method.rsplit('|').next().unwrap_or("").to_string();
                 self.current_model = model.clone();
@@ -613,25 +608,33 @@ impl Gemini {
     }
 
     fn handle_prompt_response(&mut self, result: &Value) -> Vec<Event> {
-        let stop_reason = result
-            .get("stopReason")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_ascii_lowercase();
+        let stop_reason = gemini_stop_reason(result);
         if stop_reason == "cancelled" {
-            self.reset_turn_state();
-            return vec![Event::new(Payload::TurnFailed(TurnFailed {
-                turn_id: String::new(),
-                error: "cancelled".into(),
-                code: "cancelled".into(),
-            }))];
+            return self.cancelled_turn_events(stop_reason);
         }
         let usage = parse_prompt_usage(result.get("usage"), result.get("_meta"));
         self.reset_turn_state();
         vec![Event::new(Payload::TurnCompleted(TurnCompleted {
             turn_id: String::new(),
             usage,
+        }))]
+    }
+
+    fn handle_cancel_response(&mut self, result: &Value) -> Vec<Event> {
+        let stop_reason = gemini_stop_reason(result);
+        self.cancelled_turn_events(if stop_reason.is_empty() {
+            "cancelled".into()
+        } else {
+            stop_reason
+        })
+    }
+
+    fn cancelled_turn_events(&mut self, stop_reason: String) -> Vec<Event> {
+        self.reset_turn_state();
+        vec![Event::new(Payload::TurnFailed(TurnFailed {
+            turn_id: String::new(),
+            error: stop_reason.clone().into(),
+            code: stop_reason.into(),
         }))]
     }
 
@@ -1337,6 +1340,15 @@ fn parse_usage(raw: Option<&Value>) -> Option<Usage> {
     } else {
         Some(u)
     }
+}
+
+fn gemini_stop_reason(result: &Value) -> String {
+    result
+        .get("stopReason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
 }
 
 /// Prefer the explicit `result.usage` block; fall back to

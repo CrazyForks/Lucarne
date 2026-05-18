@@ -104,6 +104,21 @@ pub struct LiveRuntimeEventStream {
     saw_approval: bool,
 }
 
+impl LiveRuntimeSession {
+    pub fn post_turn_quiet(&self) -> Duration {
+        if self
+            .events
+            .recorded
+            .as_ref()
+            .is_some_and(PreparedRecordingRun::is_replay)
+        {
+            super::providers::LIVE_REPLAY_POST_TURN_QUIET
+        } else {
+            self.provider.post_turn_quiet()
+        }
+    }
+}
+
 impl LiveRuntimeEventStream {
     pub async fn recv(&mut self) -> Option<RuntimeEvent> {
         let event = self.inner.recv().await;
@@ -365,7 +380,7 @@ pub async fn run_live_runtime_turn_with_hooks(
             .is_some_and(|predicate| predicate(&events))
             || quiet_deadline.is_some()
         {
-            quiet_deadline = Some(Instant::now() + live.provider.post_turn_quiet());
+            quiet_deadline = Some(Instant::now() + live.post_turn_quiet());
         }
     }
 

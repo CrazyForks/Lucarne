@@ -1,6 +1,6 @@
 # Command catalog: SDK-compatible initialize control response advertises supported commands and models.
 OUT {"type":"system","subtype":"init","session_id":"sess-commands","model":"default","permissionMode":"default","slash_commands":["context","review","cost"],"skills":["update-config","debug"]}
-OUT {"type":"control_response","response":{"subtype":"success","request_id":"amux-control-1","response":{"commands":[{"name":"context","description":"Show current context usage","argumentHint":""},{"name":"review","description":"Review a pull request","argumentHint":""},{"name":"usage","description":"Show the total cost and duration of the current session","argumentHint":"","aliases":["cost","stats"]}],"models":[{"value":"default","displayName":"Default (recommended)","description":"Use the default model (currently Sonnet 4.6)","supportsEffort":true,"supportedEffortLevels":["low","medium","high","max"]},{"value":"haiku","displayName":"Haiku","description":"Haiku 4.5 · Fastest for quick answers","supportsEffort":true,"supportedEffortLevels":["low","medium","high","max"]}]}}}
+OUT {"type":"control_response","response":{"subtype":"success","request_id":"lucarne-control-1","response":{"commands":[{"name":"context","description":"Show current context usage","argumentHint":""},{"name":"review","description":"Review a pull request","argumentHint":""},{"name":"usage","description":"Show the total cost and duration of the current session","argumentHint":"","aliases":["cost","stats"]}],"models":[{"value":"default","displayName":"Default (recommended)","description":"Use the default model (currently Sonnet 4.6)","supportsEffort":true,"supportedEffortLevels":["low","medium","high","max"]},{"value":"haiku","displayName":"Haiku","description":"Haiku 4.5 · Fastest for quick answers","supportsEffort":true,"supportedEffortLevels":["low","medium","high","max"]}]}}}
 EXPECT_IN_CONTAINS_NEXT "\"text\":\"/context\""
 OUT {"type":"user","message":{"role":"user","content":[{"type":"text","text":"/context"}]},"uuid":"user_command","isReplay":true}
 OUT {"type":"assistant","message":{"id":"msg_command","model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"CTX_OK"}],"usage":{"input_tokens":0,"output_tokens":0}}}
@@ -17,15 +17,15 @@ EXPECT_IN_CONTAINS_NEXT "\"text\":\"/cost\""
 OUT {"type":"user","message":{"role":"user","content":[{"type":"text","text":"/cost"}]},"uuid":"user_cost","isReplay":true}
 OUT {"type":"assistant","message":{"id":"msg_cost","model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"COST_OK"}],"usage":{"input_tokens":0,"output_tokens":0}}}
 OUT {"type":"result","subtype":"success","session_id":"sess-commands","num_turns":1,"duration_ms":10,"usage":{"input_tokens":0,"output_tokens":0}}
-EXPECT_IN_CONTAINS_NEXT "\"request_id\":\"amux-control-2\""
+EXPECT_IN_CONTAINS_NEXT "\"request_id\":\"lucarne-control-2\""
 EXPECT_IN_CONTAINS "\"subtype\":\"get_settings\""
-OUT {"type":"control_response","response":{"subtype":"success","request_id":"amux-control-2","response":{"cwd":"/tmp/project","effective":{"model":"default","effort":"medium","permissionMode":"default"},"applied":{"model":"default","effort":"medium","permissionMode":"default"}}}}
-EXPECT_IN_CONTAINS_NEXT "\"request_id\":\"amux-control-3\""
+OUT {"type":"control_response","response":{"subtype":"success","request_id":"lucarne-control-2","response":{"cwd":"/tmp/project","effective":{"model":"default","effort":"medium","permissionMode":"default"},"applied":{"model":"default","effort":"medium","permissionMode":"default"}}}}
+EXPECT_IN_CONTAINS_NEXT "\"request_id\":\"lucarne-control-3\""
 EXPECT_IN_CONTAINS "\"subtype\":\"get_context_usage\""
-OUT {"type":"control_response","response":{"subtype":"success","request_id":"amux-control-3","response":{"usage":{"input_tokens":1900,"output_tokens":387,"total_tokens":2287},"context":{"used_tokens":14000,"max_tokens":205000,"percent_used":7},"compactions":0}}}
-EXPECT_IN_CONTAINS_NEXT "\"request_id\":\"amux-control-4\""
+OUT {"type":"control_response","response":{"subtype":"success","request_id":"lucarne-control-3","response":{"usage":{"input_tokens":1900,"output_tokens":387,"total_tokens":2287},"context":{"used_tokens":14000,"max_tokens":205000,"percent_used":7},"compactions":0}}}
+EXPECT_IN_CONTAINS_NEXT "\"request_id\":\"lucarne-control-4\""
 EXPECT_IN_CONTAINS "\"subtype\":\"get_context_usage\""
-OUT {"type":"control_response","response":{"subtype":"success","request_id":"amux-control-4","response":{"model":"default","skills":{"totalSkills":2,"includedSkills":2,"tokens":220,"skillFrontmatter":[{"name":"update-config","source":"builtin","tokens":173},{"name":"frontend-design","source":"user","tokens":47}]}}}}
+OUT {"type":"control_response","response":{"subtype":"success","request_id":"lucarne-control-4","response":{"model":"default","skills":{"totalSkills":2,"includedSkills":2,"tokens":220,"skillFrontmatter":[{"name":"update-config","source":"builtin","tokens":173},{"name":"frontend-design","source":"user","tokens":47}]}}}}
 EXPECT_IN_CONTAINS_NEXT "\"text\":\"/clear\""
 OUT {"type":"assistant","message":{"id":"msg_clear","model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"CLEAR_OK"}],"usage":{"input_tokens":0,"output_tokens":0}}}
 OUT {"type":"result","subtype":"success","session_id":"sess-commands","num_turns":1,"duration_ms":10,"usage":{"input_tokens":0,"output_tokens":0}}
