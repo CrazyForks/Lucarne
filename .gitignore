@@ -10,3 +10,5 @@ data/tmp/
 data/instruments/
 
 data/wechat-contexts.json
+.idea
+.pi
