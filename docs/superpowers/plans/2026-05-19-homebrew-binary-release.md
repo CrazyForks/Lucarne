@@ -20,7 +20,7 @@
   - Unit-tests formula generation and input validation.
 - Create: `.github/workflows/release.yml`
   - Builds `aarch64-apple-darwin` on `macos-14-arm64`.
-  - Builds `x86_64-apple-darwin` on `macos-13`.
+  - Builds `x86_64-apple-darwin` on `macos-15-intel`.
   - Publishes GitHub Release tarballs and `checksums.txt`.
   - Tests generated formula on both macOS architectures.
   - Updates `Formula/lucarned.rb` on `main` after formula tests pass.
@@ -448,7 +448,7 @@ jobs:
           - target: aarch64-apple-darwin
             runner: macos-14-arm64
           - target: x86_64-apple-darwin
-            runner: macos-13
+            runner: macos-15-intel
     steps:
       - name: Resolve release tag
         id: release
@@ -665,7 +665,7 @@ EOF
           - name: macOS Apple Silicon
             runner: macos-14-arm64
           - name: macOS Intel
-            runner: macos-13
+            runner: macos-15-intel
     steps:
       - name: Checkout release ref
         uses: actions/checkout@v4
@@ -770,7 +770,7 @@ path = Path('.github/workflows/release.yml')
 text = path.read_text()
 required = [
     'macos-14-arm64',
-    'macos-13',
+    'macos-15-intel',
     'cargo +nightly build --release -Zbuild-dir-new-layout --locked -p lucarned',
     'update-homebrew-formula.py',
     'brew tap-new tuchg/lucarne --no-git',
