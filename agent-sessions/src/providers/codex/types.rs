@@ -203,6 +203,7 @@ pub(crate) enum EventMsgData {
     TaskComplete(TaskCompleteEventMsg),
     AgentMessage(AgentMessageEventMsg),
     AgentReasoning(AgentReasoningEventMsg),
+    ImageGeneration(ImageGenerationEventMsg),
     UserMessage(UserMessageEventMsg),
     TokenCount(TokenCountEventMsg),
     ExecCommandEnd(ExecCommandEndEventMsg),
@@ -246,6 +247,14 @@ pub(crate) struct AgentMessageEventMsg {
 #[derive(Debug)]
 pub(crate) struct AgentReasoningEventMsg {
     pub text: Option<SmolStr>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ImageGenerationEventMsg {
+    pub id: Option<SmolStr>,
+    pub status: Option<SmolStr>,
+    pub revised_prompt: Option<SmolStr>,
+    pub result_base64: Option<SmolStr>,
 }
 
 #[derive(Debug)]

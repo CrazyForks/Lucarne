@@ -5,8 +5,9 @@ use serde_json::Value;
 use smol_str::SmolStr;
 
 use super::events::{
-    CommandResultEvent, Event as PublicEvent, MessageEvent, MessageRole, ReasoningEvent,
-    ToolCallEvent, ToolResultEvent, TurnCompletedEvent, TurnFailedEvent, UsageEvent,
+    Attachment, CommandResultEvent, Event as PublicEvent, MessageEvent, MessageRole,
+    ReasoningEvent, ToolCallEvent, ToolResultEvent, TurnCompletedEvent, TurnFailedEvent,
+    UsageEvent,
 };
 use super::types::{
     ApprovalRequest, CallId, InterventionRequest, Question, QuestionOption, QuestionRequest,
@@ -37,6 +38,15 @@ impl Projector {
                 if let Some(event) = project_timeline(&timeline.item) {
                     projection.events.push(event);
                 }
+            }
+            Payload::Attachment(attachment) => {
+                projection.events.push(PublicEvent::Attachment(Attachment {
+                    id: attachment.id,
+                    filename: attachment.filename,
+                    media_type: attachment.media_type,
+                    data_base64: attachment.data_base64,
+                    caption: attachment.caption,
+                }));
             }
             Payload::PermissionRequest(request) => {
                 if capabilities.structured_intervention {

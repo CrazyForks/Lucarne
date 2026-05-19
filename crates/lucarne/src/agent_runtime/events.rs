@@ -20,6 +20,16 @@ pub struct MessageEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attachment {
+    pub id: SmolStr,
+    pub filename: SmolStr,
+    pub media_type: SmolStr,
+    pub data_base64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption: Option<SmolStr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReasoningEvent {
     pub text: SmolStr,
 }
@@ -81,6 +91,7 @@ pub struct TurnFailedEvent {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
     Message(MessageEvent),
+    Attachment(Attachment),
     Reasoning(ReasoningEvent),
     ToolCall(ToolCallEvent),
     ToolResult(ToolResultEvent),
@@ -102,6 +113,7 @@ impl Event {
                 role: MessageRole::Assistant,
                 ..
             }) => filter.assistant_messages,
+            Self::Attachment(_) => filter.assistant_messages,
             Self::Reasoning(_) => filter.reasoning,
             Self::ToolCall(_) => filter.tool_calls,
             Self::ToolResult(_) => filter.tool_results,

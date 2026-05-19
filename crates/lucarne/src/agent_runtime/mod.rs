@@ -15,8 +15,8 @@ pub use crate::ProviderId;
 pub use catalog::KnownAgentProvider;
 pub use error::{AgentError, AgentErrorKind};
 pub use events::{
-    CommandResultEvent, Event, MessageEvent, MessageRole, ReasoningEvent, ToolCallEvent,
-    ToolResultEvent, UsageEvent,
+    Attachment, CommandResultEvent, Event, MessageEvent, MessageRole, ReasoningEvent,
+    ToolCallEvent, ToolResultEvent, UsageEvent,
 };
 pub use provider::{AgentProvider, ProtocolProvider};
 pub use runtime::{AgentDescriptor, AgentRuntime, RuntimeBus};

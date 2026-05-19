@@ -423,6 +423,7 @@ pub struct TurnRecord {
 pub enum TimelineItemKind {
     User,
     Assistant,
+    Attachment,
     Reasoning,
     ToolCall,
     ToolResult,

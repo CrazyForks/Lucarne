@@ -146,6 +146,36 @@ impl FileUpload {
     }
 }
 
+/// An agent-originated attachment ready for channel delivery.
+#[derive(Debug, Clone)]
+pub struct Attachment {
+    pub filename: String,
+    pub media_type: String,
+    pub bytes: Vec<u8>,
+    pub caption: Option<String>,
+    pub reply_to: Option<MessageId>,
+}
+
+impl Attachment {
+    pub fn new(filename: impl Into<String>, media_type: impl Into<String>, bytes: Vec<u8>) -> Self {
+        Self {
+            filename: filename.into(),
+            media_type: media_type.into(),
+            bytes,
+            caption: None,
+            reply_to: None,
+        }
+    }
+    pub fn with_caption(mut self, caption: impl Into<String>) -> Self {
+        self.caption = Some(caption.into());
+        self
+    }
+    pub fn reply_to(mut self, id: MessageId) -> Self {
+        self.reply_to = Some(id);
+        self
+    }
+}
+
 /// A user-originated attachment (file, image, voice note, …). Payload
 /// is downloaded lazily via [`super::Channel::download_attachment`].
 #[derive(Debug, Clone, PartialEq, Eq)]

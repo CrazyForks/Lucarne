@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 
 pub use types::{
-    ChannelError, ChannelEvent, ChatId, CommandQuery, CommandQueryResult, FileUpload,
+    Attachment, ChannelError, ChannelEvent, ChatId, CommandQuery, CommandQueryResult, FileUpload,
     IncomingAttachment, IncomingMessage, MessageId, OutgoingButton, OutgoingMessage, Result,
     WorkspaceHandle, WorkspaceId,
 };
@@ -126,6 +126,23 @@ pub trait Channel: Send + Sync {
         Err(ChannelError::Unsupported("send_file".into()))
     }
 
+    /// Send an agent-originated attachment. Channels may override this to use
+    /// native media APIs; default delivery falls back to [`Channel::send_file`].
+    async fn send_attachment(
+        &self,
+        target: &WorkspaceHandle,
+        attachment: Attachment,
+    ) -> Result<MessageId> {
+        let mut upload = FileUpload::new(attachment.filename, attachment.bytes);
+        if let Some(caption) = attachment.caption {
+            upload = upload.with_caption(caption);
+        }
+        if let Some(reply_to) = attachment.reply_to {
+            upload = upload.reply_to(reply_to);
+        }
+        self.send_file(target, upload).await
+    }
+
     /// Answer a platform command autocomplete query. Telegram implements this
     /// with inline query results; channels without such a primitive can ignore
     /// it by using the default unsupported response.
@@ -135,5 +152,104 @@ pub trait Channel: Send + Sync {
         _results: Vec<CommandQueryResult>,
     ) -> Result<()> {
         Err(ChannelError::Unsupported("answer_command_query".into()))
+    }
+}
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use futures::{
+        stream::{self, BoxStream},
+        StreamExt,
+    };
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct RecordingChannel {
+        files: Mutex<Vec<FileUpload>>,
+    }
+
+    #[async_trait]
+    impl Channel for RecordingChannel {
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+
+        fn message_char_limit(&self) -> usize {
+            4096
+        }
+
+        async fn send(
+            &self,
+            _target: &WorkspaceHandle,
+            _msg: OutgoingMessage,
+        ) -> Result<MessageId> {
+            Ok(MessageId::new("text-1"))
+        }
+
+        async fn edit(
+            &self,
+            _target: &WorkspaceHandle,
+            _id: &MessageId,
+            _msg: OutgoingMessage,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn create_workspace(
+            &self,
+            _parent: &ChatId,
+            _title: &str,
+        ) -> Result<WorkspaceHandle> {
+            Err(ChannelError::Unsupported("create_workspace".into()))
+        }
+
+        async fn rename_workspace(&self, _handle: &WorkspaceHandle, _title: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn subscribe(&self) -> BoxStream<'static, ChannelEvent> {
+            stream::empty().boxed()
+        }
+
+        async fn download_attachment(&self, _att: &IncomingAttachment) -> Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+
+        async fn send_file(
+            &self,
+            _target: &WorkspaceHandle,
+            file: FileUpload,
+        ) -> Result<MessageId> {
+            self.files.lock().expect("files").push(file);
+            Ok(MessageId::new("file-1"))
+        }
+    }
+
+    #[tokio::test]
+    async fn send_attachment_default_falls_back_to_file_upload() {
+        let channel = RecordingChannel::default();
+        let target = WorkspaceHandle::new(ChatId::new("1"), WorkspaceId::new("2"));
+        let attachment = Attachment {
+            filename: "logo.png".into(),
+            media_type: "image/png".into(),
+            bytes: vec![1, 2, 3],
+            caption: Some("Logo".into()),
+            reply_to: Some(MessageId::new("source")),
+        };
+
+        let id = channel.send_attachment(&target, attachment).await.unwrap();
+
+        assert_eq!(id.as_str(), "file-1");
+        let files = channel.files.lock().expect("files");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].filename, "logo.png");
+        assert_eq!(files[0].bytes, vec![1, 2, 3]);
+        assert_eq!(files[0].caption.as_deref(), Some("Logo"));
+        assert_eq!(
+            files[0].reply_to.as_ref().map(|id| id.as_str()),
+            Some("source")
+        );
     }
 }

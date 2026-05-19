@@ -20,8 +20,8 @@ mod usage;
 
 pub use command::{CommandResultData, CommandResultPayload};
 pub use core::{
-    now_rfc3339, Event, Kind, Payload, SessionClosed, SessionStarted, TurnCompleted, TurnFailed,
-    TurnStarted,
+    now_rfc3339, Attachment, Event, Kind, Payload, SessionClosed, SessionStarted, TurnCompleted,
+    TurnFailed, TurnStarted,
 };
 pub use permission::{
     AttentionRequired, Decision, PermissionAnswer, PermissionQuestion, PermissionQuestionOption,

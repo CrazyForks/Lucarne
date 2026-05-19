@@ -1784,6 +1784,7 @@ impl Codex {
                 }
                 evs
             }
+            "image_generation" => self.handle_image_generation_item(&id, item),
             "file_change" => {
                 self.turn_has_non_message_activity = true;
                 let mut path = item
@@ -1861,6 +1862,32 @@ impl Codex {
             }
             _ => Vec::new(),
         }
+    }
+
+    fn handle_image_generation_item(&mut self, id: &str, item: &Value) -> Vec<Event> {
+        let result = item
+            .get("result")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if result.is_empty() {
+            return Vec::new();
+        }
+        let short_id = if id.trim().is_empty() { "image" } else { id };
+        let caption = item
+            .get("revisedPrompt")
+            .or_else(|| item.get("revised_prompt"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty() && text.chars().count() <= 256)
+            .map(SmolStr::from);
+        vec![Event::new(Payload::Attachment(event::Attachment {
+            id: SmolStr::from(short_id),
+            filename: SmolStr::from(format!("codex-image-{short_id}.png")),
+            media_type: SmolStr::from("image/png"),
+            data_base64: result.to_string(),
+            caption,
+        }))]
     }
 
     fn handle_subagent_item(&mut self, id: &str, item: &Value) -> Vec<Event> {
@@ -3792,6 +3819,7 @@ fn normalize_item_type(s: &str) -> String {
         "agentMessage" => "agent_message".into(),
         "commandExecution" => "command_execution".into(),
         "fileChange" => "file_change".into(),
+        "imageGeneration" => "image_generation".into(),
         other => other.into(),
     }
 }
@@ -4782,6 +4810,46 @@ mod tests {
         dialect.thread_id = Some("thread-live".into());
         dialect.thread_ready = true;
         dialect
+    }
+
+    #[test]
+    fn codex_image_generation_completed_emits_attachment() {
+        use base64::Engine as _;
+
+        let mut dialect = Codex::new();
+        dialect.init(&SessionParams::default());
+        let png = base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\nbody");
+        let frame = format!(
+            r#"{{"method":"item/completed","params":{{"item":{{"type":"imageGeneration","id":"ig_abc123","status":"generating","revisedPrompt":"short caption","result":"{png}"}},"threadId":"t1","turnId":"turn-1","completedAtMs":1}}}}"#
+        );
+
+        let events = dialect.translate(frame.as_bytes());
+
+        let attachment = events
+            .into_iter()
+            .find_map(|event| match event.payload {
+                Payload::Attachment(attachment) => Some(attachment),
+                _ => None,
+            })
+            .expect("attachment event");
+        assert_eq!(attachment.id.as_str(), "ig_abc123");
+        assert_eq!(attachment.filename.as_str(), "codex-image-ig_abc123.png");
+        assert_eq!(attachment.media_type.as_str(), "image/png");
+        assert_eq!(attachment.data_base64, png);
+        assert_eq!(attachment.caption.as_deref(), Some("short caption"));
+    }
+
+    #[test]
+    fn codex_image_generation_in_progress_without_result_emits_nothing() {
+        let mut dialect = Codex::new();
+        dialect.init(&SessionParams::default());
+        let frame = br#"{"method":"item/started","params":{"item":{"type":"imageGeneration","id":"ig_empty","status":"in_progress","revisedPrompt":null,"result":""},"threadId":"t1","turnId":"turn-1","startedAtMs":1}}"#;
+
+        let events = dialect.translate(frame);
+
+        assert!(events
+            .iter()
+            .all(|event| !matches!(event.payload, Payload::Attachment(_))));
     }
 
     #[test]

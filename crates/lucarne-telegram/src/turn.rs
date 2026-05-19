@@ -14,11 +14,13 @@
 //! that separate prevents provider communication, control-plane writes, and
 //! channel rendering from bleeding into each other.
 
+use base64::Engine as _;
 #[cfg(test)]
 use lucarne::agent_runtime::InterventionRequest;
 use lucarne::agent_runtime::{
     AgentCommandInvocation, AgentCommandResult, AgentCommandResultData, AgentInput, AgentStatus,
-    CommandResultEvent, Event, InstanceId, MessageEvent, MessageRole,
+    Attachment as AgentAttachment, CommandResultEvent, Event, InstanceId, MessageEvent,
+    MessageRole,
 };
 #[cfg(test)]
 use lucarne::agent_runtime::{AgentSkillCatalog, AgentSkillSummary, ProviderId};
@@ -33,7 +35,7 @@ use lucarne::event::CommandResultData;
 use lucarne_channel::{
     agent_message::{format_cost_duration, AgentMessageFooter},
     robust::send_with_fallback,
-    types::{MessageId, OutgoingMessage, WorkspaceHandle},
+    types::{Attachment as ChannelAttachment, MessageId, OutgoingMessage, WorkspaceHandle},
     Channel,
 };
 use std::{
@@ -74,6 +76,8 @@ const QUIET_HEARTBEAT: Duration = Duration::from_secs(30);
 const ACTIVITY_DETAIL_MAX: usize = 80;
 /// Maximum characters from agent-emitted text/JSON copied into logs.
 const EVENT_LOG_TEXT_MAX: usize = 2000;
+/// Maximum decoded bytes accepted for one agent attachment.
+const MAX_ATTACHMENT_BYTES: usize = 8 * 1024 * 1024;
 /// Format a [`Duration`] as a compact human string: `5s`, `2m 13s`, `1h 04m`.
 pub fn format_elapsed(d: Duration) -> String {
     let secs = d.as_secs();
@@ -336,6 +340,7 @@ enum DrainOutcome {
 struct DrainReport {
     outcome: DrainOutcome,
     command_result: Option<serde_json::Value>,
+    message_ids: Vec<MessageId>,
 }
 
 impl DrainReport {
@@ -343,7 +348,13 @@ impl DrainReport {
         Self {
             outcome,
             command_result,
+            message_ids: Vec::new(),
         }
+    }
+
+    fn with_message_ids(mut self, message_ids: Vec<MessageId>) -> Self {
+        self.message_ids = message_ids;
+        self
     }
 }
 
@@ -627,7 +638,16 @@ async fn drain_submitted_events(
     // 4. Drain events through the streaming draft pipeline.
     let mut drafts = DraftStream::with_reply_to(reply_to);
     let final_footer_template = mode.final_footer().cloned();
-    let drain_result = drain_events(channel, target, live, &shared, &mut drafts, mode).await;
+    let drain_result = drain_events(
+        channel,
+        target,
+        live,
+        provider_id,
+        &shared,
+        &mut drafts,
+        mode,
+    )
+    .await;
     shared.done.store(true, Ordering::SeqCst);
     shared.bump.notify_one();
     if let Some(h) = ticker_handle {
@@ -637,7 +657,7 @@ async fn drain_submitted_events(
     let elapsed = shared.start.elapsed();
 
     match drain_result {
-        Ok(outcome) => {
+        Ok(mut outcome) => {
             let final_footer = final_footer_template.map(|mut footer| {
                 if footer.cost.is_none() {
                     footer.cost = Some(format_cost_duration(elapsed));
@@ -647,7 +667,8 @@ async fn drain_submitted_events(
             let finalized = drafts
                 .finalize(&**channel, target, provider_id, final_footer.as_ref())
                 .await;
-            let mut message_ids = finalized.message_ids;
+            let mut message_ids = std::mem::take(&mut outcome.message_ids);
+            message_ids.extend(finalized.message_ids);
             if let Some(id) = status_id.as_ref() {
                 let _ = channel
                     .edit(
@@ -738,6 +759,7 @@ fn event_kind_name(e: &Event) -> &'static str {
             ..
         }) => "user_message",
         Event::Message(_) => "assistant_message",
+        Event::Attachment(_) => "attachment",
         Event::Reasoning(_) => "reasoning",
         Event::ToolCall(_) => "tool_call",
         Event::ToolResult(_) => "tool_result",
@@ -879,6 +901,35 @@ fn record_timeline(
     Err("timeline recording is required before Telegram projection rendering".into())
 }
 
+fn channel_attachment_from_event(
+    attachment: &AgentAttachment,
+    reply_to: Option<MessageId>,
+) -> Result<ChannelAttachment, String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(attachment.data_base64.as_bytes())
+        .map_err(|err| format!("attachment {} has invalid base64: {err}", attachment.id))?;
+    if bytes.len() > MAX_ATTACHMENT_BYTES {
+        return Err(format!(
+            "attachment {} is {} bytes, above {} byte limit",
+            attachment.id,
+            bytes.len(),
+            MAX_ATTACHMENT_BYTES
+        ));
+    }
+    let mut channel_attachment = ChannelAttachment::new(
+        attachment.filename.to_string(),
+        attachment.media_type.to_string(),
+        bytes,
+    );
+    if let Some(caption) = attachment.caption.as_ref() {
+        channel_attachment = channel_attachment.with_caption(caption.to_string());
+    }
+    if let Some(reply_to) = reply_to {
+        channel_attachment = channel_attachment.reply_to(reply_to);
+    }
+    Ok(channel_attachment)
+}
+
 fn immediate_command_result_from_timeline(
     item: &TimelineItem,
 ) -> Result<AgentCommandResult, String> {
@@ -920,6 +971,7 @@ async fn drain_events(
     channel: &Arc<dyn Channel>,
     target: &WorkspaceHandle,
     live: &LiveSession,
+    provider_id: &str,
     shared: &Shared,
     drafts: &mut DraftStream,
     mode: DrainMode,
@@ -936,6 +988,7 @@ async fn drain_events(
     // dropped on the next prompt.
     let mut has_message = false;
     let mut command_result_payload = None;
+    let mut attachment_message_ids = Vec::new();
     let mut awaiting_intervention = false;
     let mut suppress_next_command_message = false;
     loop {
@@ -1002,6 +1055,48 @@ async fn drain_events(
                 )
                 .await?;
             }
+            Ok(Ok(Event::Attachment(attachment))) => {
+                info!(
+                    target: "lucarne_telegram::turn",
+                    event = "attachment",
+                    id = %attachment.id,
+                    filename = %attachment.filename,
+                    media_type = %attachment.media_type,
+                    bytes_base64 = attachment.data_base64.len(),
+                    "attachment received"
+                );
+                let channel_attachment =
+                    channel_attachment_from_event(&attachment, drafts.reply_to.clone())?;
+                let item = record_timeline(
+                    &mode,
+                    target,
+                    TimelineItemKind::Attachment,
+                    serde_json::to_value(&attachment).expect("attachment event must serialize"),
+                )?;
+                awaiting_intervention = false;
+                shared.set_activity(format!(
+                    "📎 {} ({})",
+                    attachment.filename, attachment.media_type
+                ));
+                has_message = true;
+                let mut flushed = drafts
+                    .finalize(&**channel, target, provider_id, None)
+                    .await
+                    .message_ids;
+                attachment_message_ids.append(&mut flushed);
+                match channel.send_attachment(target, channel_attachment).await {
+                    Ok(id) => attachment_message_ids.push(id),
+                    Err(err) => {
+                        warn!(error = %err, "attachment send failed");
+                        return Err(err.to_string());
+                    }
+                }
+                debug!(
+                    target: "lucarne_telegram::turn",
+                    timeline_seq = item.seq.get(),
+                    "attachment recorded and sent"
+                );
+            }
             Ok(Ok(Event::CommandResult(result))) => {
                 info!(
                     target: "lucarne_telegram::turn",
@@ -1039,7 +1134,8 @@ async fn drain_events(
                     return Ok(DrainReport::new(
                         DrainOutcome::CommandResult,
                         command_result_payload,
-                    ));
+                    )
+                    .with_message_ids(attachment_message_ids));
                 }
             }
             Ok(Ok(Event::Message(MessageEvent {
@@ -1193,7 +1289,8 @@ async fn drain_events(
                     } else {
                         DrainOutcome::TurnCompleted
                     };
-                return Ok(DrainReport::new(outcome, command_result_payload));
+                return Ok(DrainReport::new(outcome, command_result_payload)
+                    .with_message_ids(attachment_message_ids));
             }
             Ok(Ok(Event::TurnFailed(tf))) => {
                 warn!(
@@ -1265,7 +1362,8 @@ async fn drain_events(
                     return Ok(DrainReport::new(
                         DrainOutcome::CommandProviderIdle,
                         command_result_payload,
-                    ));
+                    )
+                    .with_message_ids(attachment_message_ids));
                 }
                 warn!("turn timed out waiting for intervention");
                 return Err("intervention timed out without user response".into());
@@ -1381,6 +1479,7 @@ mod tests {
     #[derive(Default)]
     struct TestChannel {
         sends: StdMutex<Vec<OutgoingMessage>>,
+        attachments: StdMutex<Vec<ChannelAttachment>>,
         edits: StdMutex<Vec<(String, OutgoingMessage)>>,
         deletes: StdMutex<Vec<String>>,
         edit_errors: StdMutex<Vec<String>>,
@@ -1449,6 +1548,16 @@ mod tests {
             _file: FileUpload,
         ) -> Result<MessageId> {
             Err(ChannelError::Unsupported("send_file".into()))
+        }
+
+        async fn send_attachment(
+            &self,
+            _target: &WorkspaceHandle,
+            attachment: ChannelAttachment,
+        ) -> Result<MessageId> {
+            let mut attachments = self.attachments.lock().unwrap();
+            attachments.push(attachment);
+            Ok(MessageId::new(format!("attachment-{}", attachments.len())))
         }
     }
 
@@ -1667,6 +1776,7 @@ mod tests {
             &channel,
             &target,
             &live,
+            "test",
             &shared,
             &mut drafts,
             DrainMode::Turn(TurnRunOptions {
@@ -1725,6 +1835,7 @@ mod tests {
             &channel,
             &target,
             &live,
+            "test",
             &shared,
             &mut drafts,
             DrainMode::Turn(TurnRunOptions {
@@ -1760,6 +1871,76 @@ mod tests {
             !rendered.contains("provider-raw"),
             "provider raw event text must not bypass the timeline projection: {rendered}"
         );
+    }
+
+    #[tokio::test]
+    async fn drain_sends_attachment_and_records_timeline() {
+        let test_channel = Arc::new(TestChannel::default());
+        let channel: Arc<dyn Channel> = test_channel.clone();
+        let target = test_target();
+        let (tx, rx) = test_event_stream(&target.workspace, 4);
+        let png = base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3]);
+        send_test_event(
+            &tx,
+            &target,
+            Event::Attachment(AgentAttachment {
+                id: "ig_turn".into(),
+                filename: "codex-image-ig_turn.png".into(),
+                media_type: "image/png".into(),
+                data_base64: png,
+                caption: Some("caption".into()),
+            }),
+        );
+        send_test_event(
+            &tx,
+            &target,
+            Event::TurnCompleted(lucarne::agent_runtime::events::TurnCompletedEvent {
+                turn_id: "provider-turn".into(),
+                usage: None,
+            }),
+        );
+        drop(tx);
+        let live = LiveSession {
+            session: Arc::new(SilentSession {
+                id: SessionId("session-attachment".into()),
+                instance_id: InstanceId("instance-attachment".into()),
+            }),
+            events: tokio::sync::Mutex::new(rx),
+            pending_intv: StdMutex::new(std::collections::HashMap::new()),
+        };
+        let shared = Shared::new();
+        let mut drafts = DraftStream::new();
+        let recorder = Arc::new(NormalizingTimelineRecorder::default());
+
+        let report = drain_events(
+            &channel,
+            &target,
+            &live,
+            "test",
+            &shared,
+            &mut drafts,
+            DrainMode::Turn(TurnRunOptions {
+                recording: Some(TurnRecording {
+                    turn_id: ControlTurnId::new("turn-attachment"),
+                    recorder: recorder.clone(),
+                }),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("turn should drain");
+
+        assert_eq!(report.message_ids, vec![MessageId::new("attachment-1")]);
+        let attachments = test_channel.attachments.lock().unwrap();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].filename, "codex-image-ig_turn.png");
+        assert_eq!(attachments[0].media_type, "image/png");
+        assert_eq!(attachments[0].bytes, vec![1, 2, 3]);
+        assert_eq!(attachments[0].caption.as_deref(), Some("caption"));
+        let recorded = recorder.items.lock().unwrap();
+        assert!(recorded
+            .iter()
+            .any(|(kind, _payload)| *kind == TimelineItemKind::Attachment));
     }
 
     #[tokio::test]
@@ -1824,6 +2005,7 @@ mod tests {
             &channel,
             &target,
             &live,
+            "test",
             &shared,
             &mut drafts,
             DrainMode::Turn(TurnRunOptions {
@@ -1920,6 +2102,7 @@ mod tests {
             &channel,
             &target,
             &live,
+            "test",
             &shared,
             &mut drafts,
             DrainMode::Turn(TurnRunOptions {
@@ -2006,6 +2189,7 @@ mod tests {
             &channel,
             &target,
             &live,
+            "test",
             &shared,
             &mut drafts,
             DrainMode::Turn(TurnRunOptions {
@@ -2065,6 +2249,7 @@ mod tests {
             &channel,
             &target,
             &live,
+            "test",
             &shared,
             &mut drafts,
             DrainMode::Turn(TurnRunOptions::default()),

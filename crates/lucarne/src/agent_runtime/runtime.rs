@@ -1040,6 +1040,7 @@ fn runtime_output_name(output: &RuntimeBusOutput) -> &'static str {
 fn agent_event_name(event: &super::Event) -> &'static str {
     match event {
         super::Event::Message(_) => "message",
+        super::Event::Attachment(_) => "attachment",
         super::Event::Reasoning(_) => "reasoning",
         super::Event::ToolCall(_) => "tool_call",
         super::Event::ToolResult(_) => "tool_result",

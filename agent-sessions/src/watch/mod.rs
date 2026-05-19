@@ -45,9 +45,9 @@ pub(crate) use event::watch_smol;
 ))]
 pub(crate) use event::watch_smol_opt;
 pub use event::{
-    WatchAssistantMessage, WatchChange, WatchError, WatchEvent, WatchEventMeta, WatchMessage,
-    WatchOther, WatchSnapshot, WatchState, WatchToolCall, WatchToolResult, WatchTurnCompleted,
-    WatchTurnFailed, WatchUnknown, WatchUpdate, WatchUsage,
+    WatchAssistantMessage, WatchAttachment, WatchChange, WatchError, WatchEvent, WatchEventMeta,
+    WatchMessage, WatchOther, WatchSnapshot, WatchState, WatchToolCall, WatchToolResult,
+    WatchTurnCompleted, WatchTurnFailed, WatchUnknown, WatchUpdate, WatchUsage,
 };
 #[cfg(target_os = "macos")]
 use macos_fsevents::MacRecursiveWatcher;
@@ -1454,6 +1454,7 @@ fn created_watch_tail_visible_events(events: Box<[WatchEvent]>) -> Box<[WatchEve
             matches!(
                 event,
                 WatchEvent::AssistantMessage(_)
+                    | WatchEvent::Attachment(_)
                     | WatchEvent::ToolCall(_)
                     | WatchEvent::ToolResult(_)
                     | WatchEvent::Usage(_)

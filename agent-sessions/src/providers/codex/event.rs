@@ -257,6 +257,35 @@ fn codex_watch_text(text: Option<SmolStr>) -> Option<smol_str::SmolStr> {
 }
 
 #[cfg(feature = "watch")]
+fn codex_watch_image_generation(
+    meta: crate::watch::WatchEventMeta,
+    data: &super::ImageGenerationEventMsg,
+) -> Option<crate::watch::WatchEvent> {
+    let result = data.result_base64.as_deref()?.trim();
+    if result.is_empty() {
+        return None;
+    }
+    let id = data.id.clone().or_else(|| meta.id.clone());
+    let short_id = id.as_deref().unwrap_or("image").to_string();
+    let caption = data
+        .revised_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty() && text.chars().count() <= 256)
+        .map(crate::watch::watch_smol);
+    Some(crate::watch::WatchEvent::Attachment(
+        crate::watch::WatchAttachment {
+            meta,
+            id,
+            filename: crate::watch::watch_smol(format!("codex-image-{short_id}.png")),
+            media_type: crate::watch::watch_smol("image/png"),
+            data_base64: crate::watch::watch_smol(result.to_string()),
+            caption,
+        },
+    ))
+}
+
+#[cfg(feature = "watch")]
 fn codex_watch_meta_fields(entries: &[super::Entry]) -> (Option<SmolStr>, Option<SmolStr>) {
     let session_meta = entries.iter().find_map(|entry| match entry {
         super::Entry::SessionMeta(meta) => Some(meta),
@@ -805,6 +834,19 @@ fn watch_events_from_codex_entries(
                                 text: None,
                             },
                         ));
+                    }
+                    super::EventMsgData::ImageGeneration(data) => {
+                        if let Some(event) = codex_watch_image_generation(
+                            codex_watch_meta(
+                                data.id.clone(),
+                                message.timestamp.clone(),
+                                event_turn_id.clone(),
+                                None,
+                            ),
+                            data,
+                        ) {
+                            events.push(event);
+                        }
                     }
                     super::EventMsgData::UserMessage(data) => {
                         events.push(crate::watch::WatchEvent::UserMessage(
@@ -1582,6 +1624,30 @@ fn agent_session_from_codex_body(body: &super::Body, version: super::Version) ->
                         }),
                         message.timestamp.clone(),
                     ),
+                    super::EventMsgData::ImageGeneration(data) => event(
+                        Actor::Assistant,
+                        Body::Response(Response {
+                            model: None,
+                            phase: None,
+                            text: None,
+                            blocks: vec![ContentBlock::Raw(RawBlock {
+                                kind: "image_generation".into(),
+                                raw_json: serde_json::json!({
+                                    "id": data.id,
+                                    "status": data.status,
+                                    "revised_prompt": data.revised_prompt,
+                                    "has_result": data
+                                        .result_base64
+                                        .as_deref()
+                                        .is_some_and(|result| !result.trim().is_empty()),
+                                })
+                                .to_string()
+                                .into(),
+                            })]
+                            .into_boxed_slice(),
+                        }),
+                        message.timestamp.clone(),
+                    ),
                     super::EventMsgData::UserMessage(data) => {
                         let mut blocks = Vec::new();
                         if let Some(text) = data.message.as_ref() {
@@ -2215,12 +2281,54 @@ fn codex_event_fingerprint(
     event: &crate::watch::WatchEvent,
     prompt_timestamp: Option<&str>,
 ) -> Option<u64> {
-    let response = event.assistant_message()?;
-    let text = response.text.as_deref()?;
     let mut hasher = DefaultHasher::new();
-    "assistant-response".hash(&mut hasher);
-    prompt_timestamp.hash(&mut hasher);
-    response.phase.as_deref().hash(&mut hasher);
-    text.hash(&mut hasher);
+    match event {
+        crate::watch::WatchEvent::AssistantMessage(response) => {
+            let text = response.text.as_deref()?;
+            "assistant-response".hash(&mut hasher);
+            prompt_timestamp.hash(&mut hasher);
+            response.phase.as_deref().hash(&mut hasher);
+            text.hash(&mut hasher);
+        }
+        crate::watch::WatchEvent::Attachment(attachment) => {
+            "attachment".hash(&mut hasher);
+            prompt_timestamp.hash(&mut hasher);
+            attachment.id.as_deref().hash(&mut hasher);
+            attachment.filename.hash(&mut hasher);
+            attachment.media_type.hash(&mut hasher);
+            attachment.data_base64.hash(&mut hasher);
+        }
+        _ => return None,
+    }
     Some(hasher.finish())
+}
+
+#[cfg(all(test, feature = "watch"))]
+mod watch_attachment_tests {
+    #[test]
+    fn codex_watch_image_generation_emits_attachment() {
+        let png = "iVBORw0KGgpib2R5".to_string();
+        let raw = format!(
+            r#"{{"timestamp":"2026-05-19T03:14:51.660Z","type":"event_msg","payload":{{"type":"imageGeneration","id":"ig_watch","status":"generating","revisedPrompt":"watch caption","result":"{png}"}}}}"#
+        );
+        let (_version, body) =
+            super::super::parse_codex_reader(raw.as_bytes(), crate::ParseSelection::full())
+                .expect("parse codex session");
+        let events =
+            super::watch_events_from_codex_entries(&body.entries, crate::ParseSelection::full());
+
+        let attachment = events
+            .iter()
+            .find_map(|event| match event {
+                crate::watch::WatchEvent::Attachment(attachment) => Some(attachment),
+                _ => None,
+            })
+            .expect("watch attachment");
+
+        assert_eq!(attachment.id.as_deref(), Some("ig_watch"));
+        assert_eq!(attachment.filename.as_str(), "codex-image-ig_watch.png");
+        assert_eq!(attachment.media_type.as_str(), "image/png");
+        assert_eq!(attachment.data_base64.as_str(), png);
+        assert_eq!(attachment.caption.as_deref(), Some("watch caption"));
+    }
 }

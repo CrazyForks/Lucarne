@@ -1812,6 +1812,7 @@ fn unsupported(message: impl Into<String>) -> AgentError {
 fn public_event_name(event: &super::events::Event) -> &'static str {
     match event {
         super::events::Event::Message(_) => "message",
+        super::events::Event::Attachment(_) => "attachment",
         super::events::Event::Reasoning(_) => "reasoning",
         super::events::Event::ToolCall(_) => "tool_call",
         super::events::Event::ToolResult(_) => "tool_result",

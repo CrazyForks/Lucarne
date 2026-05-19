@@ -427,6 +427,12 @@ pub fn summarize_runtime_events(events: &[RuntimeEvent]) -> String {
                 }
                 format!("message({:?}:{text})", message.role)
             }
+            RuntimeEvent::Attachment(attachment) => {
+                format!(
+                    "attachment({}:{})",
+                    attachment.media_type, attachment.filename
+                )
+            }
             RuntimeEvent::Reasoning(reasoning) => {
                 let mut text = reasoning.text.trim().to_string();
                 if text.len() > 60 {

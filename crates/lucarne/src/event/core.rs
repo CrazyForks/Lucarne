@@ -2,6 +2,7 @@
 //! payloads (session started/closed, turn started/completed/failed).
 
 use serde::{Deserialize, Serialize};
+use smol_str::SmolStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::command::CommandResultPayload;
@@ -52,6 +53,7 @@ pub enum Kind {
     Log,
     UsageDelta,
     CommandResult,
+    Attachment,
 }
 
 /// Payload variants. Matches the Go `Event.Kind + Payload` pair via
@@ -72,6 +74,7 @@ pub enum Payload {
     Log(LogLine),
     UsageDelta(UsageDelta),
     CommandResult(CommandResultPayload),
+    Attachment(Attachment),
 }
 
 impl Payload {
@@ -89,8 +92,19 @@ impl Payload {
             Self::Log(_) => Kind::Log,
             Self::UsageDelta(_) => Kind::UsageDelta,
             Self::CommandResult(_) => Kind::CommandResult,
+            Self::Attachment(_) => Kind::Attachment,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attachment {
+    pub id: SmolStr,
+    pub filename: SmolStr,
+    pub media_type: SmolStr,
+    pub data_base64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption: Option<SmolStr>,
 }
 
 // ——— Lifecycle ———

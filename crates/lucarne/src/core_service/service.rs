@@ -1604,6 +1604,20 @@ impl LucarneCore {
                         streaming: false,
                     })
                 }
+                WatchEvent::Attachment(attachment) => {
+                    let id = attachment
+                        .id
+                        .clone()
+                        .or_else(|| attachment.meta.id.clone())
+                        .unwrap_or_else(|| "attachment".into());
+                    AgentEvent::Attachment(crate::agent_runtime::Attachment {
+                        id,
+                        filename: attachment.filename.clone(),
+                        media_type: attachment.media_type.clone(),
+                        data_base64: attachment.data_base64.to_string(),
+                        caption: attachment.caption.clone(),
+                    })
+                }
                 WatchEvent::ToolCall(tool)
                     if matches!(
                         tool.phase,
@@ -3604,6 +3618,7 @@ fn touch_submitted_turn(
             turn.waiting_intervention = true;
         }
         AgentEvent::Message(_)
+        | AgentEvent::Attachment(_)
         | AgentEvent::Reasoning(_)
         | AgentEvent::ToolCall(_)
         | AgentEvent::ToolResult(_)
@@ -4016,6 +4031,7 @@ mod tests {
     };
 
     use async_trait::async_trait;
+    use base64::Engine as _;
 
     use super::*;
     use crate::agent_runtime::events::{TurnCompletedEvent, UsageEvent};
@@ -4025,7 +4041,9 @@ mod tests {
     };
     use crate::control_plane::LiveInstanceState;
     use crate::ProviderId;
-    use agent_sessions::{WatchAssistantMessage, WatchEventMeta, WatchMessage, WatchTurnFailed};
+    use agent_sessions::{
+        WatchAssistantMessage, WatchAttachment, WatchEventMeta, WatchMessage, WatchTurnFailed,
+    };
 
     static ENV_LOCK: StdMutex<()> = StdMutex::new(());
 
@@ -4564,6 +4582,79 @@ mod tests {
             core.active_provider_session_ref(&workspace_id).unwrap(),
             "external-thread"
         );
+    }
+
+    #[tokio::test]
+    async fn history_watch_attachment_projects_to_core_event() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let codex_home = temp.path().join("codex");
+        let project_path = temp.path().join("project");
+        fs::create_dir_all(&project_path).expect("project dir");
+        let unrelated_codex_home = temp.path().join("unrelated-codex");
+        let _env = EnvGuard::set(&[(
+            "CODEX_HOME",
+            unrelated_codex_home.as_os_str().to_os_string(),
+        )]);
+        let session_path = write_codex_history_session(
+            &codex_home,
+            "attachment-thread",
+            project_path.to_str().expect("utf8 project"),
+            "2026-04-25T00:01:00.000Z",
+            "ping",
+        );
+        let runtime = Arc::new(AgentRuntime::new());
+        runtime.register(Arc::new(CatalogProvider));
+        let core = LucarneCore::from_runtime_and_store(
+            runtime,
+            ControlPlaneSqliteStore::open_in_memory().expect("store"),
+        )
+        .expect("core");
+        let mut events = core.watch_events();
+        let png = base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3]);
+
+        core.handle_history_watch_update(WatchUpdate {
+            provider: watch_provider("codex"),
+            path: session_path,
+            session_id: Some("attachment-thread".into()),
+            cwd: Some(project_path.to_str().expect("utf8 project").into()),
+            change: WatchChange::Updated,
+            events: vec![WatchEvent::Attachment(WatchAttachment {
+                meta: WatchEventMeta {
+                    id: Some("ig_watch".into()),
+                    timestamp: Some("2026-05-07T10:00:00.000Z".into()),
+                    ..WatchEventMeta::default()
+                },
+                id: Some("ig_watch".into()),
+                filename: "codex-image-ig_watch.png".into(),
+                media_type: "image/png".into(),
+                data_base64: png.into(),
+                caption: Some("watch caption".into()),
+            })]
+            .into_boxed_slice(),
+            error: None,
+        })
+        .expect("ingest attachment watch update");
+
+        let attachment = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let event = events.recv().await.expect("core event");
+                if let CoreEvent::TimelineEvent {
+                    event: AgentEvent::Attachment(attachment),
+                    ..
+                } = event
+                {
+                    break attachment;
+                }
+            }
+        })
+        .await
+        .expect("attachment event");
+
+        assert_eq!(attachment.id.as_str(), "ig_watch");
+        assert_eq!(attachment.filename.as_str(), "codex-image-ig_watch.png");
+        assert_eq!(attachment.media_type.as_str(), "image/png");
+        assert_eq!(attachment.caption.as_deref(), Some("watch caption"));
     }
 
     #[tokio::test]

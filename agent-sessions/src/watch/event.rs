@@ -54,6 +54,7 @@ pub struct WatchUpdate {
 pub enum WatchEvent {
     UserMessage(WatchMessage),
     AssistantMessage(WatchAssistantMessage),
+    Attachment(WatchAttachment),
     ToolCall(WatchToolCall),
     ToolResult(WatchToolResult),
     Usage(WatchUsage),
@@ -86,6 +87,16 @@ pub struct WatchAssistantMessage {
     pub model: Option<SmolStr>,
     pub phase: Option<SmolStr>,
     pub text: Option<SmolStr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatchAttachment {
+    pub meta: WatchEventMeta,
+    pub id: Option<SmolStr>,
+    pub filename: SmolStr,
+    pub media_type: SmolStr,
+    pub data_base64: SmolStr,
+    pub caption: Option<SmolStr>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -185,6 +196,7 @@ impl WatchEvent {
         match self {
             Self::UserMessage(event) => &event.meta,
             Self::AssistantMessage(event) => &event.meta,
+            Self::Attachment(event) => &event.meta,
             Self::ToolCall(event) => &event.meta,
             Self::ToolResult(event) => &event.meta,
             Self::Usage(event) => &event.meta,
@@ -211,14 +223,6 @@ impl WatchEvent {
     pub fn assistant_text(&self) -> Option<&str> {
         match self {
             Self::AssistantMessage(message) => message.text.as_deref(),
-            _ => None,
-        }
-    }
-
-    #[cfg(feature = "codex")]
-    pub(crate) fn assistant_message(&self) -> Option<&WatchAssistantMessage> {
-        match self {
-            Self::AssistantMessage(message) => Some(message),
             _ => None,
         }
     }

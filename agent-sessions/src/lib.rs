@@ -69,8 +69,8 @@ pub use input::InputMetadata;
 pub use parse_selection::ParseSelection;
 #[cfg(feature = "watch")]
 pub use watch::{
-    SessionWatcher, WatchAssistantMessage, WatchChange, WatchConfig, WatchError, WatchEvent,
-    WatchEventMeta, WatchMessage, WatchOther, WatchProvider, WatchSnapshot, WatchState,
+    SessionWatcher, WatchAssistantMessage, WatchAttachment, WatchChange, WatchConfig, WatchError,
+    WatchEvent, WatchEventMeta, WatchMessage, WatchOther, WatchProvider, WatchSnapshot, WatchState,
     WatchToolCall, WatchToolResult, WatchTurnCompleted, WatchTurnFailed, WatchUnknown, WatchUpdate,
     WatchUsage,
 };

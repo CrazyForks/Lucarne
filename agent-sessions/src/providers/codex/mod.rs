@@ -548,7 +548,12 @@ impl ParseSelection {
 
     fn includes_codex_event_kind(self, kind: &str) -> bool {
         match kind {
-            "agent_message" | "agent_reasoning" | "user_message" => self.includes_messages(),
+            "agent_message"
+            | "agent_reasoning"
+            | "user_message"
+            | "imageGeneration"
+            | "image_generation"
+            | "image_generation_result" => self.includes_messages(),
             "token_count" => self.includes_usage(),
             "exec_command_end"
             | "patch_apply_end"
@@ -618,6 +623,14 @@ fn opt_raw_json_box(raw: Option<&RawValue>) -> Option<SmolStr> {
     raw.map(json_to_box)
 }
 
+fn opt_raw_string_box(raw: Option<&RawValue>) -> Option<SmolStr> {
+    raw.and_then(|raw| {
+        serde_json::from_str::<Cow<'_, str>>(raw.get())
+            .ok()
+            .map(cow_to_box)
+    })
+}
+
 fn opt_status_string(raw: Option<&RawValue>) -> Option<SmolStr> {
     raw.and_then(|raw| {
         match raw
@@ -653,6 +666,14 @@ fn map_event_msg_data(payload: &EventMsgPayload<'_>) -> EventMsgData {
         "agent_reasoning" => EventMsgData::AgentReasoning(AgentReasoningEventMsg {
             text: opt_cow_box_str(payload.text.clone()),
         }),
+        "imageGeneration" | "image_generation" | "image_generation_result" => {
+            EventMsgData::ImageGeneration(ImageGenerationEventMsg {
+                id: opt_box_str(payload.id),
+                status: opt_raw_string_box(payload.status),
+                revised_prompt: opt_cow_box_str(payload.revised_prompt.clone()),
+                result_base64: opt_raw_string_box(payload.result),
+            })
+        }
         "user_message" => EventMsgData::UserMessage(UserMessageEventMsg {
             message: opt_cow_box_str(payload.message.clone()),
             images_json: opt_raw_json_box(payload.images),
@@ -952,6 +973,8 @@ struct EventMsgPayload<'a> {
     #[serde(rename = "type")]
     kind: &'a str,
     #[serde(default)]
+    id: Option<&'a str>,
+    #[serde(default)]
     #[serde(alias = "turnId")]
     turn_id: Option<&'a str>,
     #[serde(default)]
@@ -972,6 +995,8 @@ struct EventMsgPayload<'a> {
     message: Option<Cow<'a, str>>,
     #[serde(default)]
     text: Option<Cow<'a, str>>,
+    #[serde(default, alias = "revisedPrompt")]
+    revised_prompt: Option<Cow<'a, str>>,
     #[serde(default, borrow)]
     images: Option<&'a RawValue>,
     #[serde(default, borrow)]
