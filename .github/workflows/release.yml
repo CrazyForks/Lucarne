@@ -31,7 +31,7 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
-            runner: macos-14-arm64
+            runner: macos-26
           - target: x86_64-apple-darwin
             runner: macos-15-intel
     steps:
@@ -267,7 +267,7 @@ jobs:
       matrix:
         include:
           - name: macOS Apple Silicon
-            runner: macos-14-arm64
+            runner: macos-26
           - name: macOS Intel
             runner: macos-15-intel
     steps:

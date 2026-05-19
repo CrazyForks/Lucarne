@@ -19,7 +19,7 @@
 - Create: `scripts/release/test_update_homebrew_formula.py`
   - Unit-tests formula generation and input validation.
 - Create: `.github/workflows/release.yml`
-  - Builds `aarch64-apple-darwin` on `macos-14-arm64`.
+  - Builds `aarch64-apple-darwin` on `macos-26`.
   - Builds `x86_64-apple-darwin` on `macos-15-intel`.
   - Publishes GitHub Release tarballs and `checksums.txt`.
   - Tests generated formula on both macOS architectures.
@@ -442,7 +442,7 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
-            runner: macos-14-arm64
+            runner: macos-26
           - target: x86_64-apple-darwin
             runner: macos-15-intel
     steps:
@@ -644,7 +644,7 @@ EOF
       matrix:
         include:
           - name: macOS Apple Silicon
-            runner: macos-14-arm64
+            runner: macos-26
           - name: macOS Intel
             runner: macos-15-intel
     steps:
@@ -750,7 +750,7 @@ from pathlib import Path
 path = Path('.github/workflows/release.yml')
 text = path.read_text()
 required = [
-    'macos-14-arm64',
+    'macos-26',
     'macos-15-intel',
     'cargo +nightly build --release -Zbuild-dir-new-layout --locked -p lucarned',
     'update-homebrew-formula.py',

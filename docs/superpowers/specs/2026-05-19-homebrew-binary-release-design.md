@@ -72,7 +72,7 @@ on:
 Build matrix:
 
 ```text
-macos-14-arm64 -> aarch64-apple-darwin
+macos-26 -> aarch64-apple-darwin
 macos-15-intel -> x86_64-apple-darwin
 ```
 
@@ -145,7 +145,7 @@ If branch protection blocks direct push, the same workflow creates a pull reques
 tag vX.Y.Z
   -> release workflow
   -> build locked Cargo source using committed Cargo.lock
-  -> build arm64 on macos-14-arm64
+  -> build arm64 on macos-26
   -> build x86_64 on macos-15-intel
   -> package tarballs
   -> upload GitHub Release assets
