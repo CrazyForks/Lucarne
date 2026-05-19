@@ -1498,7 +1498,7 @@ impl Bot {
             &m.message_id,
             Some(m.message_id.clone()),
             TurnRecorderScope::TopicHandle,
-            true,
+            false,
             false,
         )
         .await
@@ -11073,6 +11073,12 @@ done
             .await
             .expect("send split notification");
 
+        let sent = channel.sent.lock().unwrap();
+        assert!(sent.iter().all(|msg| msg.body.contains("==========")
+            && msg.body.contains("session: `thread-split`")
+            && msg.body.contains("cwd: `/tmp/project`")));
+        drop(sent);
+
         let provider_session_id = bot
             .state
             .active_provider_session_id(&session.workspace)
@@ -14373,6 +14379,20 @@ done
         assert!(sent
             .iter()
             .any(|msg| msg.body.starts_with("⏳") && msg.reply_to.is_none()));
+        let edits = channel.edits.lock().unwrap();
+        let turn_bodies = sent
+            .iter()
+            .map(|msg| msg.body.as_str())
+            .chain(edits.iter().map(|(_, msg)| msg.body.as_str()))
+            .filter(|body| body.contains("ok"))
+            .collect::<Vec<_>>();
+        assert!(!turn_bodies.is_empty());
+        assert!(
+            turn_bodies.iter().all(|body| !body.contains("==========")
+                && !body.contains("session:")
+                && !body.contains("cwd:")),
+            "non-notification Telegram turn must not include agent footer: {turn_bodies:?}"
+        );
     }
 
     #[tokio::test]

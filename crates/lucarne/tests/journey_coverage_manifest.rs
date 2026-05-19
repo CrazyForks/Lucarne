@@ -77,7 +77,7 @@ pub const JOURNEYS: [JourneyMapping; JOURNEY_COUNT] = [
         id: 7,
         slug: "journey_07_send_prompt",
         status: JourneyStatus::Covered,
-        test_names: &["journey_07_send_prompt_renders_reasoning_tool_calls_and_footer"],
+        test_names: &["journey_07_send_prompt_renders_reasoning_tool_calls_without_footer"],
         reason: "",
     },
     // ── 8 ─────────────────────────────────────────────────────────────────

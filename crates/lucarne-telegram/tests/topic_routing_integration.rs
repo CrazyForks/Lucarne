@@ -672,7 +672,7 @@ async fn commands_topic_command_renders_provider_catalog_without_injecting_trait
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn journey_07_send_prompt_renders_reasoning_tool_calls_and_footer() {
+async fn journey_07_send_prompt_renders_reasoning_tool_calls_without_footer() {
     let _test_lock = test_lock();
     let provider = Arc::new(ProviderProbe::with_pending_submit_events(Vec::new()));
     let core = core_with_provider(Arc::clone(&provider));
@@ -748,13 +748,13 @@ async fn journey_07_send_prompt_renders_reasoning_tool_calls_and_footer() {
         )
         .await;
     let final_answer = eventually_topic_message(&channel, "9", |message| {
-        message.body.contains("final answer") && message.body.contains("==========")
+        message.body.contains("final answer") && message.format == TextFormat::Markdown
     })
     .await;
     assert_eq!(final_answer.format, TextFormat::Markdown);
-    assert!(final_answer.body.contains("\n\n==========\ncost: "));
-    assert!(final_answer.body.contains("\nsession: `thread-1`"));
-    assert!(final_answer.body.contains("\ncwd: `/tmp/project-a`"));
+    assert!(!final_answer.body.contains("\n\n=========="));
+    assert!(!final_answer.body.contains("session: `thread-1`"));
+    assert!(!final_answer.body.contains("cwd: `/tmp/project-a`"));
     channel.close_events();
     timeout(Duration::from_secs(2), run)
         .await
