@@ -22,6 +22,31 @@ use tracing::{debug, info, instrument, warn};
 /// agent turn.
 pub const INLINE_BYTE_CEILING: usize = 60_000;
 
+/// Number of bounded retries for attachment delivery after the initial attempt.
+pub const ATTACHMENT_DELIVERY_MAX_RETRIES: usize = 3;
+
+/// Retry an attachment delivery operation with the shared bounded retry policy.
+pub async fn retry_attachment_delivery<F, Fut, T, E, R>(
+    mut operation: F,
+    mut retryable: R,
+) -> std::result::Result<T, E>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<T, E>>,
+    R: FnMut(&E) -> bool,
+{
+    let mut retries = 0usize;
+    loop {
+        match operation().await {
+            Ok(value) => return Ok(value),
+            Err(err) if retries < ATTACHMENT_DELIVERY_MAX_RETRIES && retryable(&err) => {
+                retries += 1;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
 /// Send `msg` through `channel`, falling back to a `.txt` upload if
 /// the platform rejects the markup or the payload is too large.
 ///
@@ -331,5 +356,28 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(id.as_str(), "ok");
+    }
+
+    #[tokio::test]
+    async fn attachment_delivery_retry_is_bounded_to_three_retries() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_for_operation = std::sync::Arc::clone(&attempts);
+        let result = retry_attachment_delivery(
+            move || {
+                let attempts = std::sync::Arc::clone(&attempts_for_operation);
+                async move {
+                    attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Err::<(), _>(ChannelError::Transport("still down".into()))
+                }
+            },
+            |_| true,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            ATTACHMENT_DELIVERY_MAX_RETRIES + 1
+        );
     }
 }

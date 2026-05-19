@@ -12,6 +12,7 @@ lucarne-channel = { path = "../lucarne-channel" }
 wechat-ilink = "0.5"
 
 async-trait = { workspace = true }
+base64 = "0.22"
 futures = { workspace = true }
 qrcode = { version = "0.14.1", default-features = false }
 serde = { workspace = true }

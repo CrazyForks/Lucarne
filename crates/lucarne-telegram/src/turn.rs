@@ -34,8 +34,11 @@ use lucarne::core_service::{
 use lucarne::event::CommandResultData;
 use lucarne_channel::{
     agent_message::{format_cost_duration, AgentMessageFooter},
+    robust::retry_attachment_delivery,
     robust::send_with_fallback,
-    types::{Attachment as ChannelAttachment, MessageId, OutgoingMessage, WorkspaceHandle},
+    types::{
+        Attachment as ChannelAttachment, ChannelError, MessageId, OutgoingMessage, WorkspaceHandle,
+    },
     Channel,
 };
 use std::{
@@ -337,10 +340,17 @@ enum DrainOutcome {
 }
 
 #[derive(Debug)]
+struct PendingAttachmentDelivery {
+    attachment: AgentAttachment,
+    reply_to: Option<MessageId>,
+}
+
+#[derive(Debug)]
 struct DrainReport {
     outcome: DrainOutcome,
     command_result: Option<serde_json::Value>,
     message_ids: Vec<MessageId>,
+    attachments: Vec<PendingAttachmentDelivery>,
 }
 
 impl DrainReport {
@@ -349,11 +359,12 @@ impl DrainReport {
             outcome,
             command_result,
             message_ids: Vec::new(),
+            attachments: Vec::new(),
         }
     }
 
-    fn with_message_ids(mut self, message_ids: Vec<MessageId>) -> Self {
-        self.message_ids = message_ids;
+    fn with_attachments(mut self, attachments: Vec<PendingAttachmentDelivery>) -> Self {
+        self.attachments = attachments;
         self
     }
 }
@@ -688,6 +699,14 @@ async fn drain_submitted_events(
                 // message content (e.g. intervention branch). Nothing
                 // more to send — status already shows "✓ 完成".
             }
+            let mut attachment_ids = deliver_pending_attachments(
+                &**channel,
+                target,
+                provider_id,
+                std::mem::take(&mut outcome.attachments),
+            )
+            .await;
+            message_ids.append(&mut attachment_ids);
             Ok(SubmittedRunReport {
                 drain: outcome,
                 message_ids,
@@ -901,6 +920,123 @@ fn record_timeline(
     Err("timeline recording is required before Telegram projection rendering".into())
 }
 
+fn render_attachment_delivery_failure(attachment: &AgentAttachment, error: &str) -> String {
+    let error = error.trim();
+    let error = if error.is_empty() {
+        "Unknown attachment delivery error"
+    } else {
+        error
+    };
+    format!(
+        "Attachment delivery failed.\n\nFile: {}\nMedia type: {}\nAttachment id: {}\nError: {}",
+        attachment.filename, attachment.media_type, attachment.id, error
+    )
+}
+
+async fn send_attachment_delivery_failure(
+    channel: &dyn Channel,
+    target: &WorkspaceHandle,
+    provider_id: &str,
+    attachment: &AgentAttachment,
+    reply_to: Option<MessageId>,
+    error: &str,
+) -> Option<MessageId> {
+    let mut msg = OutgoingMessage::plain(render_attachment_delivery_failure(attachment, error));
+    if let Some(reply_to) = reply_to {
+        msg = msg.reply_to(reply_to);
+    }
+    match send_with_fallback(channel, target, msg, provider_id).await {
+        Ok(id) => Some(id),
+        Err(err) => {
+            warn!(
+                target: "lucarne_telegram::turn",
+                attachment_id = %attachment.id,
+                error = %err,
+                "attachment failure details send failed"
+            );
+            None
+        }
+    }
+}
+
+async fn send_channel_attachment_with_retries(
+    channel: &dyn Channel,
+    target: &WorkspaceHandle,
+    attachment: ChannelAttachment,
+) -> Result<MessageId, ChannelError> {
+    retry_attachment_delivery(
+        || channel.send_attachment(target, attachment.clone()),
+        |_| true,
+    )
+    .await
+}
+
+async fn deliver_pending_attachments(
+    channel: &dyn Channel,
+    target: &WorkspaceHandle,
+    provider_id: &str,
+    attachments: Vec<PendingAttachmentDelivery>,
+) -> Vec<MessageId> {
+    let mut message_ids = Vec::new();
+    for pending in attachments {
+        let attachment = pending.attachment;
+        let reply_to = pending.reply_to;
+        let channel_attachment = match channel_attachment_from_event(&attachment, reply_to.clone())
+        {
+            Ok(channel_attachment) => channel_attachment,
+            Err(err) => {
+                warn!(
+                    target: "lucarne_telegram::turn",
+                    attachment_id = %attachment.id,
+                    error = %err,
+                    "attachment conversion failed; sending failure details"
+                );
+                if let Some(id) = send_attachment_delivery_failure(
+                    channel,
+                    target,
+                    provider_id,
+                    &attachment,
+                    reply_to,
+                    &err,
+                )
+                .await
+                {
+                    message_ids.push(id);
+                }
+                continue;
+            }
+        };
+        match send_channel_attachment_with_retries(channel, target, channel_attachment).await {
+            Ok(id) => message_ids.push(id),
+            Err(err) => {
+                warn!(
+                    target: "lucarne_telegram::turn",
+                    attachment_id = %attachment.id,
+                    error = %err,
+                    "attachment send failed after bounded retries; sending failure details"
+                );
+                let failure_error = match &err {
+                    ChannelError::Transport(message) => message.to_string(),
+                    _ => err.to_string(),
+                };
+                if let Some(id) = send_attachment_delivery_failure(
+                    channel,
+                    target,
+                    provider_id,
+                    &attachment,
+                    reply_to,
+                    &failure_error,
+                )
+                .await
+                {
+                    message_ids.push(id);
+                }
+            }
+        }
+    }
+    message_ids
+}
+
 fn channel_attachment_from_event(
     attachment: &AgentAttachment,
     reply_to: Option<MessageId>,
@@ -971,7 +1107,7 @@ async fn drain_events(
     channel: &Arc<dyn Channel>,
     target: &WorkspaceHandle,
     live: &LiveSession,
-    provider_id: &str,
+    _provider_id: &str,
     shared: &Shared,
     drafts: &mut DraftStream,
     mode: DrainMode,
@@ -988,7 +1124,7 @@ async fn drain_events(
     // dropped on the next prompt.
     let mut has_message = false;
     let mut command_result_payload = None;
-    let mut attachment_message_ids = Vec::new();
+    let mut pending_attachments = Vec::new();
     let mut awaiting_intervention = false;
     let mut suppress_next_command_message = false;
     loop {
@@ -1065,8 +1201,6 @@ async fn drain_events(
                     bytes_base64 = attachment.data_base64.len(),
                     "attachment received"
                 );
-                let channel_attachment =
-                    channel_attachment_from_event(&attachment, drafts.reply_to.clone())?;
                 let item = record_timeline(
                     &mode,
                     target,
@@ -1079,22 +1213,14 @@ async fn drain_events(
                     attachment.filename, attachment.media_type
                 ));
                 has_message = true;
-                let mut flushed = drafts
-                    .finalize(&**channel, target, provider_id, None)
-                    .await
-                    .message_ids;
-                attachment_message_ids.append(&mut flushed);
-                match channel.send_attachment(target, channel_attachment).await {
-                    Ok(id) => attachment_message_ids.push(id),
-                    Err(err) => {
-                        warn!(error = %err, "attachment send failed");
-                        return Err(err.to_string());
-                    }
-                }
+                pending_attachments.push(PendingAttachmentDelivery {
+                    attachment,
+                    reply_to: drafts.reply_to.clone(),
+                });
                 debug!(
                     target: "lucarne_telegram::turn",
                     timeline_seq = item.seq.get(),
-                    "attachment recorded and sent"
+                    "attachment recorded and queued for post-final delivery"
                 );
             }
             Ok(Ok(Event::CommandResult(result))) => {
@@ -1135,7 +1261,7 @@ async fn drain_events(
                         DrainOutcome::CommandResult,
                         command_result_payload,
                     )
-                    .with_message_ids(attachment_message_ids));
+                    .with_attachments(pending_attachments));
                 }
             }
             Ok(Ok(Event::Message(MessageEvent {
@@ -1290,7 +1416,7 @@ async fn drain_events(
                         DrainOutcome::TurnCompleted
                     };
                 return Ok(DrainReport::new(outcome, command_result_payload)
-                    .with_message_ids(attachment_message_ids));
+                    .with_attachments(pending_attachments));
             }
             Ok(Ok(Event::TurnFailed(tf))) => {
                 warn!(
@@ -1363,7 +1489,7 @@ async fn drain_events(
                         DrainOutcome::CommandProviderIdle,
                         command_result_payload,
                     )
-                    .with_message_ids(attachment_message_ids));
+                    .with_attachments(pending_attachments));
                 }
                 warn!("turn timed out waiting for intervention");
                 return Err("intervention timed out without user response".into());
@@ -1480,6 +1606,8 @@ mod tests {
     struct TestChannel {
         sends: StdMutex<Vec<OutgoingMessage>>,
         attachments: StdMutex<Vec<ChannelAttachment>>,
+        attachment_errors: StdMutex<Vec<String>>,
+        attachment_attempts: StdMutex<usize>,
         edits: StdMutex<Vec<(String, OutgoingMessage)>>,
         deletes: StdMutex<Vec<String>>,
         edit_errors: StdMutex<Vec<String>>,
@@ -1555,6 +1683,10 @@ mod tests {
             _target: &WorkspaceHandle,
             attachment: ChannelAttachment,
         ) -> Result<MessageId> {
+            *self.attachment_attempts.lock().unwrap() += 1;
+            if let Some(error) = self.attachment_errors.lock().unwrap().pop() {
+                return Err(ChannelError::Transport(error));
+            }
             let mut attachments = self.attachments.lock().unwrap();
             attachments.push(attachment);
             Ok(MessageId::new(format!("attachment-{}", attachments.len())))
@@ -1912,7 +2044,7 @@ mod tests {
         let mut drafts = DraftStream::new();
         let recorder = Arc::new(NormalizingTimelineRecorder::default());
 
-        let report = drain_events(
+        let mut report = drain_events(
             &channel,
             &target,
             &live,
@@ -1930,7 +2062,16 @@ mod tests {
         .await
         .expect("turn should drain");
 
-        assert_eq!(report.message_ids, vec![MessageId::new("attachment-1")]);
+        assert!(report.message_ids.is_empty());
+        assert_eq!(report.attachments.len(), 1);
+        let ids = deliver_pending_attachments(
+            &*channel,
+            &target,
+            "test",
+            std::mem::take(&mut report.attachments),
+        )
+        .await;
+        assert_eq!(ids, vec![MessageId::new("attachment-1")]);
         let attachments = test_channel.attachments.lock().unwrap();
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0].filename, "codex-image-ig_turn.png");
@@ -1941,6 +2082,119 @@ mod tests {
         assert!(recorded
             .iter()
             .any(|(kind, _payload)| *kind == TimelineItemKind::Attachment));
+    }
+
+    #[tokio::test]
+    async fn failed_attachment_reports_english_failure_without_blocking_final_text() {
+        let test_channel = Arc::new(TestChannel::default());
+        test_channel.attachment_errors.lock().unwrap().extend(
+            (0..=lucarne_channel::robust::ATTACHMENT_DELIVERY_MAX_RETRIES)
+                .map(|_| "upload exploded".to_string()),
+        );
+        let channel: Arc<dyn Channel> = test_channel.clone();
+        let target = test_target();
+        let (tx, rx) = test_event_stream(&target.workspace, 8);
+        let png = base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3]);
+        send_test_event(
+            &tx,
+            &target,
+            Event::Attachment(AgentAttachment {
+                id: "ig_failed".into(),
+                filename: "failed.png".into(),
+                media_type: "image/png".into(),
+                data_base64: png,
+                caption: None,
+            }),
+        );
+        send_test_event(
+            &tx,
+            &target,
+            Event::Message(MessageEvent {
+                role: MessageRole::Assistant,
+                text: "final text still arrives".into(),
+                streaming: false,
+            }),
+        );
+        send_test_event(
+            &tx,
+            &target,
+            Event::TurnCompleted(lucarne::agent_runtime::events::TurnCompletedEvent {
+                turn_id: "provider-turn".into(),
+                usage: None,
+            }),
+        );
+        drop(tx);
+        let live = LiveSession {
+            session: Arc::new(SilentSession {
+                id: SessionId("session-attachment-failure".into()),
+                instance_id: InstanceId("instance-attachment-failure".into()),
+            }),
+            events: tokio::sync::Mutex::new(rx),
+            pending_intv: StdMutex::new(std::collections::HashMap::new()),
+        };
+        let shared = Shared::new();
+        let mut drafts = DraftStream::new();
+        let recorder = Arc::new(NormalizingTimelineRecorder::default());
+
+        let mut report = drain_events(
+            &channel,
+            &target,
+            &live,
+            "test",
+            &shared,
+            &mut drafts,
+            DrainMode::Turn(TurnRunOptions {
+                recording: Some(TurnRecording {
+                    turn_id: ControlTurnId::new("turn-attachment-failure"),
+                    recorder,
+                }),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("attachment send failure must not fail turn drain");
+        assert!(report.message_ids.is_empty());
+        assert_eq!(*test_channel.attachment_attempts.lock().unwrap(), 0);
+
+        let _ = drafts.finalize(&*channel, &target, "test", None).await;
+        let edited = test_channel.edits.lock().unwrap();
+        let bodies = test_channel
+            .sends
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|msg| msg.body.clone())
+            .chain(edited.iter().map(|(_, msg)| msg.body.clone()))
+            .collect::<Vec<_>>();
+        assert!(
+            bodies
+                .iter()
+                .any(|body| body.contains("timeline-normalized")),
+            "final assistant text missing from Telegram sends/edits: {bodies:?}"
+        );
+        drop(edited);
+
+        let ids = deliver_pending_attachments(
+            &*channel,
+            &target,
+            "test",
+            std::mem::take(&mut report.attachments),
+        )
+        .await;
+        assert_eq!(ids, vec![MessageId::new("2")]);
+        assert_eq!(
+            *test_channel.attachment_attempts.lock().unwrap(),
+            lucarne_channel::robust::ATTACHMENT_DELIVERY_MAX_RETRIES + 1
+        );
+        let sent = test_channel.sends.lock().unwrap();
+        assert!(sent
+            .iter()
+            .any(|msg| msg.body.contains("Attachment delivery failed.")
+                && msg.body.contains("File: failed.png")
+                && msg.body.contains("Media type: image/png")
+                && msg.body.contains("Attachment id: ig_failed")
+                && msg.body.contains("Error: upload exploded")));
+        assert!(test_channel.attachments.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

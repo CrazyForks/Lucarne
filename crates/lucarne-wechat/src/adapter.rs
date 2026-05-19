@@ -5,6 +5,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use base64::Engine as _;
 use futures::{stream::BoxStream, StreamExt};
 use lucarne::{default_lucarned_home_dir, LucarneCore};
 use lucarne_adapter::{
@@ -14,8 +15,8 @@ use qrcode::{types::Color, EcLevel, QrCode};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 use wechat_ilink::{
-    Credentials, LoginQrEvent, SendReceipt, WechatContext, WechatEvent, WechatIlinkClient,
-    WechatIlinkClientBuilder, WechatIlinkError,
+    Credentials, LoginQrEvent, SendContent, SendReceipt, WechatContext, WechatEvent,
+    WechatIlinkClient, WechatIlinkClientBuilder, WechatIlinkError,
 };
 
 use crate::context_store::WechatContextStore;
@@ -23,6 +24,8 @@ use crate::service::{
     WechatError, WechatIncoming, WechatNotificationService, WechatSendReceipt,
     WechatServiceOptions, WechatTransport, WechatUserInteractionRequest,
 };
+
+pub(crate) const WECHAT_RATE_LIMIT_MAX_RETRIES: usize = 3;
 
 /// Adapter-owned context expiry reminder configuration.
 #[derive(Debug, Clone)]
@@ -396,7 +399,9 @@ fn configure_wechat_client_builder(
     mut builder: WechatIlinkClientBuilder,
     config: &WechatConfig,
 ) -> WechatIlinkClientBuilder {
-    builder = builder.markdown_filter(config.markdown_filter);
+    builder = builder
+        .markdown_filter(config.markdown_filter)
+        .rate_limit_max_retries(WECHAT_RATE_LIMIT_MAX_RETRIES);
     if let Some(base_url) = config.base_url.clone() {
         builder = builder.base_url(base_url);
     }
@@ -681,9 +686,72 @@ impl WechatTransport for WechatIlinkTransport {
             .map_err(map_ilink_error)
     }
 
+    async fn send_attachment(
+        &self,
+        context: &WechatContext,
+        attachment: &lucarne::agent_runtime::Attachment,
+    ) -> Result<WechatSendReceipt, WechatError> {
+        let content = attachment_send_content(attachment)?;
+        self.bot
+            .send_media_with_context(context, content)
+            .await
+            .map(send_receipt)
+            .map_err(map_ilink_error)
+    }
+
+    async fn reply_attachment(
+        &self,
+        message: &WechatIncoming,
+        attachment: &lucarne::agent_runtime::Attachment,
+    ) -> Result<WechatSendReceipt, WechatError> {
+        let Some(raw) = message.sdk_message.as_ref() else {
+            return Err(WechatError::MissingMessageContext(
+                message.message_id.clone(),
+            ));
+        };
+        let content = attachment_send_content(attachment)?;
+        self.bot
+            .reply_media(raw, content)
+            .await
+            .map(send_receipt)
+            .map_err(map_ilink_error)
+    }
+
     async fn stop(&self) -> Result<(), WechatError> {
         self.bot.stop().await;
         Ok(())
+    }
+}
+
+fn attachment_send_content(
+    attachment: &lucarne::agent_runtime::Attachment,
+) -> Result<SendContent, WechatError> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(attachment.data_base64.as_bytes())
+        .map_err(|err| {
+            WechatError::Transport(format!(
+                "attachment {} invalid base64: {err}",
+                attachment.id
+            ))
+        })?;
+    let caption = attachment.caption.as_ref().map(ToString::to_string);
+    let media_type = attachment.media_type.trim().to_ascii_lowercase();
+    if media_type.starts_with("image/") {
+        Ok(SendContent::Image {
+            data: bytes,
+            caption,
+        })
+    } else if media_type.starts_with("video/") {
+        Ok(SendContent::Video {
+            data: bytes,
+            caption,
+        })
+    } else {
+        Ok(SendContent::File {
+            data: bytes,
+            file_name: attachment.filename.to_string(),
+            caption,
+        })
     }
 }
 
@@ -800,6 +868,44 @@ mod tests {
         ] {
             let needle = format!("lucarne::memory_profile_snapshot!(\"{label}\")");
             assert!(source.contains(&needle), "missing snapshot {label}");
+        }
+    }
+
+    #[test]
+    fn attachment_send_content_uses_native_media_variants() {
+        let image = lucarne::agent_runtime::Attachment {
+            id: "img".into(),
+            filename: "img.png".into(),
+            media_type: "image/png".into(),
+            data_base64: "AQID".into(),
+            caption: Some("caption".into()),
+        };
+        match attachment_send_content(&image).expect("image content") {
+            SendContent::Image { data, caption } => {
+                assert_eq!(data, vec![1, 2, 3]);
+                assert_eq!(caption.as_deref(), Some("caption"));
+            }
+            _ => panic!("expected image content"),
+        }
+
+        let video = lucarne::agent_runtime::Attachment {
+            media_type: "video/mp4".into(),
+            filename: "movie.mp4".into(),
+            ..image.clone()
+        };
+        assert!(matches!(
+            attachment_send_content(&video).expect("video content"),
+            SendContent::Video { .. }
+        ));
+
+        let file = lucarne::agent_runtime::Attachment {
+            media_type: "application/pdf".into(),
+            filename: "report.pdf".into(),
+            ..image
+        };
+        match attachment_send_content(&file).expect("file content") {
+            SendContent::File { file_name, .. } => assert_eq!(file_name, "report.pdf"),
+            _ => panic!("expected file content"),
         }
     }
 

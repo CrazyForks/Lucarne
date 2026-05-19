@@ -12,9 +12,9 @@ use lucarne_channel::{
     markdown::render_telegram_markdown_v2,
     splitter::split_for_channel,
     types::{
-        ChannelError, ChannelEvent, ChatId, CommandQuery, CommandQueryResult, FileUpload,
-        IncomingAttachment, IncomingMessage, MessageId, OutgoingButton, OutgoingMessage, Result,
-        WorkspaceHandle, WorkspaceId,
+        Attachment, ChannelError, ChannelEvent, ChatId, CommandQuery, CommandQueryResult,
+        FileUpload, IncomingAttachment, IncomingMessage, MessageId, OutgoingButton,
+        OutgoingMessage, Result, WorkspaceHandle, WorkspaceId,
     },
     Channel, TextFormat,
 };
@@ -27,7 +27,8 @@ use teloxide::{
     net::Download,
     payloads::{
         AnswerInlineQuerySetters, EditForumTopicSetters, EditMessageTextSetters, GetUpdatesSetters,
-        SendChatActionSetters, SendDocumentSetters, SendMessageSetters,
+        SendChatActionSetters, SendDocumentSetters, SendMessageSetters, SendPhotoSetters,
+        SendVideoSetters,
     },
     prelude::Requester,
     types::{
@@ -44,6 +45,24 @@ use tracing::{debug, info, instrument, trace, warn};
 const EVENT_QUEUE: usize = 128;
 const TELEGRAM_MESSAGE_LIMIT: usize = 4000;
 const GET_UPDATES_TIMEOUT_SECS: u32 = 10;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TelegramAttachmentKind {
+    Photo,
+    Video,
+    Document,
+}
+
+fn telegram_attachment_kind(media_type: &str) -> TelegramAttachmentKind {
+    let media_type = media_type.trim().to_ascii_lowercase();
+    if media_type.starts_with("image/") {
+        TelegramAttachmentKind::Photo
+    } else if media_type.starts_with("video/") {
+        TelegramAttachmentKind::Video
+    } else {
+        TelegramAttachmentKind::Document
+    }
+}
 
 /// Configuration for [`TelegramChannel`].
 #[derive(Debug, Clone)]
@@ -479,6 +498,93 @@ impl Channel for TelegramChannel {
         Ok(MessageId::new(m.id.0.to_string()))
     }
 
+    async fn send_attachment(
+        &self,
+        target: &WorkspaceHandle,
+        attachment: Attachment,
+    ) -> Result<MessageId> {
+        let chat = parse_tg_chat_id(&target.chat)?;
+        let thread = parse_tg_thread(&target.workspace);
+        let kind = telegram_attachment_kind(&attachment.media_type);
+        info!(
+            target: "lucarne_telegram",
+            chat = chat.0,
+            thread = ?thread.map(|t| t.0.0),
+            filename = %attachment.filename,
+            media_type = %attachment.media_type,
+            bytes = attachment.bytes.len(),
+            kind = ?kind,
+            "uploading attachment"
+        );
+        let Attachment {
+            filename,
+            media_type: _,
+            bytes,
+            caption,
+            reply_to,
+        } = attachment;
+        let input = InputFile::memory(bytes).file_name(filename);
+        let reply_parameters = reply_to
+            .as_ref()
+            .map(parse_tg_message_id)
+            .transpose()?
+            .map(|id| ReplyParameters::new(id).allow_sending_without_reply());
+        let message = match kind {
+            TelegramAttachmentKind::Photo => {
+                let mut req = self.bot.send_photo(chat, input);
+                if let Some(t) = thread {
+                    req = req.message_thread_id(t);
+                }
+                if let Some(cap) = caption {
+                    req = req.caption(cap);
+                }
+                if let Some(reply) = reply_parameters {
+                    req = req.reply_parameters(reply);
+                }
+                req.await.map_err(|e| {
+                    let m = map_err(e);
+                    warn!(target: "lucarne_telegram", error = %m, "send_photo failed");
+                    m
+                })?
+            }
+            TelegramAttachmentKind::Video => {
+                let mut req = self.bot.send_video(chat, input);
+                if let Some(t) = thread {
+                    req = req.message_thread_id(t);
+                }
+                if let Some(cap) = caption {
+                    req = req.caption(cap);
+                }
+                if let Some(reply) = reply_parameters {
+                    req = req.reply_parameters(reply);
+                }
+                req.await.map_err(|e| {
+                    let m = map_err(e);
+                    warn!(target: "lucarne_telegram", error = %m, "send_video failed");
+                    m
+                })?
+            }
+            TelegramAttachmentKind::Document => {
+                let mut req = self.bot.send_document(chat, input);
+                if let Some(t) = thread {
+                    req = req.message_thread_id(t);
+                }
+                if let Some(cap) = caption {
+                    req = req.caption(cap);
+                }
+                if let Some(reply) = reply_parameters {
+                    req = req.reply_parameters(reply);
+                }
+                req.await.map_err(|e| {
+                    let m = map_err(e);
+                    warn!(target: "lucarne_telegram", error = %m, "send_document failed");
+                    m
+                })?
+            }
+        };
+        Ok(MessageId::new(message.id.0.to_string()))
+    }
+
     async fn answer_command_query(
         &self,
         query: &CommandQuery,
@@ -685,6 +791,26 @@ mod tests {
             entry_chat_id: 100,
             authorized_user_ids: Vec::new(),
         }
+    }
+
+    #[test]
+    fn telegram_attachment_kind_uses_native_media_for_images_and_videos() {
+        assert_eq!(
+            telegram_attachment_kind("image/png"),
+            TelegramAttachmentKind::Photo
+        );
+        assert_eq!(
+            telegram_attachment_kind(" IMAGE/JPEG "),
+            TelegramAttachmentKind::Photo
+        );
+        assert_eq!(
+            telegram_attachment_kind("video/mp4"),
+            TelegramAttachmentKind::Video
+        );
+        assert_eq!(
+            telegram_attachment_kind("application/pdf"),
+            TelegramAttachmentKind::Document
+        );
     }
 
     #[test]

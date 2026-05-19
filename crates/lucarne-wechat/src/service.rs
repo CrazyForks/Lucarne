@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use futures::{stream::BoxStream, StreamExt};
 use lucarne::{
     agent_runtime::{
-        AgentContextUsage, AgentInput, AgentTokenUsage, Event as AgentEvent, InterventionRequest,
-        MessageRole,
+        AgentContextUsage, AgentInput, AgentTokenUsage, Attachment as AgentAttachment,
+        Event as AgentEvent, InterventionRequest, MessageRole,
     },
     control_plane::{
         MessageSessionBinding, ProviderSessionId, StatusSnapshot, TurnId, WorkspaceBinding,
@@ -28,8 +28,11 @@ use lucarne::{
     },
 };
 use lucarne_adapter::{GlobalConfigPersistence, GlobalConfigUpdate};
-use lucarne_channel::agent_message::{
-    compact_path, format_cost_duration, render_agent_message_markdown, AgentMessageFooter,
+use lucarne_channel::{
+    agent_message::{
+        compact_path, format_cost_duration, render_agent_message_markdown, AgentMessageFooter,
+    },
+    robust::retry_attachment_delivery,
 };
 use tokio::{sync::oneshot, time::MissedTickBehavior};
 use tracing::{debug, warn};
@@ -146,6 +149,24 @@ pub trait WechatTransport: Send + Sync {
         text: &str,
     ) -> Result<WechatSendReceipt, WechatError>;
     async fn send_typing(&self, context: &WechatContext) -> Result<(), WechatError>;
+    async fn send_attachment(
+        &self,
+        _context: &WechatContext,
+        _attachment: &AgentAttachment,
+    ) -> Result<WechatSendReceipt, WechatError> {
+        Err(WechatError::Transport(
+            "wechat attachment send unsupported".into(),
+        ))
+    }
+    async fn reply_attachment(
+        &self,
+        _message: &WechatIncoming,
+        _attachment: &AgentAttachment,
+    ) -> Result<WechatSendReceipt, WechatError> {
+        Err(WechatError::Transport(
+            "wechat attachment reply unsupported".into(),
+        ))
+    }
     async fn stop(&self) -> Result<(), WechatError>;
 }
 
@@ -235,8 +256,14 @@ impl WechatRateLimiter {
 struct WechatPendingNotification {
     workspace_id: WorkspaceId,
     user_id: String,
-    body: SmolStr,
+    content: WechatPendingNotificationContent,
     provider_session_id: ProviderSessionId,
+}
+
+#[derive(Clone)]
+enum WechatPendingNotificationContent {
+    Text(SmolStr),
+    Attachment(AgentAttachment),
 }
 
 #[derive(Clone)]
@@ -245,6 +272,7 @@ struct WechatPendingReply {
     message: WechatIncoming,
     started_at: Instant,
     latest_assistant_text: Option<SmolStr>,
+    pending_attachments: Vec<AgentAttachment>,
     terminal: Option<PendingReplyTerminal>,
 }
 
@@ -391,6 +419,14 @@ where
             CoreEvent::TimelineEvent {
                 workspace_id,
                 turn_id: Some(turn_id),
+                event: AgentEvent::Attachment(attachment),
+            } if self.pending_reply(&turn_id).is_some() => {
+                self.deliver_pending_reply_attachment(&workspace_id, &turn_id, attachment)
+                    .await
+            }
+            CoreEvent::TimelineEvent {
+                workspace_id,
+                turn_id: Some(turn_id),
                 event: AgentEvent::TurnCompleted(_),
             } => {
                 let Some(reply_target) = self.mark_pending_reply_completed(&turn_id) else {
@@ -426,6 +462,14 @@ where
                 ..
             } => {
                 self.deliver_assistant_message(&workspace_id, text.as_ref())
+                    .await
+            }
+            CoreEvent::TimelineEvent {
+                workspace_id,
+                event: AgentEvent::Attachment(attachment),
+                ..
+            } => {
+                self.deliver_attachment_notification(&workspace_id, attachment)
                     .await
             }
             _ => Ok(()),
@@ -534,6 +578,64 @@ where
                     workspace_id.clone(),
                     user_id,
                     body.clone().into(),
+                    provider_session_id.clone(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    async fn deliver_attachment_notification(
+        &self,
+        workspace_id: &WorkspaceId,
+        attachment: AgentAttachment,
+    ) -> Result<(), WechatError> {
+        let Some(workspace) = self.core.workspace_binding(workspace_id) else {
+            warn!(
+                target: "lucarne_wechat::service",
+                workspace_id = %workspace_id.as_str(),
+                "watched attachment has no workspace binding"
+            );
+            return Ok(());
+        };
+        let provider_session_id = self
+            .core
+            .active_provider_session_id(workspace_id)
+            .map_err(|err| WechatError::Core(err.to_string()))?;
+        if self.core.direct_notification_suppressed(workspace_id) {
+            debug!(
+                target: "lucarne_wechat::service",
+                workspace_id = %workspace_id.as_str(),
+                "wechat attachment notification suppressed by direct conversation"
+            );
+            return Ok(());
+        }
+        if !self.notifications_enabled(&workspace, &provider_session_id) {
+            return Ok(());
+        }
+        let users = self.notification_users();
+        if users.is_empty() {
+            warn!(
+                target: "lucarne_wechat::service",
+                workspace_id = %workspace_id.as_str(),
+                "wechat attachment notification skipped because no notification users are configured or remembered"
+            );
+            return Ok(());
+        }
+        for user_id in users {
+            if !self
+                .try_send_attachment_notification(
+                    workspace_id,
+                    &user_id,
+                    &attachment,
+                    provider_session_id.clone(),
+                )
+                .await?
+            {
+                self.remember_pending_attachment_notification(
+                    workspace_id.clone(),
+                    user_id,
+                    attachment.clone(),
                     provider_session_id.clone(),
                 );
             }
@@ -784,6 +886,198 @@ where
         Ok(true)
     }
 
+    async fn try_send_attachment_notification(
+        &self,
+        workspace_id: &WorkspaceId,
+        user_id: &str,
+        attachment: &AgentAttachment,
+        provider_session_id: ProviderSessionId,
+    ) -> Result<bool, WechatError> {
+        let Some(context) = self.transport.context_for_user(user_id).await? else {
+            warn!(
+                target: "lucarne_wechat::service",
+                workspace_id = %workspace_id.as_str(),
+                user_id = %user_id,
+                attachment_id = %attachment.id,
+                "wechat attachment notification skipped: no stored context for user"
+            );
+            return Ok(true);
+        };
+        let receipt = match self
+            .send_notification_attachment_with_retries(&context, attachment)
+            .await
+        {
+            Ok(receipt) => receipt,
+            Err(WechatError::Transport(err)) => {
+                warn!(
+                    target: "lucarne_wechat::service",
+                    workspace_id = %workspace_id.as_str(),
+                    user_id = %user_id,
+                    attachment_id = %attachment.id,
+                    error = %err,
+                    "wechat attachment notification failed; sending failure details"
+                );
+                self.send_attachment_notification_failure(
+                    workspace_id,
+                    user_id,
+                    &context,
+                    attachment,
+                    provider_session_id.clone(),
+                    &err,
+                )
+                .await?;
+                return Ok(true);
+            }
+            Err(WechatError::RateLimited {
+                retry_after,
+                message,
+            }) => {
+                warn!(
+                    target: "lucarne_wechat::service",
+                    workspace_id = %workspace_id.as_str(),
+                    user_id = %user_id,
+                    attachment_id = %attachment.id,
+                    retry_after_secs = retry_after.as_secs(),
+                    error = %message,
+                    "wechat attachment notification rate limited; sending failure details without retaining media retry"
+                );
+                self.send_attachment_notification_failure(
+                    workspace_id,
+                    user_id,
+                    &context,
+                    attachment,
+                    provider_session_id.clone(),
+                    &message,
+                )
+                .await?;
+                return Ok(true);
+            }
+            Err(err) => return Err(err),
+        };
+        let message_ids = receipt.message_ids.clone();
+        let binding_text = attachment_binding_text(attachment);
+        self.bind_receipt(user_id, receipt, &binding_text, provider_session_id.clone())?;
+        debug!(
+            target: "lucarne_wechat::service",
+            workspace_id = %workspace_id.as_str(),
+            user_id = %user_id,
+            provider_session_id = %provider_session_id.as_str(),
+            attachment_id = %attachment.id,
+            message_ids = ?message_ids,
+            "wechat attachment notification sent"
+        );
+        Ok(true)
+    }
+
+    async fn send_notification_attachment_with_retries(
+        &self,
+        context: &WechatContext,
+        attachment: &AgentAttachment,
+    ) -> Result<WechatSendReceipt, WechatError> {
+        retry_attachment_delivery(
+            || self.transport.send_attachment(context, attachment),
+            is_retryable_wechat_attachment_error,
+        )
+        .await
+    }
+
+    async fn reply_attachment_with_retries(
+        &self,
+        message: &WechatIncoming,
+        attachment: &AgentAttachment,
+    ) -> Result<WechatSendReceipt, WechatError> {
+        retry_attachment_delivery(
+            || self.transport.reply_attachment(message, attachment),
+            is_retryable_wechat_attachment_error,
+        )
+        .await
+    }
+
+    async fn send_attachment_notification_failure(
+        &self,
+        workspace_id: &WorkspaceId,
+        user_id: &str,
+        context: &WechatContext,
+        attachment: &AgentAttachment,
+        provider_session_id: ProviderSessionId,
+        error: &str,
+    ) -> Result<(), WechatError> {
+        let body = render_attachment_delivery_failure(attachment, error);
+        match self.transport.send(context, &body).await {
+            Ok(receipt) => {
+                self.bind_receipt(user_id, receipt, &body, provider_session_id)?;
+            }
+            Err(err) => {
+                warn!(
+                    target: "lucarne_wechat::service",
+                    workspace_id = %workspace_id.as_str(),
+                    user_id = %user_id,
+                    attachment_id = %attachment.id,
+                    error = %err,
+                    "wechat attachment failure details send failed"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    async fn deliver_pending_reply_attachment(
+        &self,
+        workspace_id: &WorkspaceId,
+        turn_id: &TurnId,
+        attachment: AgentAttachment,
+    ) -> Result<(), WechatError> {
+        if self.pending_reply(turn_id).is_none() {
+            return Ok(());
+        }
+        debug!(
+            target: "lucarne_wechat::service",
+            workspace_id = %workspace_id.as_str(),
+            turn_id = %turn_id.as_str(),
+            attachment_id = %attachment.id,
+            "wechat pending reply attachment queued until terminal reply"
+        );
+        self.remember_pending_reply_attachment(turn_id, attachment);
+        Ok(())
+    }
+
+    async fn send_pending_reply_attachment_failure(
+        &self,
+        reply_target: &WechatPendingReply,
+        attachment: &AgentAttachment,
+        error: &str,
+    ) -> Result<(), WechatError> {
+        let body = render_attachment_delivery_failure(attachment, error);
+        match self.transport.reply(&reply_target.message, &body).await {
+            Ok(_) => {}
+            Err(WechatError::RateLimited {
+                retry_after,
+                message,
+            }) => {
+                warn!(
+                    target: "lucarne_wechat::service",
+                    workspace_id = %reply_target.workspace_id.as_str(),
+                    user_id = %reply_target.message.user_id,
+                    attachment_id = %attachment.id,
+                    retry_after_secs = retry_after.as_secs(),
+                    error = %message,
+                    "wechat attachment failure details rate limited"
+                );
+            }
+            Err(err) => {
+                warn!(
+                    target: "lucarne_wechat::service",
+                    workspace_id = %reply_target.workspace_id.as_str(),
+                    user_id = %reply_target.message.user_id,
+                    attachment_id = %attachment.id,
+                    error = %err,
+                    "wechat attachment failure details send failed"
+                );
+            }
+        }
+        Ok(())
+    }
+
     async fn deliver_pending_reply(
         &self,
         workspace_id: &WorkspaceId,
@@ -808,6 +1102,17 @@ where
             PendingReplyTerminal::Failed(text) => (text.to_string(), None),
             PendingReplyTerminal::Completed => {
                 let Some(text) = reply_target.latest_assistant_text.as_deref() else {
+                    if !reply_target.pending_attachments.is_empty() {
+                        self.deliver_pending_reply_attachments_best_effort(
+                            workspace_id,
+                            turn_id,
+                            &reply_target,
+                        )
+                        .await?;
+                        self.take_pending_reply(turn_id);
+                        self.core.end_direct_notification_suppression(workspace_id);
+                        return Ok(());
+                    }
                     warn!(
                         target: "lucarne_wechat::service",
                         workspace_id = %workspace_id.as_str(),
@@ -898,8 +1203,79 @@ where
             bytes = body.len(),
             "wechat reply sent"
         );
+        self.deliver_pending_reply_attachments_best_effort(workspace_id, turn_id, &reply_target)
+            .await?;
         self.take_pending_reply(turn_id);
         self.core.end_direct_notification_suppression(workspace_id);
+        Ok(())
+    }
+
+    async fn deliver_pending_reply_attachments_best_effort(
+        &self,
+        workspace_id: &WorkspaceId,
+        turn_id: &TurnId,
+        reply_target: &WechatPendingReply,
+    ) -> Result<(), WechatError> {
+        for attachment in reply_target.pending_attachments.clone() {
+            match self
+                .reply_attachment_with_retries(&reply_target.message, &attachment)
+                .await
+            {
+                Ok(receipt) => {
+                    if let Ok(provider_session_id) =
+                        self.core.active_provider_session_id(workspace_id)
+                    {
+                        let binding_text = attachment_binding_text(&attachment);
+                        self.bind_receipt(
+                            &reply_target.message.user_id,
+                            receipt,
+                            &binding_text,
+                            provider_session_id,
+                        )?;
+                    }
+                    debug!(
+                        target: "lucarne_wechat::service",
+                        workspace_id = %workspace_id.as_str(),
+                        turn_id = %turn_id.as_str(),
+                        user_id = %reply_target.message.user_id,
+                        attachment_id = %attachment.id,
+                        "wechat pending reply attachment sent after terminal reply"
+                    );
+                }
+                Err(WechatError::Transport(err)) => {
+                    warn!(
+                        target: "lucarne_wechat::service",
+                        workspace_id = %workspace_id.as_str(),
+                        turn_id = %turn_id.as_str(),
+                        user_id = %reply_target.message.user_id,
+                        attachment_id = %attachment.id,
+                        error = %err,
+                        "wechat pending reply attachment failed after bounded retries; sending failure details"
+                    );
+                    self.send_pending_reply_attachment_failure(reply_target, &attachment, &err)
+                        .await?;
+                }
+                Err(WechatError::RateLimited {
+                    retry_after,
+                    message,
+                }) => {
+                    warn!(
+                        target: "lucarne_wechat::service",
+                        workspace_id = %workspace_id.as_str(),
+                        turn_id = %turn_id.as_str(),
+                        user_id = %reply_target.message.user_id,
+                        attachment_id = %attachment.id,
+                        retry_after_secs = retry_after.as_secs(),
+                        error = %message,
+                        "wechat pending reply attachment rate limited after bounded retries; sending failure details"
+                    );
+                    self.send_pending_reply_attachment_failure(reply_target, &attachment, &message)
+                        .await?;
+                }
+                Err(err) => return Err(err),
+            }
+            self.remove_pending_reply_attachment(turn_id, attachment.id.as_str());
+        }
         Ok(())
     }
 
@@ -920,21 +1296,43 @@ where
             return Ok(());
         }
         for notification in self.take_pending_notifications() {
-            if !self
-                .try_send_notification(
-                    &notification.workspace_id,
-                    &notification.user_id,
-                    &notification.body,
-                    notification.provider_session_id.clone(),
-                )
-                .await?
-            {
-                self.remember_pending_notification(
-                    notification.workspace_id,
-                    notification.user_id,
-                    notification.body,
-                    notification.provider_session_id,
-                );
+            match notification.content {
+                WechatPendingNotificationContent::Text(body) => {
+                    if !self
+                        .try_send_notification(
+                            &notification.workspace_id,
+                            &notification.user_id,
+                            &body,
+                            notification.provider_session_id.clone(),
+                        )
+                        .await?
+                    {
+                        self.remember_pending_notification(
+                            notification.workspace_id,
+                            notification.user_id,
+                            body,
+                            notification.provider_session_id,
+                        );
+                    }
+                }
+                WechatPendingNotificationContent::Attachment(attachment) => {
+                    if !self
+                        .try_send_attachment_notification(
+                            &notification.workspace_id,
+                            &notification.user_id,
+                            &attachment,
+                            notification.provider_session_id.clone(),
+                        )
+                        .await?
+                    {
+                        self.remember_pending_attachment_notification(
+                            notification.workspace_id,
+                            notification.user_id,
+                            attachment,
+                            notification.provider_session_id,
+                        );
+                    }
+                }
             }
         }
         Ok(())
@@ -1459,6 +1857,7 @@ where
                     message,
                     started_at: Instant::now(),
                     latest_assistant_text: None,
+                    pending_attachments: Vec::new(),
                     terminal: None,
                 },
             );
@@ -1597,7 +1996,7 @@ where
                 .push_back(WechatPendingNotification {
                     workspace_id,
                     user_id,
-                    body,
+                    content: WechatPendingNotificationContent::Text(body),
                     provider_session_id,
                 });
             dropped_oldest
@@ -1608,6 +2007,67 @@ where
                 max_pending = MAX_PENDING_NOTIFICATIONS,
                 "wechat pending notification queue full; dropped oldest notification"
             );
+        }
+    }
+
+    fn remember_pending_attachment_notification(
+        &self,
+        workspace_id: WorkspaceId,
+        user_id: String,
+        attachment: AgentAttachment,
+        provider_session_id: ProviderSessionId,
+    ) {
+        let dropped_oldest = {
+            let mut state = self.state.lock().expect("wechat service state lock");
+            let dropped_oldest = state.pending_notifications.len() >= MAX_PENDING_NOTIFICATIONS;
+            if dropped_oldest {
+                state.pending_notifications.pop_front();
+            }
+            state
+                .pending_notifications
+                .push_back(WechatPendingNotification {
+                    workspace_id,
+                    user_id,
+                    content: WechatPendingNotificationContent::Attachment(attachment),
+                    provider_session_id,
+                });
+            dropped_oldest
+        };
+        if dropped_oldest {
+            warn!(
+                target: "lucarne_wechat::service",
+                max_pending = MAX_PENDING_NOTIFICATIONS,
+                "wechat pending notification queue full; dropped oldest notification"
+            );
+        }
+    }
+
+    fn remember_pending_reply_attachment(&self, turn_id: &TurnId, attachment: AgentAttachment) {
+        let mut state = self.state.lock().expect("wechat service state lock");
+        let Some(pending) = state.pending_replies.get_mut(turn_id) else {
+            return;
+        };
+        if pending
+            .pending_attachments
+            .iter()
+            .any(|existing| existing.id == attachment.id)
+        {
+            return;
+        }
+        pending.pending_attachments.push(attachment);
+    }
+
+    fn remove_pending_reply_attachment(&self, turn_id: &TurnId, attachment_id: &str) {
+        if let Some(pending) = self
+            .state
+            .lock()
+            .expect("wechat service state lock")
+            .pending_replies
+            .get_mut(turn_id)
+        {
+            pending
+                .pending_attachments
+                .retain(|attachment| attachment.id.as_str() != attachment_id);
         }
     }
 
@@ -1774,6 +2234,34 @@ where
             let _ = cancel.send(());
         }
     }
+}
+
+fn is_retryable_wechat_attachment_error(err: &WechatError) -> bool {
+    !matches!(
+        err,
+        WechatError::RateLimited { .. } | WechatError::MissingMessageContext(_)
+    )
+}
+
+fn attachment_binding_text(attachment: &AgentAttachment) -> String {
+    attachment
+        .caption
+        .as_ref()
+        .map(|caption| caption.to_string())
+        .unwrap_or_else(|| format!("[attachment: {}]", attachment.filename))
+}
+
+fn render_attachment_delivery_failure(attachment: &AgentAttachment, error: &str) -> String {
+    let error = error.trim();
+    let error = if error.is_empty() {
+        "Unknown attachment delivery error"
+    } else {
+        error
+    };
+    format!(
+        "Attachment delivery failed.\n\nFile: {}\nMedia type: {}\nAttachment id: {}\nError: {}",
+        attachment.filename, attachment.media_type, attachment.id, error
+    )
 }
 
 fn render_agent_message(
@@ -2095,8 +2583,8 @@ fn render_wechat_help() -> &'static str {
 /config global bypass on|off — toggle global permission bypass\n\
 /config global notifications on|off — toggle global notifications\n\
 /status — show global status, or quoted workspace status\n\
-/kill all|<session_id:pid> — kill agent processes\n\n\
-Reply to an agent notification to continue that session."
+/kill all|<session_id:pid> — kill agent processes\n\
+Reply to an agent notification to continue that session.\n"
 }
 
 #[cfg(test)]
@@ -3878,6 +4366,380 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
     }
 
     #[tokio::test]
+    async fn attachment_notification_uses_transport_attachment_send() {
+        let provider = Arc::new(FakeProvider::default());
+        let core = test_core(Arc::clone(&provider));
+        let opened = core
+            .open_workspace_with_events(OpenWorkspaceRequest {
+                provider_id: "codex",
+                project_path: Some("/tmp/workspace-attachment-notify".into()),
+                title: "workspace-attachment-notify".into(),
+            })
+            .await
+            .expect("open workspace");
+        let workspace_id = opened.workspace.workspace_id.clone();
+        let transport = Arc::new(FakeTransport::default());
+        let service = WechatNotificationService::new(
+            core,
+            Arc::clone(&transport),
+            WechatServiceOptions {
+                initial_user_ids: vec!["user-1".into()],
+                ..WechatServiceOptions::default()
+            },
+        );
+
+        service
+            .handle_core_event(CoreEvent::TimelineEvent {
+                workspace_id,
+                turn_id: None,
+                event: AgentEvent::Attachment(AgentAttachment {
+                    id: "ig-wechat".into(),
+                    filename: "codex-image-ig-wechat.png".into(),
+                    media_type: "image/png".into(),
+                    data_base64: "AQID".into(),
+                    caption: Some("caption".into()),
+                }),
+            })
+            .await
+            .expect("attachment notification");
+
+        let attachments = transport.attachments();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].user_id, "user-1");
+        assert_eq!(attachments[0].message_id, "wechat-out-1");
+        assert_eq!(attachments[0].id.as_str(), "ig-wechat");
+        assert_eq!(
+            attachments[0].filename.as_str(),
+            "codex-image-ig-wechat.png"
+        );
+        assert_eq!(attachments[0].media_type.as_str(), "image/png");
+        assert_eq!(attachments[0].caption.as_deref(), Some("caption"));
+        assert_eq!(attachments[0].reply_to_message_id, None);
+    }
+
+    #[tokio::test]
+    async fn failed_attachment_notification_sends_english_failure_message_after_bounded_retries() {
+        let provider = Arc::new(FakeProvider::default());
+        let core = test_core(Arc::clone(&provider));
+        let opened = core
+            .open_workspace_with_events(OpenWorkspaceRequest {
+                provider_id: "codex",
+                project_path: Some("/tmp/workspace-attachment-notify-failure".into()),
+                title: "workspace-attachment-notify-failure".into(),
+            })
+            .await
+            .expect("open workspace");
+        let workspace_id = opened.workspace.workspace_id.clone();
+        let transport = Arc::new(FakeTransport::default());
+        transport.fail_attachment_sends("media upload failed: 413 payload too large");
+        let service = WechatNotificationService::new(
+            core,
+            Arc::clone(&transport),
+            WechatServiceOptions {
+                initial_user_ids: vec!["user-1".into()],
+                ..WechatServiceOptions::default()
+            },
+        );
+
+        service
+            .handle_core_event(CoreEvent::TimelineEvent {
+                workspace_id,
+                turn_id: None,
+                event: AgentEvent::Attachment(AgentAttachment {
+                    id: "ig-failed".into(),
+                    filename: "too-large.png".into(),
+                    media_type: "image/png".into(),
+                    data_base64: "AQID".into(),
+                    caption: Some("caption".into()),
+                }),
+            })
+            .await
+            .expect("attachment failure should not escape core event handler");
+
+        assert!(transport.attachments().is_empty());
+        let sends = transport.sends();
+        assert_eq!(sends.len(), 1);
+        assert!(sends[0].text.contains("Attachment delivery failed."));
+        assert!(sends[0].text.contains("File: too-large.png"));
+        assert!(sends[0]
+            .text
+            .contains("Error: media upload failed: 413 payload too large"));
+        assert_eq!(
+            transport.attachment_send_attempt_count(),
+            lucarne_channel::robust::ATTACHMENT_DELIVERY_MAX_RETRIES + 1
+        );
+        assert_eq!(service.pending_notification_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn rate_limited_attachment_notification_sends_english_failure_message_without_infinite_retry(
+    ) {
+        let provider = Arc::new(FakeProvider::default());
+        let core = test_core(Arc::clone(&provider));
+        let opened = core
+            .open_workspace_with_events(OpenWorkspaceRequest {
+                provider_id: "codex",
+                project_path: Some("/tmp/workspace-attachment-notify-rate-limit".into()),
+                title: "workspace-attachment-notify-rate-limit".into(),
+            })
+            .await
+            .expect("open workspace");
+        let workspace_id = opened.workspace.workspace_id.clone();
+        let transport = Arc::new(FakeTransport::default());
+        transport.fail_attachment_sends_rate_limited(Duration::from_secs(30));
+        let service = WechatNotificationService::new(
+            core,
+            Arc::clone(&transport),
+            WechatServiceOptions {
+                initial_user_ids: vec!["user-1".into()],
+                ..WechatServiceOptions::default()
+            },
+        );
+
+        service
+            .handle_core_event(CoreEvent::TimelineEvent {
+                workspace_id,
+                turn_id: None,
+                event: AgentEvent::Attachment(AgentAttachment {
+                    id: "ig-rate-limited".into(),
+                    filename: "rate-limited.png".into(),
+                    media_type: "image/png".into(),
+                    data_base64: "AQID".into(),
+                    caption: Some("caption".into()),
+                }),
+            })
+            .await
+            .expect("attachment rate limit should not escape core event handler");
+
+        assert!(transport.attachments().is_empty());
+        let sends = transport.sends();
+        assert_eq!(sends.len(), 1);
+        assert!(sends[0].text.contains("Attachment delivery failed."));
+        assert!(sends[0].text.contains("File: rate-limited.png"));
+        assert!(sends[0].text.contains("Error: ret=-2"));
+        assert_eq!(service.pending_notification_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn failed_pending_reply_attachment_reports_failure_without_blocking_text_reply() {
+        let provider = Arc::new(FakeProvider::default());
+        let core = test_core(Arc::clone(&provider));
+        let opened = core
+            .open_workspace_with_events(OpenWorkspaceRequest {
+                provider_id: "codex",
+                project_path: Some("/tmp/workspace-attachment-reply-failure".into()),
+                title: "workspace-attachment-reply-failure".into(),
+            })
+            .await
+            .expect("open workspace");
+        let workspace_id = opened.workspace.workspace_id.clone();
+        let transport = Arc::new(FakeTransport::default());
+        transport.fail_attachment_replies("media upload failed: invalid base64");
+        let service = WechatNotificationService::new(
+            Arc::clone(&core),
+            Arc::clone(&transport),
+            WechatServiceOptions::default(),
+        );
+        let turn_id = TurnId::new("turn-attachment-reply-failure");
+        let source = WechatIncoming::new(
+            "incoming-attachment-failure",
+            "user-1",
+            "画图",
+            Option::<String>::None,
+        );
+        service.remember_pending_reply(turn_id.clone(), workspace_id.clone(), source);
+
+        service
+            .handle_core_event(CoreEvent::TimelineEvent {
+                workspace_id: workspace_id.clone(),
+                turn_id: Some(turn_id.clone()),
+                event: AgentEvent::Attachment(AgentAttachment {
+                    id: "ig-reply-failed".into(),
+                    filename: "bad-image.png".into(),
+                    media_type: "image/png".into(),
+                    data_base64: "AQID".into(),
+                    caption: None,
+                }),
+            })
+            .await
+            .expect("attachment should be queued");
+        assert_eq!(transport.attachment_reply_attempt_count(), 0);
+        assert_eq!(
+            service
+                .pending_reply(&turn_id)
+                .expect("pending reply")
+                .pending_attachments
+                .len(),
+            1
+        );
+        service.record_pending_assistant_message(&turn_id, "text still arrives");
+        let reply_target = service
+            .mark_pending_reply_completed(&turn_id)
+            .expect("pending reply");
+        service
+            .deliver_pending_reply(&workspace_id, &turn_id, reply_target)
+            .await
+            .expect("text reply should still be delivered");
+
+        let replies = transport.replies();
+        assert_eq!(replies.len(), 2);
+        assert!(replies[0].text.contains("text still arrives"));
+        assert!(replies[1].text.contains("Attachment delivery failed."));
+        assert!(replies[1].text.contains("File: bad-image.png"));
+        assert!(replies[1]
+            .text
+            .contains("Error: media upload failed: invalid base64"));
+        assert_eq!(
+            transport.attachment_reply_attempt_count(),
+            lucarne_channel::robust::ATTACHMENT_DELIVERY_MAX_RETRIES + 1
+        );
+    }
+
+    #[tokio::test]
+    async fn rate_limited_pending_reply_attachment_reports_failure_without_blocking_text_reply_or_infinite_retry(
+    ) {
+        let provider = Arc::new(FakeProvider::default());
+        let core = test_core(Arc::clone(&provider));
+        let opened = core
+            .open_workspace_with_events(OpenWorkspaceRequest {
+                provider_id: "codex",
+                project_path: Some("/tmp/workspace-attachment-reply-rate-limit".into()),
+                title: "workspace-attachment-reply-rate-limit".into(),
+            })
+            .await
+            .expect("open workspace");
+        let workspace_id = opened.workspace.workspace_id.clone();
+        let transport = Arc::new(FakeTransport::default());
+        transport.fail_attachment_replies_rate_limited(Duration::from_secs(30));
+        let service = WechatNotificationService::new(
+            Arc::clone(&core),
+            Arc::clone(&transport),
+            WechatServiceOptions::default(),
+        );
+        let turn_id = TurnId::new("turn-attachment-reply-rate-limit");
+        let source = WechatIncoming::new(
+            "incoming-attachment-rate-limit",
+            "user-1",
+            "画图",
+            Option::<String>::None,
+        );
+        service.remember_pending_reply(turn_id.clone(), workspace_id.clone(), source);
+
+        service
+            .handle_core_event(CoreEvent::TimelineEvent {
+                workspace_id: workspace_id.clone(),
+                turn_id: Some(turn_id.clone()),
+                event: AgentEvent::Attachment(AgentAttachment {
+                    id: "ig-reply-rate-limited".into(),
+                    filename: "rate-limited.png".into(),
+                    media_type: "image/png".into(),
+                    data_base64: "AQID".into(),
+                    caption: None,
+                }),
+            })
+            .await
+            .expect("attachment should be queued");
+        assert_eq!(transport.attachment_reply_attempt_count(), 0);
+        assert_eq!(
+            service
+                .pending_reply(&turn_id)
+                .expect("pending reply")
+                .pending_attachments
+                .len(),
+            1,
+            "attachment should only wait for the terminal reply, not retry immediately"
+        );
+
+        service.record_pending_assistant_message(&turn_id, "text still arrives");
+        let reply_target = service
+            .mark_pending_reply_completed(&turn_id)
+            .expect("pending reply");
+        service
+            .deliver_pending_reply(&workspace_id, &turn_id, reply_target)
+            .await
+            .expect("text reply should still be delivered");
+
+        assert!(transport.attachments().is_empty());
+        let replies = transport.replies();
+        assert_eq!(replies.len(), 2);
+        assert!(replies[0].text.contains("text still arrives"));
+        assert!(replies[1].text.contains("Attachment delivery failed."));
+        assert!(replies[1].text.contains("File: rate-limited.png"));
+        assert!(replies[1].text.contains("Error: ret=-2"));
+    }
+
+    #[test]
+    fn wechat_ilink_rate_limit_retry_count_stays_three() {
+        assert_eq!(crate::adapter::WECHAT_RATE_LIMIT_MAX_RETRIES, 3);
+        assert_eq!(
+            crate::adapter::WECHAT_RATE_LIMIT_MAX_RETRIES,
+            lucarne_channel::robust::ATTACHMENT_DELIVERY_MAX_RETRIES
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_reply_attachment_replies_to_source_message() {
+        let provider = Arc::new(FakeProvider::default());
+        let core = test_core(Arc::clone(&provider));
+        let opened = core
+            .open_workspace_with_events(OpenWorkspaceRequest {
+                provider_id: "codex",
+                project_path: Some("/tmp/workspace-attachment-reply".into()),
+                title: "workspace-attachment-reply".into(),
+            })
+            .await
+            .expect("open workspace");
+        let workspace_id = opened.workspace.workspace_id.clone();
+        let transport = Arc::new(FakeTransport::default());
+        let service = WechatNotificationService::new(
+            Arc::clone(&core),
+            Arc::clone(&transport),
+            WechatServiceOptions::default(),
+        );
+        let turn_id = TurnId::new("turn-attachment-reply");
+        let source = WechatIncoming::new(
+            "incoming-attachment",
+            "user-1",
+            "画图",
+            Option::<String>::None,
+        );
+        service.remember_pending_reply(turn_id.clone(), workspace_id.clone(), source);
+
+        service
+            .handle_core_event(CoreEvent::TimelineEvent {
+                workspace_id: workspace_id.clone(),
+                turn_id: Some(turn_id.clone()),
+                event: AgentEvent::Attachment(AgentAttachment {
+                    id: "ig-reply".into(),
+                    filename: "codex-image-ig-reply.png".into(),
+                    media_type: "image/png".into(),
+                    data_base64: "AQID".into(),
+                    caption: None,
+                }),
+            })
+            .await
+            .expect("attachment queued");
+        assert!(transport.attachments().is_empty());
+        let reply_target = service
+            .mark_pending_reply_completed(&turn_id)
+            .expect("pending reply");
+        service
+            .deliver_pending_reply(&workspace_id, &turn_id, reply_target)
+            .await
+            .expect("attachment reply");
+
+        let attachments = transport.attachments();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(
+            attachments[0].reply_to_message_id.as_deref(),
+            Some("incoming-attachment")
+        );
+        assert_eq!(attachments[0].message_id, "wechat-out-1");
+        assert_eq!(attachments[0].id.as_str(), "ig-reply");
+        assert_eq!(attachments[0].filename.as_str(), "codex-image-ig-reply.png");
+    }
+
+    #[tokio::test]
     async fn pending_notification_queue_is_bounded() {
         let provider = Arc::new(FakeProvider::default());
         let core = test_core(provider);
@@ -3901,7 +4763,12 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
         let notifications = service.take_pending_notifications();
         assert_eq!(MAX_PENDING_NOTIFICATIONS, 10);
         assert_eq!(notifications.len(), MAX_PENDING_NOTIFICATIONS);
-        assert_eq!(notifications[0].body.as_str(), "body-1");
+        match &notifications[0].content {
+            WechatPendingNotificationContent::Text(body) => {
+                assert_eq!(body.as_str(), "body-1");
+            }
+            WechatPendingNotificationContent::Attachment(_) => panic!("expected text notification"),
+        }
     }
 
     #[tokio::test]
@@ -4949,6 +5816,17 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
         text: String,
     }
 
+    #[derive(Debug, Clone)]
+    struct AttachmentRecord {
+        user_id: String,
+        message_id: String,
+        reply_to_message_id: Option<String>,
+        id: SmolStr,
+        filename: SmolStr,
+        media_type: SmolStr,
+        caption: Option<SmolStr>,
+    }
+
     #[derive(Default)]
     struct RecordingGlobalConfigPersistence {
         updates: StdMutex<Vec<GlobalConfigUpdate>>,
@@ -4978,6 +5856,7 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
         next: StdMutex<u64>,
         sends: StdMutex<Vec<SentRecord>>,
         replies: StdMutex<Vec<ReplyRecord>>,
+        attachments: StdMutex<Vec<AttachmentRecord>>,
         typings: StdMutex<Vec<String>>,
         contexts: StdMutex<HashMap<String, WechatContext>>,
         incoming: StdMutex<Option<Vec<WechatIncoming>>>,
@@ -4985,6 +5864,12 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
         split_sends: StdMutex<VecDeque<Vec<(String, String)>>>,
         send_error: StdMutex<Option<String>>,
         send_rate_limit: StdMutex<Option<Duration>>,
+        attachment_send_error: StdMutex<Option<String>>,
+        attachment_reply_error: StdMutex<Option<String>>,
+        attachment_send_rate_limit: StdMutex<Option<Duration>>,
+        attachment_reply_rate_limit: StdMutex<Option<Duration>>,
+        attachment_send_attempts: StdMutex<usize>,
+        attachment_reply_attempts: StdMutex<usize>,
         reply_error: StdMutex<Option<String>>,
         reply_rate_limit: StdMutex<Option<Duration>>,
         typing_error: StdMutex<Option<String>>,
@@ -5005,6 +5890,34 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
 
         fn fail_sends(&self, error: &str) {
             *self.send_error.lock().expect("send error lock") = Some(error.to_string());
+        }
+
+        fn fail_attachment_sends(&self, error: &str) {
+            *self
+                .attachment_send_error
+                .lock()
+                .expect("attachment send error lock") = Some(error.to_string());
+        }
+
+        fn fail_attachment_replies(&self, error: &str) {
+            *self
+                .attachment_reply_error
+                .lock()
+                .expect("attachment reply error lock") = Some(error.to_string());
+        }
+
+        fn fail_attachment_sends_rate_limited(&self, retry_after: Duration) {
+            *self
+                .attachment_send_rate_limit
+                .lock()
+                .expect("attachment send rate limit lock") = Some(retry_after);
+        }
+
+        fn fail_attachment_replies_rate_limited(&self, retry_after: Duration) {
+            *self
+                .attachment_reply_rate_limit
+                .lock()
+                .expect("attachment reply rate limit lock") = Some(retry_after);
         }
 
         fn fail_sends_rate_limited(&self, retry_after: Duration) {
@@ -5060,6 +5973,24 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
 
         fn replies(&self) -> Vec<ReplyRecord> {
             self.replies.lock().expect("replies lock").clone()
+        }
+
+        fn attachments(&self) -> Vec<AttachmentRecord> {
+            self.attachments.lock().expect("attachments lock").clone()
+        }
+
+        fn attachment_send_attempt_count(&self) -> usize {
+            *self
+                .attachment_send_attempts
+                .lock()
+                .expect("attachment send attempts lock")
+        }
+
+        fn attachment_reply_attempt_count(&self) -> usize {
+            *self
+                .attachment_reply_attempts
+                .lock()
+                .expect("attachment reply attempts lock")
         }
 
         fn typing_count(&self, user_id: &str) -> usize {
@@ -5189,6 +6120,125 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
             Ok(WechatSendReceipt {
                 message_ids: vec![message_id],
                 visible_texts: vec![text.to_string()],
+            })
+        }
+
+        async fn send_attachment(
+            &self,
+            context: &WechatContext,
+            attachment: &AgentAttachment,
+        ) -> Result<WechatSendReceipt, WechatError> {
+            *self
+                .attachment_send_attempts
+                .lock()
+                .expect("attachment send attempts lock") += 1;
+            if let Some(error) = self
+                .attachment_send_error
+                .lock()
+                .expect("attachment send error lock")
+                .clone()
+            {
+                return Err(WechatError::Transport(error));
+            }
+            if let Some(retry_after) = *self
+                .attachment_send_rate_limit
+                .lock()
+                .expect("attachment send rate limit lock")
+            {
+                return Err(WechatError::RateLimited {
+                    retry_after,
+                    message: "ret=-2".into(),
+                });
+            }
+            if let Some(retry_after) = *self.send_rate_limit.lock().expect("send rate limit lock") {
+                return Err(WechatError::RateLimited {
+                    retry_after,
+                    message: "ret=-2".into(),
+                });
+            }
+            if let Some(error) = self.send_error.lock().expect("send error lock").clone() {
+                return Err(WechatError::Transport(error));
+            }
+            let message_id = self.next_message_id();
+            self.attachments
+                .lock()
+                .expect("attachments lock")
+                .push(AttachmentRecord {
+                    user_id: context.user_id.clone(),
+                    message_id: message_id.clone(),
+                    reply_to_message_id: None,
+                    id: attachment.id.clone(),
+                    filename: attachment.filename.clone(),
+                    media_type: attachment.media_type.clone(),
+                    caption: attachment.caption.clone(),
+                });
+            Ok(WechatSendReceipt {
+                message_ids: vec![message_id],
+                visible_texts: attachment
+                    .caption
+                    .as_ref()
+                    .map(|caption| vec![caption.to_string()])
+                    .unwrap_or_default(),
+            })
+        }
+
+        async fn reply_attachment(
+            &self,
+            message: &WechatIncoming,
+            attachment: &AgentAttachment,
+        ) -> Result<WechatSendReceipt, WechatError> {
+            *self
+                .attachment_reply_attempts
+                .lock()
+                .expect("attachment reply attempts lock") += 1;
+            if let Some(error) = self
+                .attachment_reply_error
+                .lock()
+                .expect("attachment reply error lock")
+                .clone()
+            {
+                return Err(WechatError::Transport(error));
+            }
+            if let Some(retry_after) = *self
+                .attachment_reply_rate_limit
+                .lock()
+                .expect("attachment reply rate limit lock")
+            {
+                return Err(WechatError::RateLimited {
+                    retry_after,
+                    message: "ret=-2".into(),
+                });
+            }
+            if let Some(retry_after) = *self.reply_rate_limit.lock().expect("reply rate limit lock")
+            {
+                return Err(WechatError::RateLimited {
+                    retry_after,
+                    message: "ret=-2".into(),
+                });
+            }
+            if let Some(error) = self.reply_error.lock().expect("reply error lock").clone() {
+                return Err(WechatError::Transport(error));
+            }
+            let message_id = self.next_message_id();
+            self.attachments
+                .lock()
+                .expect("attachments lock")
+                .push(AttachmentRecord {
+                    user_id: message.user_id.clone(),
+                    message_id: message_id.clone(),
+                    reply_to_message_id: Some(message.message_id.clone()),
+                    id: attachment.id.clone(),
+                    filename: attachment.filename.clone(),
+                    media_type: attachment.media_type.clone(),
+                    caption: attachment.caption.clone(),
+                });
+            Ok(WechatSendReceipt {
+                message_ids: vec![message_id],
+                visible_texts: attachment
+                    .caption
+                    .as_ref()
+                    .map(|caption| vec![caption.to_string()])
+                    .unwrap_or_default(),
             })
         }
 

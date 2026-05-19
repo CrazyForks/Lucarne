@@ -1493,6 +1493,7 @@ version = "0.1.0"
 dependencies = [
  "agent-sessions",
  "async-trait",
+ "base64",
  "futures",
  "lucarne",
  "lucarne-adapter",
