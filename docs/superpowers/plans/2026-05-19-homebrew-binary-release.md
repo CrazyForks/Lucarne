@@ -689,11 +689,20 @@ EOF
             --x86-64-sha "$X86_64_SHA"
           ruby -c Formula/lucarned.rb
 
+      - name: Create temporary tap
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew tap-new tuchg/lucarne --no-git
+          cp Formula/lucarned.rb "$(brew --repo tuchg/lucarne)/Formula/lucarned.rb"
+
       - name: Verify stable formula does not depend on Rust build stack
         shell: bash
         run: |
           set -euo pipefail
-          if brew deps --include-build --formula ./Formula/lucarned.rb | grep -E '^(rust|pkg-config|openssl@3)$'; then
+          DEPS="$(brew deps --include-build tuchg/lucarne/lucarned)"
+          printf '%s\n' "$DEPS"
+          if printf '%s\n' "$DEPS" | grep -E '^(rust|pkg-config|openssl@3)$'; then
             echo "Stable binary formula must not depend on Rust, pkg-config, or openssl@3" >&2
             exit 1
           fi
@@ -702,8 +711,8 @@ EOF
         shell: bash
         run: |
           set -euo pipefail
-          brew install --formula ./Formula/lucarned.rb
-          brew test lucarned
+          brew install tuchg/lucarne/lucarned
+          brew test tuchg/lucarne/lucarned
 
   update-formula:
     name: Update formula on main
@@ -764,7 +773,8 @@ required = [
     'macos-13',
     'cargo +nightly build --release -Zbuild-dir-new-layout --locked -p lucarned',
     'update-homebrew-formula.py',
-    'brew install --formula ./Formula/lucarned.rb',
+    'brew tap-new tuchg/lucarne --no-git',
+    'brew install tuchg/lucarne/lucarned',
     'git push origin HEAD:main',
 ]
 missing = [item for item in required if item not in text]

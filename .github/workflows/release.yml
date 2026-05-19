@@ -306,10 +306,18 @@ jobs:
       - name: Validate formula syntax
         run: ruby -c Formula/lucarned.rb
 
+      - name: Create temporary tap
+        run: |
+          set -euo pipefail
+          brew tap-new tuchg/lucarne --no-git
+          cp Formula/lucarned.rb "$(brew --repo tuchg/lucarne)/Formula/lucarned.rb"
+
       - name: Verify stable formula dependencies
         run: |
           set -euo pipefail
-          if brew deps --include-build --formula ./Formula/lucarned.rb | grep -E '^(rust|pkg-config|openssl@3)$'; then
+          DEPS="$(brew deps --include-build tuchg/lucarne/lucarned)"
+          printf '%s\n' "$DEPS"
+          if printf '%s\n' "$DEPS" | grep -E '^(rust|pkg-config|openssl@3)$'; then
             echo "Stable binary formula must not depend on Rust, pkg-config, or openssl@3" >&2
             exit 1
           fi
@@ -317,8 +325,8 @@ jobs:
       - name: Install and test formula
         run: |
           set -euo pipefail
-          brew install --formula ./Formula/lucarned.rb
-          brew test lucarned
+          brew install tuchg/lucarne/lucarned
+          brew test tuchg/lucarne/lucarned
 
   update-formula:
     name: Update Homebrew formula
