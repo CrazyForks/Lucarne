@@ -79,16 +79,16 @@ macos-15-intel -> x86_64-apple-darwin
 Build command follows project rules:
 
 ```bash
-cargo +nightly build --release -Zbuild-dir-new-layout -p lucarned
+cargo +nightly build --release -Zbuild-dir-new-layout --locked -p lucarned
 ```
 
 The workflow validates that the tag version matches `workspace.package.version` in `Cargo.toml`. For example, tag `v0.1.0` must match workspace version `0.1.0`.
 
 ## Release dependency resolution
 
-The repository uses the crates.io dependency range `wechat-ilink = "0"` in `crates/lucarne-wechat/Cargo.toml`. Release CI runs `cargo +nightly update -Zbuild-dir-new-layout -p wechat-ilink` before the locked build so Cargo resolves the latest compatible 0.x crate from crates.io.
+Release CI builds the checked-out source with `--locked` so Cargo uses the committed `Cargo.lock` exactly. The repository uses the crates.io dependency range `wechat-ilink = "0"` in `crates/lucarne-wechat/Cargo.toml`, and the resolved crate version lives in `Cargo.lock` like any other dependency.
 
-This avoids repo-local path patches in release checkouts and keeps the binary build reproducible through the refreshed `Cargo.lock`.
+CI must not run package-specific dependency update steps during release builds. Dependency updates happen before release by updating and committing `Cargo.lock`.
 
 ## Formula design
 
@@ -144,7 +144,7 @@ If branch protection blocks direct push, the same workflow creates a pull reques
 ```text
 tag vX.Y.Z
   -> release workflow
-  -> resolve latest crates.io wechat-ilink 0.x
+  -> build locked Cargo source using committed Cargo.lock
   -> build arm64 on macos-14-arm64
   -> build x86_64 on macos-15-intel
   -> package tarballs
@@ -159,7 +159,7 @@ tag vX.Y.Z
 CI fails before publishing formula updates when:
 
 - Tag version and Cargo workspace version differ.
-- CI cannot resolve the latest compatible crates.io `wechat-ilink` crate from `wechat-ilink = "0"`.
+- Committed `Cargo.lock` is missing, stale, or incompatible with `--locked` build.
 - Cargo build fails.
 - `lucarned --version` or a smoke command fails.
 - Tarball layout does not contain `bin/lucarned`.
@@ -208,4 +208,4 @@ Full release verification happens in GitHub Actions because both macOS architect
 - Add Linux tarballs and Homebrew-on-Linux formula branches.
 - Add signed checksums.
 - Add release notes generation.
-- Keep local `wechat-ilink` development overrides outside committed `Cargo.toml`; release workflows use crates.io `wechat-ilink = "0"` plus `cargo update -p wechat-ilink`.
+- Keep local `wechat-ilink` development overrides outside committed `Cargo.toml`; release workflows use crates.io `wechat-ilink = "0"` resolved by committed `Cargo.lock`.

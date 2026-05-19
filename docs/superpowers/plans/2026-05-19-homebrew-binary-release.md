@@ -487,12 +487,6 @@ PY
           set -euo pipefail
           rustup toolchain install nightly --profile minimal
 
-      - name: Resolve latest wechat-ilink
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo +nightly update -Zbuild-dir-new-layout -p wechat-ilink
-
       - name: Build lucarned
         shell: bash
         run: |
@@ -937,7 +931,7 @@ prints download/install output for release tarball and does not run `cargo insta
   - Formula architecture selection: Task 2 generated formula with `on_arm` and `on_intel`.
   - No Rust build on stable install: Task 3 formula deps check and Task 5 final install check.
   - HEAD source install retained: Task 2 generated `head do` and `if build.head?`.
-  - `wechat-ilink` crates.io resolution in CI: Task 3 `Resolve latest wechat-ilink` uses `wechat-ilink = "0"` and `cargo update -p wechat-ilink` to resolve latest 0.x.
+  - Cargo dependency resolution: release builds use committed `Cargo.lock`; `wechat-ilink = "0"` stays a normal crates.io dependency with no package-specific CI update step.
   - Dynamic library check: Task 3 `otool -L` step.
   - Formula tests on both architectures: Task 3 `formula-test` matrix.
 - Red-flag scan: plan has concrete commands, exact file paths, and exact script/workflow content.

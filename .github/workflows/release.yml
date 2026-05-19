@@ -78,12 +78,6 @@ jobs:
       - name: Install Rust nightly
         run: rustup toolchain install nightly --profile minimal
 
-      - name: Resolve latest wechat-ilink
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo +nightly update -Zbuild-dir-new-layout -p wechat-ilink
-
       - name: Build lucarned
         run: cargo +nightly build --release -Zbuild-dir-new-layout --locked -p lucarned
 
