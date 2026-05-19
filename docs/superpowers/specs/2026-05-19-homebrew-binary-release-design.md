@@ -73,7 +73,7 @@ Build matrix:
 
 ```text
 macos-14-arm64 -> aarch64-apple-darwin
-macos-13       -> x86_64-apple-darwin
+macos-15-intel -> x86_64-apple-darwin
 ```
 
 Build command follows project rules:
@@ -157,7 +157,7 @@ tag vX.Y.Z
   -> release workflow
   -> sanitize CI workspace patch config
   -> build arm64 on macos-14-arm64
-  -> build x86_64 on macos-13
+  -> build x86_64 on macos-15-intel
   -> package tarballs
   -> upload GitHub Release assets
   -> compute sha256
