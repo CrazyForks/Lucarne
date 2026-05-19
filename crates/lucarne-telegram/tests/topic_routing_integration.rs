@@ -35,9 +35,9 @@ use lucarne::{
     core_service::{LucarneCore, OpenWorkspaceRequest, ResumeWorkspaceRequest, SubmitTurnRequest},
 };
 use lucarne_channel::{
-    Channel, ChannelError, ChannelEvent, ChatId, CommandQuery, CommandQueryResult, FileUpload,
-    IncomingAttachment, IncomingMessage, MessageId, OutgoingMessage, Result, TextFormat,
-    WorkspaceHandle, WorkspaceId,
+    agent_message::compact_path, Channel, ChannelError, ChannelEvent, ChatId, CommandQuery,
+    CommandQueryResult, FileUpload, IncomingAttachment, IncomingMessage, MessageId,
+    OutgoingMessage, Result, TextFormat, WorkspaceHandle, WorkspaceId,
 };
 use lucarne_telegram::state::WorkSession;
 use lucarne_telegram::{bot::Bot, state::BotState};
@@ -1178,7 +1178,7 @@ async fn bot_run_receives_history_watch_notifications_started_by_supervisor() {
                     && sent
                         .message
                         .body
-                        .contains(format!("cwd: `{}`", project.display()).as_str())
+                        .contains(compact_cwd_footer(&project).as_str())
             })
         })
         .await
@@ -1244,7 +1244,7 @@ async fn live_history_watch_file_append_reaches_notification_topic() {
                 && sent
                     .message
                     .body
-                    .contains(format!("cwd: `{}`", project.display()).as_str())
+                    .contains(compact_cwd_footer(&project).as_str())
         })
         .await;
     assert_ne!(notification.topic, "9");
@@ -2029,7 +2029,7 @@ async fn live_record_watch_notification_replay_cassette_codex() {
                 && sent
                     .message
                     .body
-                    .contains(format!("cwd: `{}`", project.display()).as_str())
+                    .contains(compact_cwd_footer(&project).as_str())
                 && sent.topic != "9"
         },
     )
@@ -5389,6 +5389,10 @@ async fn eventually_topic_message_with_timeout(
         .find(|sent| predicate(&sent.message))
         .expect("message found after wait")
         .message
+}
+
+fn compact_cwd_footer(path: &Path) -> String {
+    format!("cwd: `{}`", compact_path(&path.display().to_string(), 58))
 }
 
 async fn eventually_topic_sent_message(

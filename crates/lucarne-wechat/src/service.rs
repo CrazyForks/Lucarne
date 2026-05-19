@@ -29,7 +29,7 @@ use lucarne::{
 };
 use lucarne_adapter::{GlobalConfigPersistence, GlobalConfigUpdate};
 use lucarne_channel::agent_message::{
-    format_cost_duration, render_agent_message_markdown, AgentMessageFooter,
+    compact_path, format_cost_duration, render_agent_message_markdown, AgentMessageFooter,
 };
 use tokio::{sync::oneshot, time::MissedTickBehavior};
 use tracing::{debug, warn};
@@ -1787,7 +1787,10 @@ fn render_agent_message(
         &AgentMessageFooter {
             cost,
             session: Some(session_ref.to_string()),
-            cwd: Some(workspace.project_path.display().to_string()),
+            cwd: Some(compact_path(
+                &workspace.project_path.display().to_string(),
+                58,
+            )),
         },
     )
 }
@@ -2117,6 +2120,25 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Mutex as StdMutex;
     use tokio::sync::mpsc;
+
+    #[test]
+    fn agent_notification_message_uses_panel_compact_cwd() {
+        let workspace = WorkspaceBinding::new(
+            WorkspaceId::new("workspace-1"),
+            "lucarnex",
+            "codex",
+            "/Volumes/Data/opensource/conductor/lucarnex",
+        );
+
+        let body = render_agent_message("done", &workspace, "thread-1", None);
+
+        assert!(body.contains("cwd: `…/opensource/conductor/lucarnex`"));
+        assert!(!body.contains("/Volumes/Data"));
+    }
+
+    fn compact_cwd_footer(path: &Path) -> String {
+        format!("cwd: `{}`", compact_path(&path.display().to_string(), 58))
+    }
 
     #[tokio::test]
     async fn notification_hub_binds_replies_and_returns_agent_output_to_reply_message() {
@@ -4258,9 +4280,7 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
                 send.user_id == "user-1"
                     && send.text.contains("wechat live watch complete")
                     && send.text.contains("session: `watch-thread-wechat`")
-                    && send
-                        .text
-                        .contains(format!("cwd: `{}`", project.display()).as_str())
+                    && send.text.contains(compact_cwd_footer(&project).as_str())
             })
         })
         .await;

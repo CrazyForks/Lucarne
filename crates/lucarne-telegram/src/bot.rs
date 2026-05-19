@@ -4960,7 +4960,7 @@ fn render_agent_notification(
     let cwd = session
         .project_path
         .as_ref()
-        .map(|path| path.display().to_string())
+        .map(|path| compact_path(&path.display().to_string(), 58))
         .unwrap_or_else(|| "-".to_string());
     let body = render_agent_message_markdown(
         text,
@@ -4978,57 +4978,7 @@ fn short_line(s: &str, max: usize) -> String {
 }
 
 fn compact_path(path: &str, max: usize) -> String {
-    let path = path.trim();
-    if max == 0 {
-        return String::new();
-    }
-    if max == 1 {
-        return "…".into();
-    }
-
-    let Some(separator) = path
-        .contains('/')
-        .then_some('/')
-        .or_else(|| path.contains('\\').then_some('\\'))
-    else {
-        return format!("…{}", tail_chars(path, max - 1));
-    };
-    let separator_text = separator.to_string();
-    let parts = path
-        .split(separator)
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    if parts.is_empty() {
-        return format!("…{}", tail_chars(path, max - 1));
-    }
-
-    if parts.len() <= 2 && path.chars().count() <= max {
-        return path.to_string();
-    }
-
-    let mut selected: Vec<&str> = Vec::new();
-    let tail_limit = 3.min(parts.len());
-    for part in parts.iter().rev().take(tail_limit) {
-        let mut candidate_parts = vec![*part];
-        candidate_parts.extend(selected.iter().copied());
-        let candidate = format!("…{separator}{}", candidate_parts.join(&separator_text));
-        if candidate.chars().count() > max {
-            break;
-        }
-        selected.insert(0, *part);
-    }
-
-    if selected.is_empty() {
-        let leaf = parts.last().copied().unwrap_or(path);
-        return format!("…{}", tail_chars(leaf, max - 1));
-    }
-    format!("…{separator}{}", selected.join(&separator_text))
-}
-
-fn tail_chars(s: &str, max: usize) -> String {
-    let mut chars = s.chars().rev().take(max).collect::<Vec<_>>();
-    chars.reverse();
-    chars.into_iter().collect()
+    lucarne_channel::agent_message::compact_path(path, max)
 }
 
 fn current_unix() -> i64 {
@@ -15209,6 +15159,24 @@ done
 
         assert_eq!(rendered, "…/opensource/conductor/lucarnex");
         assert!(!rendered.starts_with("/Volumes"));
+    }
+
+    #[test]
+    fn agent_notification_uses_panel_compact_cwd() {
+        let session = WorkSession {
+            workspace: WorkspaceId::new("topic-1"),
+            chat: ChatId::new("chat-1"),
+            provider_id: "codex",
+            project_path: Some(PathBuf::from("/Volumes/Data/opensource/conductor/lucarnex")),
+            title: "lucarnex".into(),
+            live: None,
+            resume_ref: None,
+        };
+
+        let msg = render_agent_notification(&session, Some("thread-1"), "done");
+
+        assert!(msg.body.contains("cwd: `…/opensource/conductor/lucarnex`"));
+        assert!(!msg.body.contains("/Volumes/Data"));
     }
 
     #[test]
