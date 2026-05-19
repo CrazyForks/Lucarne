@@ -1485,10 +1485,35 @@ impl LucarneCore {
     }
 
     fn handle_history_watch_update(&self, update: WatchUpdate) -> Result<(), CoreError> {
+        trace!(
+            target: "lucarne::core_service",
+            provider = update.provider.as_str(),
+            path = %update.path.display(),
+            session_id = update.session_id.as_deref(),
+            cwd = update.cwd.as_deref(),
+            change = ?update.change,
+            events = update.events.len(),
+            "received history watch update"
+        );
         if !matches!(update.change, WatchChange::Created | WatchChange::Updated) {
+            trace!(
+                target: "lucarne::core_service",
+                provider = update.provider.as_str(),
+                path = %update.path.display(),
+                change = ?update.change,
+                "history watch update ignored because change is not projectable"
+            );
             return Ok(());
         }
         if update.events.is_empty() {
+            trace!(
+                target: "lucarne::core_service",
+                provider = update.provider.as_str(),
+                path = %update.path.display(),
+                session_id = update.session_id.as_deref(),
+                change = ?update.change,
+                "history watch update ignored because it has no events"
+            );
             return Ok(());
         }
 
@@ -1497,6 +1522,15 @@ impl LucarneCore {
         let workspace_id = self.ensure_history_watch_workspace(&entry)?;
 
         self.record_observed_watch_update(&entry, &workspace_id, &update)?;
+        trace!(
+            target: "lucarne::core_service",
+            provider = entry.provider_id,
+            session_id = %entry.session_id,
+            provider_session_id = %provider_session_id.as_str(),
+            workspace_id = %workspace_id.as_str(),
+            events = update.events.len(),
+            "recorded observed history watch update"
+        );
 
         if current_submitted_turn(&self.submitted_turns, &workspace_id).is_some() {
             debug!(
@@ -1527,6 +1561,13 @@ impl LucarneCore {
             let event = match watched_event {
                 WatchEvent::UserMessage(message) => {
                     let Some(text) = message.text.as_deref() else {
+                        trace!(
+                            target: "lucarne::core_service",
+                            provider = entry.provider_id,
+                            session_id = %entry.session_id,
+                            workspace_id = %workspace_id.as_str(),
+                            "history user message watch event skipped because text is empty"
+                        );
                         continue;
                     };
                     AgentEvent::Message(crate::agent_runtime::MessageEvent {
@@ -1537,9 +1578,24 @@ impl LucarneCore {
                 }
                 WatchEvent::AssistantMessage(message) => {
                     if message.phase.is_some() {
+                        trace!(
+                            target: "lucarne::core_service",
+                            provider = entry.provider_id,
+                            session_id = %entry.session_id,
+                            workspace_id = %workspace_id.as_str(),
+                            phase = message.phase.as_deref(),
+                            "history assistant message watch event skipped because phase belongs to transcript"
+                        );
                         continue;
                     }
                     let Some(text) = message.text.as_deref() else {
+                        trace!(
+                            target: "lucarne::core_service",
+                            provider = entry.provider_id,
+                            session_id = %entry.session_id,
+                            workspace_id = %workspace_id.as_str(),
+                            "history assistant message watch event skipped because text is empty"
+                        );
                         continue;
                     };
                     AgentEvent::Message(crate::agent_runtime::MessageEvent {
@@ -1612,6 +1668,13 @@ impl LucarneCore {
                 }),
                 WatchEvent::TurnCompleted(completion) => {
                     let Some(text) = watch_turn_completed_text(completion, true) else {
+                        trace!(
+                            target: "lucarne::core_service",
+                            provider = entry.provider_id,
+                            session_id = %entry.session_id,
+                            workspace_id = %workspace_id.as_str(),
+                            "history turn completion watch event skipped because it has no notifyable text"
+                        );
                         continue;
                     };
                     AgentEvent::Message(crate::agent_runtime::MessageEvent {
@@ -1628,6 +1691,13 @@ impl LucarneCore {
                 event: event.clone(),
             });
             let _ = workspace_events.send(event);
+            trace!(
+                target: "lucarne::core_service",
+                provider = entry.provider_id,
+                session_id = %entry.session_id,
+                workspace_id = %workspace_id.as_str(),
+                "history watch event projected to core timeline"
+            );
         }
         Ok(())
     }
@@ -4910,6 +4980,157 @@ mod tests {
         assert_eq!(
             text.as_str(),
             "default watch assistant received\n\ncost: 2m 5s"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn history_session_watch_emits_core_event_for_existing_recent_non_hot_codex_append() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let codex_home = temp.path().join("codex");
+        let project_path = temp.path().join("recent-non-hot-project");
+        fs::create_dir_all(&project_path).expect("project dir");
+        let session_path = write_codex_history_session(
+            &codex_home,
+            "recent-non-hot-thread",
+            project_path.to_str().expect("utf8 project"),
+            "2026-04-25T00:01:00.000Z",
+            "ping",
+        );
+
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        let runtime = Arc::new(AgentRuntime::new());
+        runtime.register(Arc::new(CatalogProvider));
+        let core = LucarneCore::from_runtime_and_store(
+            runtime,
+            ControlPlaneSqliteStore::open_in_memory().expect("store"),
+        )
+        .expect("core");
+        let mut events = core.watch_events();
+
+        core.start_history_session_watch_with_config(
+            WatchConfig::new()
+                .providers([watch_provider("codex")])
+                .provider_roots(watch_provider("codex"), [codex_home.clone()])
+                .selection(history_watch_selection())
+                .debounce(Duration::from_millis(10))
+                .recent_window(Duration::from_secs(60))
+                .hot_file_window(Duration::from_nanos(1)),
+        )
+        .expect("start codex history watch");
+        append_codex_assistant_response(
+            &session_path,
+            "2026-04-25T00:01:01.000Z",
+            "recent non-hot assistant received",
+        );
+
+        let text = tokio::time::timeout(Duration::from_secs(6), async {
+            loop {
+                let event = events.recv().await.expect("core event");
+                if let CoreEvent::TimelineEvent {
+                    event:
+                        AgentEvent::Message(crate::agent_runtime::MessageEvent {
+                            role: crate::agent_runtime::MessageRole::Assistant,
+                            text,
+                            streaming: false,
+                        }),
+                    ..
+                } = event
+                {
+                    break text;
+                }
+            }
+        })
+        .await
+        .expect("assistant timeline event");
+        assert_eq!(
+            text.as_str(),
+            "recent non-hot assistant received\n\ncost: 2m 5s"
+        );
+        let observed_recent = core.observed_recent_sessions();
+        assert!(
+            observed_recent.iter().any(|session| {
+                session.provider_id == "codex"
+                    && session.native_resume_ref.as_str() == "recent-non-hot-thread"
+            }),
+            "history watch append should also populate observed_recent_sessions"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn history_session_watch_emits_core_event_for_existing_stale_codex_append_from_recursive_root(
+    ) {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let codex_home = temp.path().join("codex");
+        let project_path = temp.path().join("stale-project");
+        fs::create_dir_all(&project_path).expect("project dir");
+        let session_path = write_codex_history_session(
+            &codex_home,
+            "stale-reactivated-thread",
+            project_path.to_str().expect("utf8 project"),
+            "2026-04-25T00:01:00.000Z",
+            "ping",
+        );
+
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        let runtime = Arc::new(AgentRuntime::new());
+        runtime.register(Arc::new(CatalogProvider));
+        let core = LucarneCore::from_runtime_and_store(
+            runtime,
+            ControlPlaneSqliteStore::open_in_memory().expect("store"),
+        )
+        .expect("core");
+        let mut events = core.watch_events();
+
+        core.start_history_session_watch_with_config(
+            WatchConfig::new()
+                .providers([watch_provider("codex")])
+                .provider_roots(watch_provider("codex"), [codex_home.clone()])
+                .selection(history_watch_selection())
+                .debounce(Duration::from_millis(10))
+                .recent_window(Duration::from_nanos(1))
+                .hot_file_window(Duration::from_nanos(1)),
+        )
+        .expect("start codex history watch");
+        append_codex_assistant_response(
+            &session_path,
+            "2026-04-25T00:01:01.000Z",
+            "stale reactivated assistant received",
+        );
+
+        let text = tokio::time::timeout(Duration::from_secs(6), async {
+            loop {
+                let event = events.recv().await.expect("core event");
+                if let CoreEvent::TimelineEvent {
+                    event:
+                        AgentEvent::Message(crate::agent_runtime::MessageEvent {
+                            role: crate::agent_runtime::MessageRole::Assistant,
+                            text,
+                            streaming: false,
+                        }),
+                    ..
+                } = event
+                {
+                    break text;
+                }
+            }
+        })
+        .await
+        .expect("assistant timeline event");
+        assert_eq!(
+            text.as_str(),
+            "stale reactivated assistant received\n\ncost: 2m 5s"
+        );
+        let observed_recent = core.observed_recent_sessions();
+        assert!(
+            observed_recent.iter().any(|session| {
+                session.provider_id == "codex"
+                    && session.native_resume_ref.as_str() == "stale-reactivated-thread"
+            }),
+            "recursive root watch should promote a stale session after it becomes active"
         );
     }
 

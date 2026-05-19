@@ -321,7 +321,7 @@ async fn initial_watch_paths_include_only_recent_codex_day_directories() {
 
 #[cfg(all(feature = "codex", target_os = "macos"))]
 #[tokio::test]
-async fn macos_codex_root_uses_recursive_watch_and_hot_session_file_targets() {
+async fn macos_codex_root_uses_recursive_watch_and_recent_session_file_targets() {
     let temp = tempfile::tempdir().unwrap();
     let root = codex_root(temp.path());
     let hot_path = codex_session_path(&root);
@@ -358,7 +358,10 @@ async fn macos_codex_root_uses_recursive_watch_and_hot_session_file_targets() {
         path: hot_path,
         recursive_mode: RecursiveMode::NonRecursive,
     }));
-    assert!(!targets.iter().any(|target| target.path == cold_recent_path));
+    assert!(targets.contains(&WatchTarget {
+        path: cold_recent_path,
+        recursive_mode: RecursiveMode::NonRecursive,
+    }));
     assert!(!targets.iter().any(|target| target.path == stale_path));
     assert!(
         !targets
@@ -398,7 +401,7 @@ async fn initial_watch_paths_do_not_register_every_claude_project_dir() {
 
 #[cfg(all(feature = "claude", target_os = "macos"))]
 #[tokio::test]
-async fn macos_claude_root_uses_recursive_watch_and_hot_session_file_targets() {
+async fn macos_claude_root_uses_recursive_watch_and_recent_session_file_targets() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("projects");
     let hot_project = root.join("-tmp-hot");
@@ -441,7 +444,10 @@ async fn macos_claude_root_uses_recursive_watch_and_hot_session_file_targets() {
             .iter()
             .any(|target| target.path == cold_recent_project)
     );
-    assert!(!targets.iter().any(|target| target.path == cold_recent_file));
+    assert!(targets.contains(&WatchTarget {
+        path: cold_recent_file,
+        recursive_mode: RecursiveMode::NonRecursive,
+    }));
     assert!(!targets.iter().any(|target| target.path == empty_project));
 }
 

@@ -8,6 +8,7 @@ use std::thread;
 use fsevent_sys as fs;
 use fsevent_sys::core_foundation as cf;
 use tokio::sync::mpsc;
+use tracing::{debug, trace};
 
 use super::{RawWatchEvent, WatchError};
 
@@ -39,6 +40,18 @@ impl MacRecursiveWatcher {
     fn start(&mut self) -> std::result::Result<(), WatchError> {
         if self.paths.is_empty() {
             return Ok(());
+        }
+        debug!(
+            target: "agent_sessions::watch::fsevents",
+            paths = self.paths.len(),
+            "starting macOS recursive FSEvents stream"
+        );
+        for path in &self.paths {
+            trace!(
+                target: "agent_sessions::watch::fsevents",
+                path = %path.display(),
+                "macOS recursive FSEvents root"
+            );
         }
         let paths = create_path_array(&self.paths)?;
         let context = Box::into_raw(Box::new(StreamContext {
@@ -121,7 +134,12 @@ impl RunningStream {
                         runloop,
                         cf::kCFRunLoopDefaultMode,
                     );
-                    fs::FSEventStreamStart(stream);
+                    let started = fs::FSEventStreamStart(stream) != 0;
+                    trace!(
+                        target: "agent_sessions::watch::fsevents",
+                        started,
+                        "macOS recursive FSEvents stream start returned"
+                    );
                     let _ = runloop_tx.send(SendRef(runloop));
                     cf::CFRunLoopRun();
                     fs::FSEventStreamStop(stream);
@@ -200,6 +218,12 @@ extern "C" fn callback(
         };
         paths.push(PathBuf::from(path));
     }
+    trace!(
+        target: "agent_sessions::watch::fsevents",
+        raw_events = num_events,
+        paths = paths.len(),
+        "received macOS recursive FSEvents callback"
+    );
     if !paths.is_empty() {
         let _ = context.raw_tx.send(RawWatchEvent::Paths(paths));
     }

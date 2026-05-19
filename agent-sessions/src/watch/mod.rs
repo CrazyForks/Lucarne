@@ -177,7 +177,22 @@ impl SessionWatcher {
         };
         this.initialize_baselines();
         crate::memory_profile_snapshot!("agent_sessions.watch.after_initialize_baselines");
-        for target in this.initial_watch_targets(&roots) {
+        let initial_targets = this.initial_watch_targets(&roots);
+        trace!(
+            target: "agent_sessions::watch",
+            targets = initial_targets.len(),
+            "selected initial watch targets"
+        );
+        for target in initial_targets {
+            trace!(
+                target: "agent_sessions::watch",
+                watch_path = %target.path.display(),
+                recursive = matches!(target.recursive_mode, RecursiveMode::Recursive),
+                has_baseline = this.baselines.contains_key(&target.path),
+                recent_session = this.is_recent_session_path(&target.path),
+                hot_session = this.is_hot_session_path(&target.path),
+                "initial watch target selected"
+            );
             this.watch_target(target)?;
         }
         crate::memory_profile_snapshot!("agent_sessions.watch.after_initialize_baselines");
@@ -266,6 +281,13 @@ impl SessionWatcher {
             for session_path in discovered {
                 self.pending_paths.insert(session_path);
             }
+        } else {
+            trace!(
+                target: "agent_sessions::watch",
+                provider = provider.as_str(),
+                path = %path.display(),
+                "ignoring provider history watch path that is neither session-like nor directory"
+            );
         }
     }
 
@@ -406,7 +428,13 @@ impl SessionWatcher {
                 error = %error,
                 "failed to watch new session file"
             );
+            return;
         }
+        debug!(
+            target: "agent_sessions::watch",
+            watch_path = %watch_path.display(),
+            "watching new session file"
+        );
     }
 
     fn process_existing_path(
@@ -862,6 +890,16 @@ impl SessionWatcher {
             (&mut file)
                 .take(start.saturating_sub(chunk_start))
                 .read_to_end(&mut chunk)?;
+            trace!(
+                target: "agent_sessions::watch",
+                path = %path.display(),
+                chunk_start,
+                chunk_end = start,
+                old_len = lower,
+                new_len = len,
+                chunk_bytes = chunk.len(),
+                "read jsonl delta chunk"
+            );
             chunk.extend_from_slice(&bytes);
             bytes = chunk;
             if chunk_start == lower {
@@ -874,6 +912,15 @@ impl SessionWatcher {
             }
             if has_complete_jsonl_record_after_leading_boundary(&bytes) {
                 drop_leading_partial_line(&mut bytes);
+                trace!(
+                    target: "agent_sessions::watch",
+                    path = %path.display(),
+                    chunk_start,
+                    old_len = lower,
+                    new_len = len,
+                    buffered_bytes = bytes.len(),
+                    "stopped jsonl delta lookback after complete record boundary"
+                );
                 break;
             }
             start = chunk_start;
@@ -1045,6 +1092,11 @@ impl SessionWatcher {
 
     fn initialize_baselines(&mut self) {
         let discovered = self.discover_session_files();
+        trace!(
+            target: "agent_sessions::watch",
+            discovered = discovered.len(),
+            "discovered initial session baselines"
+        );
         for path in discovered {
             if let Ok(metadata) = fs::metadata(&path) {
                 let initial = self
@@ -1122,7 +1174,7 @@ impl SessionWatcher {
         }
         for session_path in self.baselines.keys() {
             if !self.has_recursive_root_for_path(session_path)
-                || self.is_hot_session_path(session_path)
+                || self.should_watch_session_file_target(session_path)
             {
                 push_watch_target(&mut paths, WatchTarget::non_recursive(session_path.clone()));
             }
@@ -1303,6 +1355,10 @@ impl SessionWatcher {
             return true;
         };
         session_modified_within(modified, SystemTime::now(), self.config.hot_file_window)
+    }
+
+    fn should_watch_session_file_target(&self, path: &Path) -> bool {
+        self.is_recent_session_path(path) || self.is_hot_session_path(path)
     }
 
     fn is_recent_directory_path(&self, path: &Path) -> bool {
