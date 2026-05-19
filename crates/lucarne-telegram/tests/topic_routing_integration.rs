@@ -5486,7 +5486,7 @@ async fn eventually_button_data(
 }
 
 fn first_history_session_id(body: &str) -> String {
-    let marker = "🆔 `";
+    let marker = "\n      `";
     let start = body
         .find(marker)
         .expect("history row should include a copyable session id")

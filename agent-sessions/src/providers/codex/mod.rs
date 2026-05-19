@@ -553,7 +553,8 @@ impl ParseSelection {
             | "user_message"
             | "imageGeneration"
             | "image_generation"
-            | "image_generation_result" => self.includes_messages(),
+            | "image_generation_result"
+            | "image_generation_end" => self.includes_messages(),
             "token_count" => self.includes_usage(),
             "exec_command_end"
             | "patch_apply_end"
@@ -666,14 +667,15 @@ fn map_event_msg_data(payload: &EventMsgPayload<'_>) -> EventMsgData {
         "agent_reasoning" => EventMsgData::AgentReasoning(AgentReasoningEventMsg {
             text: opt_cow_box_str(payload.text.clone()),
         }),
-        "imageGeneration" | "image_generation" | "image_generation_result" => {
-            EventMsgData::ImageGeneration(ImageGenerationEventMsg {
-                id: opt_box_str(payload.id),
-                status: opt_raw_string_box(payload.status),
-                revised_prompt: opt_cow_box_str(payload.revised_prompt.clone()),
-                result_base64: opt_raw_string_box(payload.result),
-            })
-        }
+        "imageGeneration"
+        | "image_generation"
+        | "image_generation_result"
+        | "image_generation_end" => EventMsgData::ImageGeneration(ImageGenerationEventMsg {
+            id: opt_box_str(payload.id.or(payload.call_id)),
+            status: opt_raw_string_box(payload.status),
+            revised_prompt: opt_cow_box_str(payload.revised_prompt.clone()),
+            result_base64: opt_raw_string_box(payload.result),
+        }),
         "user_message" => EventMsgData::UserMessage(UserMessageEventMsg {
             message: opt_cow_box_str(payload.message.clone()),
             images_json: opt_raw_json_box(payload.images),

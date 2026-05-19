@@ -48,6 +48,7 @@
 | 引用 Lucarne 通知并回复 | 恢复对应 provider session，继续上下文 |
 | 直接发普通消息 | 提示先引用通知 |
 | `/status` | 查看全局或单 workspace 状态 |
+| `/new` | 引用通知时，为对应 workspace 新建 Agent 对话 |
 | `/kill all` | 终止所有 Agent 进程 |
 | `/kill <session_id:pid>` | 终止指定 Agent 进程 |
 | `/help` | 查看 WeChat 命令帮助 |

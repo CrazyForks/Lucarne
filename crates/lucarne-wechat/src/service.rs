@@ -1510,6 +1510,36 @@ where
             SlashCommand::Help => {
                 self.transport.reply(message, render_wechat_help()).await?;
             }
+            SlashCommand::New => {
+                let Some(scope) = self.slash_scope(message)? else {
+                    self.transport
+                        .reply(message, "That notification is no longer routable.")
+                        .await?;
+                    return Ok(());
+                };
+                let SlashScope::Workspace(workspace) = scope else {
+                    self.transport
+                        .reply(message, render_wechat_new_usage())
+                        .await?;
+                    return Ok(());
+                };
+                let opened = self
+                    .core
+                    .open_new_workspace_session_with_events(workspace.workspace_id.clone())
+                    .await
+                    .map_err(|err| WechatError::Core(err.to_string()))?;
+                let provider_session_id = self
+                    .core
+                    .active_provider_session_id(&opened.workspace.workspace_id)
+                    .map_err(|err| WechatError::Core(err.to_string()))?;
+                let body = render_wechat_new_session(
+                    opened.workspace.provider_id,
+                    opened.workspace.session_id.0.as_str(),
+                    &workspace,
+                );
+                let receipt = self.transport.reply(message, &body).await?;
+                self.bind_receipt(&message.user_id, receipt, &body, provider_session_id)?;
+            }
             SlashCommand::Status => {
                 let Some(scope) = self.slash_scope(message)? else {
                     self.transport
@@ -2484,6 +2514,7 @@ enum ConfigCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SlashCommand {
     Help,
+    New,
     Status,
     Kill(KillAgentTarget),
     InvalidKill,
@@ -2526,6 +2557,7 @@ fn parse_slash_command(text: &str) -> Option<SlashCommand> {
         .to_ascii_lowercase();
     match name.as_str() {
         "help" => Some(SlashCommand::Help),
+        "new" => Some(SlashCommand::New),
         "status" => Some(SlashCommand::Status),
         "kill" => {
             let args = parts.collect::<Vec<_>>().join(" ");
@@ -2576,6 +2608,21 @@ fn render_global_config(settings: &lucarne::control_plane::EffectiveSettings) ->
     )
 }
 
+fn render_wechat_new_usage() -> &'static str {
+    "Reply to an agent notification with `/new` to start a new session for that workspace."
+}
+
+fn render_wechat_new_session(
+    provider_id: &str,
+    session_ref: &str,
+    workspace: &WorkspaceBinding,
+) -> String {
+    format!(
+        "New {provider_id} session\ncwd: `{}`\nsession: `{session_ref}`\n\nReply to this message to start.",
+        workspace.project_path.display()
+    )
+}
+
 fn render_wechat_help() -> &'static str {
     "commands\n\
 /help — show this help\n\
@@ -2583,6 +2630,7 @@ fn render_wechat_help() -> &'static str {
 /config global bypass on|off — toggle global permission bypass\n\
 /config global notifications on|off — toggle global notifications\n\
 /status — show global status, or quoted workspace status\n\
+/new — start a new quoted workspace session\n\
 /kill all|<session_id:pid> — kill agent processes\n"
 }
 
@@ -3124,6 +3172,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn slash_new_with_quote_starts_new_session_and_binds_reply() {
+        let provider = Arc::new(FakeProvider::default());
+        let core = test_core(Arc::clone(&provider));
+        let opened = core
+            .open_workspace_with_events(OpenWorkspaceRequest {
+                provider_id: "codex",
+                project_path: Some("/tmp/workspace-new".into()),
+                title: "workspace-new".into(),
+            })
+            .await
+            .expect("open workspace");
+        let workspace_id = opened.workspace.workspace_id.clone();
+        let mut events = core.watch_events();
+        let transport = Arc::new(FakeTransport::default());
+        let service = WechatNotificationService::new(
+            Arc::clone(&core),
+            Arc::clone(&transport),
+            WechatServiceOptions {
+                initial_user_ids: vec!["user-1".into()],
+                ..WechatServiceOptions::default()
+            },
+        );
+
+        provider.emit_assistant("thread-1", "background complete");
+        service
+            .handle_core_event(next_timeline_event(&mut events).await)
+            .await
+            .expect("deliver notification");
+        let notification = transport.sends()[0].message_id.clone();
+
+        service
+            .handle_incoming(WechatIncoming::new(
+                "new-1",
+                "user-1",
+                "/new",
+                Some(notification),
+            ))
+            .await
+            .expect("start new session");
+
+        assert_eq!(
+            core.active_provider_session_ref(&workspace_id).unwrap(),
+            "thread-2"
+        );
+        let replies = transport.replies();
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].reply_to_message_id, "new-1");
+        assert!(replies[0].text.contains("New codex session"));
+        assert!(replies[0].text.contains("session: `thread-2`"));
+        let ack_message_id = replies[0].message_id.clone();
+        let binding = core
+            .message_session_binding("wechat", "user-1", &ack_message_id)
+            .expect("new-session acknowledgement should be bound");
+        assert_eq!(binding.provider_session_id.as_str(), "codex:thread-2");
+
+        service
+            .handle_incoming(WechatIncoming::new(
+                "user-reply-new",
+                "user-1",
+                "hello new session",
+                Some(ack_message_id),
+            ))
+            .await
+            .expect("submit reply to new session");
+        deliver_until_reply_count(&service, &mut events, &transport, 2).await;
+
+        let replies = transport.replies();
+        assert_eq!(replies.len(), 2);
+        assert_eq!(replies[1].reply_to_message_id, "user-reply-new");
+        assert!(replies[1].text.contains("reply: hello new session"));
+        assert!(replies[1].text.contains("session: `thread-2`"));
+    }
+
+    #[tokio::test]
+    async fn slash_new_without_quote_explains_reply_requirement() {
+        let provider = Arc::new(FakeProvider::default());
+        let core = test_core(provider);
+        let transport = Arc::new(FakeTransport::default());
+        let service = WechatNotificationService::new(
+            Arc::clone(&core),
+            Arc::clone(&transport),
+            WechatServiceOptions::default(),
+        );
+
+        service
+            .handle_incoming(WechatIncoming::new(
+                "new-1",
+                "user-1",
+                "/new",
+                Option::<String>::None,
+            ))
+            .await
+            .expect("handle new");
+
+        let replies = transport.replies();
+        assert_eq!(replies.len(), 1);
+        assert_eq!(
+            replies[0].text,
+            "Reply to an agent notification with `/new` to start a new session for that workspace."
+        );
+    }
+
+    #[tokio::test]
     async fn config_global_bypass_toggle_updates_shared_system_setting() {
         let provider = Arc::new(FakeProvider::default());
         let core = test_core(provider);
@@ -3228,6 +3379,7 @@ mod tests {
         assert!(replies[0].text.contains("commands"));
         assert!(replies[0].text.contains("/config global bypass on|off"));
         assert!(replies[0].text.contains("/status"));
+        assert!(replies[0].text.contains("/new"));
         assert!(!replies[0]
             .text
             .contains("Reply to an agent notification to continue that session."));

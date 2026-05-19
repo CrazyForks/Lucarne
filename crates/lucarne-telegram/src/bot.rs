@@ -4680,13 +4680,13 @@ impl Bot {
         if offset > 0 {
             let prev = offset.saturating_sub(PANEL_LIST_LIMIT);
             nav.push(OutgoingButton {
-                label: "◀ prev".into(),
+                label: "<".into(),
                 data: format!("hist_page:{}:{prev}", panel_revision.get()),
             });
         }
         if page_end < total {
             nav.push(OutgoingButton {
-                label: "next ▶".into(),
+                label: ">".into(),
                 data: format!(
                     "hist_page:{}:{}",
                     panel_revision.get(),
@@ -5594,7 +5594,7 @@ fn render_observed_sessions_body(body: &mut String, sessions: &[ObservedAgentSes
                 compact_path(&path.display().to_string(), 48)
             ));
         }
-        body.push_str(&format!("     🆔 `{}`\n", session.native_resume_ref));
+        body.push_str(&format!("      `{}`\n", session.native_resume_ref));
         body.push('\n');
     }
 }
@@ -5834,7 +5834,7 @@ fn render_sessions_body(
             "•".into()
         };
         body.push_str(&format!(
-            "{}  {} · {}\n     💬 {}\n     📁 {}\n     🆔 `{}`\n",
+            "{}  {} · {}\n     💬 {}\n     📁 {}\n      `{}`\n",
             command,
             entry.provider_id,
             relative_time(entry.last_active_unix, &entry.last_active_display),
@@ -15001,7 +15001,7 @@ done
                 .buttons
                 .iter()
                 .flatten()
-                .find(|button| button.label == "next ▶")
+                .find(|button| button.label == ">")
                 .expect("workspace next button")
                 .data
                 .clone()
@@ -15252,7 +15252,7 @@ done
         assert!(body.contains("…/"));
         assert!(body.contains("/opensource/conductor/lucarnex"));
         assert!(!body.contains("/Volumes/Data/noisy/prefix"));
-        assert!(body.contains("     🆔 `thread-123`\n"));
+        assert!(body.contains("      `thread-123`\n"));
         assert!(body.contains("`thread-123`\n\n/h2  codex · 1h ago\n"));
         assert!(!body.contains("```"));
         assert!(body.contains("     💬 second line\n"));
@@ -15381,7 +15381,7 @@ done
         assert!(body.contains("recent observed"));
         assert!(body.contains("• fix checkout bug — codex · 1m ago\n"));
         assert!(body.contains("     📁 …/opensource/conductor/lucarnex\n"));
-        assert!(body.contains("     🆔 `observed-thread`\n"));
+        assert!(body.contains("      `observed-thread`\n"));
         assert!(!body.contains("/o1"));
     }
 

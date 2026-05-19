@@ -1289,14 +1289,15 @@ impl PiRpc {
 
             "tool_execution_end" => {
                 let tool_call_id = env.tool_call_id.as_deref().unwrap_or("");
-                let text = decode_pi_string(env.result.as_ref());
+                let text = decode_pi_tool_result_text(env.result.as_ref());
                 let mut evs = Vec::new();
                 self.flush_thinking_delta_buffer(&mut evs);
                 let mut result = ToolResult {
                     output: text.clone(),
                     ..Default::default()
                 };
-                if env.is_error.unwrap_or(false) {
+                let is_error = env.is_error.unwrap_or(false);
+                if is_error {
                     result.error = text;
                     result.output = String::new();
                 }
@@ -1305,6 +1306,12 @@ impl PiRpc {
                     tool_call_id,
                     result,
                 )));
+                if !is_error {
+                    evs.extend(decode_pi_image_attachments(
+                        tool_call_id,
+                        env.result.as_ref(),
+                    ));
+                }
                 evs
             }
 
@@ -1514,6 +1521,172 @@ fn decode_pi_tool_results(raw: Option<&Value>) -> Vec<Event> {
         out.push(tl(event::new_timeline_tool_result("", id, result)));
     }
     out
+}
+
+fn decode_pi_tool_result_text(raw: Option<&Value>) -> String {
+    let Some(value) = raw else {
+        return String::new();
+    };
+    if let Some(content) = value.get("content") {
+        return decode_pi_tool_content_text(content);
+    }
+    decode_pi_string(raw)
+}
+
+fn decode_pi_tool_content_text(value: &Value) -> String {
+    if let Some(text) = value.as_str() {
+        return text.to_string();
+    }
+    if let Some(items) = value.as_array() {
+        let mut out = String::new();
+        for item in items {
+            let text = decode_pi_tool_content_text(item);
+            if !text.is_empty() {
+                out.push_str(&text);
+            }
+        }
+        return out;
+    }
+    if let Some(obj) = value.as_object() {
+        if obj.get("type").and_then(Value::as_str) == Some("image") {
+            return String::new();
+        }
+        for key in ["text", "content", "output"] {
+            if let Some(child) = obj.get(key) {
+                let text = decode_pi_tool_content_text(child);
+                if !text.is_empty() {
+                    return text;
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+fn decode_pi_image_attachments(tool_call_id: &str, raw: Option<&Value>) -> Vec<Event> {
+    let Some(value) = raw else {
+        return Vec::new();
+    };
+    let details = value.get("details");
+    let Some(content) = value.get("content") else {
+        return Vec::new();
+    };
+    let Some(items) = content.as_array() else {
+        return Vec::new();
+    };
+    let image_items = items
+        .iter()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("image"))
+        .collect::<Vec<_>>();
+    if image_items.is_empty() {
+        return Vec::new();
+    }
+
+    let image_count = image_items.len();
+    image_items
+        .into_iter()
+        .enumerate()
+        .filter_map(|(idx, item)| {
+            let data = item.get("data").and_then(Value::as_str)?.trim();
+            if data.is_empty() {
+                return None;
+            }
+            let media_type = item
+                .get("mimeType")
+                .or_else(|| item.get("mediaType"))
+                .or_else(|| item.get("media_type"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .unwrap_or("image/png");
+            let id = pi_image_attachment_id(details, tool_call_id, idx, image_count);
+            let filename = pi_image_attachment_filename(details, &id, media_type);
+            let data_base64 = strip_data_url_prefix(data);
+            Some(Event::new(Payload::Attachment(event::Attachment {
+                id: SmolStr::from(id),
+                filename: SmolStr::from(filename),
+                media_type: SmolStr::from(media_type),
+                data_base64: data_base64.to_string(),
+                caption: None,
+            })))
+        })
+        .collect()
+}
+
+fn pi_image_attachment_id(
+    details: Option<&Value>,
+    tool_call_id: &str,
+    idx: usize,
+    image_count: usize,
+) -> String {
+    let base = details
+        .and_then(|details| {
+            details
+                .get("imageGenerationId")
+                .or_else(|| details.get("image_generation_id"))
+                .and_then(Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            details
+                .and_then(|details| {
+                    details
+                        .get("savedPath")
+                        .or_else(|| details.get("saved_path"))
+                })
+                .and_then(Value::as_str)
+                .and_then(|path| Path::new(path).file_stem())
+                .and_then(|stem| stem.to_str())
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(ToString::to_string)
+        })
+        .or_else(|| {
+            let tool_call_id = tool_call_id.trim();
+            (!tool_call_id.is_empty()).then(|| format!("{tool_call_id}-image"))
+        })
+        .unwrap_or_else(|| "image".to_string());
+
+    if image_count > 1 {
+        format!("{base}-{idx}")
+    } else {
+        base
+    }
+}
+
+fn pi_image_attachment_filename(details: Option<&Value>, id: &str, media_type: &str) -> String {
+    if let Some(filename) = details
+        .and_then(|details| {
+            details
+                .get("savedPath")
+                .or_else(|| details.get("saved_path"))
+        })
+        .and_then(Value::as_str)
+        .and_then(|path| Path::new(path).file_name())
+        .and_then(|name| name.to_str())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        return filename.to_string();
+    }
+
+    let ext = media_extension(media_type);
+    format!("pi-image-{id}.{ext}")
+}
+
+fn media_extension(media_type: &str) -> &'static str {
+    match media_type.trim().to_ascii_lowercase().as_str() {
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => "png",
+    }
+}
+
+fn strip_data_url_prefix(data: &str) -> &str {
+    data.split_once(",").map_or(data, |(_, payload)| payload)
 }
 
 fn decode_pi_content(raw: Option<&Value>) -> String {
@@ -2330,6 +2503,59 @@ mod tests {
         let evs2 = d.translate(&serde_json::to_vec(&end).unwrap());
         assert_eq!(evs2.len(), 1);
         assert_eq!(evs2[0].kind(), Kind::Timeline);
+    }
+
+    #[test]
+    fn tool_execution_end_with_image_content_emits_attachment() {
+        let mut d = setup();
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ";
+        let end = json!({
+            "type": "tool_execution_end",
+            "toolCallId": "call_img",
+            "toolName": "codex_generate_image",
+            "result": {
+                "content": [
+                    {"type": "text", "text": "Saved image to: /tmp/ig_abc.png"},
+                    {"type": "image", "data": png, "mimeType": "image/png"}
+                ],
+                "details": {
+                    "imageGenerationId": "ig_abc",
+                    "savedPath": "/tmp/ig_abc.png",
+                    "outputFormat": "png"
+                }
+            },
+            "isError": false
+        });
+
+        let evs = d.translate(&serde_json::to_vec(&end).unwrap());
+
+        let tool_output = evs
+            .iter()
+            .find_map(|ev| match &ev.payload {
+                Payload::Timeline(timeline) => timeline
+                    .item
+                    .tool_result
+                    .as_ref()
+                    .map(|result| result.result.output.as_str()),
+                _ => None,
+            })
+            .expect("tool result text");
+        assert!(tool_output.contains("Saved image to"));
+        assert!(!tool_output.contains(png));
+        assert!(!tool_output.contains("\"type\":\"image\""));
+
+        let attachment = evs
+            .iter()
+            .find_map(|ev| match &ev.payload {
+                Payload::Attachment(attachment) => Some(attachment),
+                _ => None,
+            })
+            .expect("image attachment");
+        assert_eq!(attachment.id.as_str(), "ig_abc");
+        assert_eq!(attachment.filename.as_str(), "ig_abc.png");
+        assert_eq!(attachment.media_type.as_str(), "image/png");
+        assert_eq!(attachment.data_base64, png);
+        assert_eq!(attachment.caption, None);
     }
 
     #[test]

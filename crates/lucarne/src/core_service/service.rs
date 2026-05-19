@@ -1000,6 +1000,42 @@ impl LucarneCore {
             .await
     }
 
+    pub async fn open_new_workspace_session_with_events(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<OpenedCoreSession, CoreError> {
+        let (provider_id, project_path, title) = {
+            let state = self.state.read().expect("control plane lock");
+            let workspace = state
+                .get_workspace(&workspace_id)
+                .ok_or_else(|| CoreError::invalid_state("workspace not found"))?;
+            (
+                self.provider_id_static(workspace.provider_id.as_str())?,
+                workspace.project_path.clone(),
+                workspace.title.to_string(),
+            )
+        };
+        let live_instance_id = self
+            .live_sessions
+            .read()
+            .expect("live session registry lock")
+            .get(&workspace_id)
+            .map(|session| live_instance_id(session.instance_id().0.as_str()));
+        if let Some(live_instance_id) = live_instance_id {
+            self.detach_live_session(&workspace_id, &live_instance_id, "new session requested")
+                .await?;
+        }
+        self.open_workspace_binding_with_events(
+            workspace_id,
+            OpenWorkspaceRequest {
+                provider_id,
+                project_path: Some(project_path),
+                title,
+            },
+        )
+        .await
+    }
+
     pub fn upsert_workspace_binding(
         &self,
         workspace_id: WorkspaceId,
