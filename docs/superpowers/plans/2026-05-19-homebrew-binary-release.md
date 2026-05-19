@@ -276,10 +276,6 @@ def formula_text(version: str, arm64_sha: str, x86_64_sha: str) -> str:
     if build.head?
       ENV["OPENSSL_DIR"] = Formula["openssl@3"].opt_prefix
 
-      # Release builds should consume the published wechat-ilink crate instead of
-      # the repository-local development patch path.
-      inreplace "Cargo.toml", %r{{^\[patch\.crates-io\]\nwechat-ilink = \{{ path = "\.\./wechat-ilink" \}}\n}}m, ""
-
       system "cargo", "install", "--path", "crates/lucarned", "--root", prefix, "--no-track"
     else
       bin.install "bin/lucarned"
@@ -491,20 +487,11 @@ PY
           set -euo pipefail
           rustup toolchain install nightly --profile minimal
 
-      - name: Prepare release workspace
+      - name: Resolve latest wechat-ilink
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-from pathlib import Path
-path = Path('Cargo.toml')
-text = path.read_text()
-patch = '[patch.crates-io]\nwechat-ilink = { path = "../wechat-ilink" }\n'
-if patch not in text:
-    raise SystemExit('expected wechat-ilink patch block not found')
-path.write_text(text.replace(patch, ''))
-PY
-          cargo +nightly update -Zbuild-dir-new-layout -p wechat-ilink --precise 0.5.0
+          cargo +nightly update -Zbuild-dir-new-layout -p wechat-ilink
 
       - name: Build lucarned
         shell: bash
@@ -950,7 +937,7 @@ prints download/install output for release tarball and does not run `cargo insta
   - Formula architecture selection: Task 2 generated formula with `on_arm` and `on_intel`.
   - No Rust build on stable install: Task 3 formula deps check and Task 5 final install check.
   - HEAD source install retained: Task 2 generated `head do` and `if build.head?`.
-  - `wechat-ilink` patch removal in CI: Task 3 `Prepare release workspace`.
+  - `wechat-ilink` crates.io resolution in CI: Task 3 `Resolve latest wechat-ilink` uses `wechat-ilink = "0"` and `cargo update -p wechat-ilink` to resolve latest 0.x.
   - Dynamic library check: Task 3 `otool -L` step.
   - Formula tests on both architectures: Task 3 `formula-test` matrix.
 - Red-flag scan: plan has concrete commands, exact file paths, and exact script/workflow content.

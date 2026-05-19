@@ -78,20 +78,11 @@ jobs:
       - name: Install Rust nightly
         run: rustup toolchain install nightly --profile minimal
 
-      - name: Prepare release workspace
+      - name: Resolve latest wechat-ilink
+        shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path("Cargo.toml")
-          text = path.read_text(encoding="utf-8")
-          patch = '[patch.crates-io]\nwechat-ilink = { path = "../wechat-ilink" }\n'
-          if patch not in text:
-              raise SystemExit("expected wechat-ilink path patch block not found in Cargo.toml")
-          path.write_text(text.replace(patch, "", 1), encoding="utf-8")
-          PY
-          cargo +nightly update -Zbuild-dir-new-layout -p wechat-ilink --precise 0.5.0
+          cargo +nightly update -Zbuild-dir-new-layout -p wechat-ilink
 
       - name: Build lucarned
         run: cargo +nightly build --release -Zbuild-dir-new-layout --locked -p lucarned

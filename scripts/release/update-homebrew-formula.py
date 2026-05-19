@@ -42,10 +42,6 @@ FORMULA_TEMPLATE = r'''class Lucarned < Formula
     if build.head?
       ENV["OPENSSL_DIR"] = Formula["openssl@3"].opt_prefix
 
-      # Release builds should consume the published wechat-ilink crate instead of
-      # the repository-local development patch path.
-      inreplace "Cargo.toml", %r{^\[patch\.crates-io\]\nwechat-ilink = \{ path = "\.\./wechat-ilink" \}\n}m, ""
-
       system "cargo", "install", "--path", "crates/lucarned", "--root", prefix, "--no-track"
     else
       bin.install "bin/lucarned"

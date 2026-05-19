@@ -84,22 +84,11 @@ cargo +nightly build --release -Zbuild-dir-new-layout -p lucarned
 
 The workflow validates that the tag version matches `workspace.package.version` in `Cargo.toml`. For example, tag `v0.1.0` must match workspace version `0.1.0`.
 
-## Release workspace preparation
+## Release dependency resolution
 
-The repository currently commits a local development patch:
+The repository uses the crates.io dependency range `wechat-ilink = "0"` in `crates/lucarne-wechat/Cargo.toml`. Release CI runs `cargo +nightly update -Zbuild-dir-new-layout -p wechat-ilink` before the locked build so Cargo resolves the latest compatible 0.x crate from crates.io.
 
-```toml
-[patch.crates-io]
-wechat-ilink = { path = "../wechat-ilink" }
-```
-
-That path is not available in GitHub Actions release runners. The release workflow builds from a prepared copy of the checkout:
-
-1. Remove the repo-local `wechat-ilink` patch from `Cargo.toml` in the CI workspace only.
-2. Regenerate the lock entry for the published `wechat-ilink` crate version used by the workspace.
-3. Build `lucarned` from that prepared workspace.
-
-This mirrors the current formula's source-build `inreplace`, but moves it into CI. The committed source layout can remain unchanged for this binary-release work.
+This avoids repo-local path patches in release checkouts and keeps the binary build reproducible through the refreshed `Cargo.lock`.
 
 ## Formula design
 
@@ -155,7 +144,7 @@ If branch protection blocks direct push, the same workflow creates a pull reques
 ```text
 tag vX.Y.Z
   -> release workflow
-  -> sanitize CI workspace patch config
+  -> resolve latest crates.io wechat-ilink 0.x
   -> build arm64 on macos-14-arm64
   -> build x86_64 on macos-15-intel
   -> package tarballs
@@ -170,7 +159,7 @@ tag vX.Y.Z
 CI fails before publishing formula updates when:
 
 - Tag version and Cargo workspace version differ.
-- CI cannot resolve the published `wechat-ilink` crate after removing the local patch.
+- CI cannot resolve the latest compatible crates.io `wechat-ilink` crate from `wechat-ilink = "0"`.
 - Cargo build fails.
 - `lucarned --version` or a smoke command fails.
 - Tarball layout does not contain `bin/lucarned`.
@@ -219,4 +208,4 @@ Full release verification happens in GitHub Actions because both macOS architect
 - Add Linux tarballs and Homebrew-on-Linux formula branches.
 - Add signed checksums.
 - Add release notes generation.
-- Move local `wechat-ilink` development patch out of committed `Cargo.toml` so release workflows no longer need CI-only sanitization.
+- Keep local `wechat-ilink` development overrides outside committed `Cargo.toml`; release workflows use crates.io `wechat-ilink = "0"` plus `cargo update -p wechat-ilink`.

@@ -9,7 +9,7 @@ description = "WeChat notification channel implementation for lucarne."
 lucarne = { path = "../lucarne" }
 lucarne-adapter = { path = "../lucarne-adapter" }
 lucarne-channel = { path = "../lucarne-channel" }
-wechat-ilink = "0.5"
+wechat-ilink = "0"
 
 async-trait = { workspace = true }
 base64 = "0.22"
