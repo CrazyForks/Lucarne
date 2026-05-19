@@ -1226,8 +1226,7 @@ impl Codex {
                 }
             ));
         }
-        self.thread_id = Some(tid.clone());
-        self.thread_ready = true;
+        self.set_active_thread(tid.clone());
         if let Some(model) = string_at(result, &["model"]) {
             self.cfg.model = model.to_string();
         }
@@ -1262,8 +1261,7 @@ impl Codex {
                 code: String::new(),
             }))];
         }
-        self.thread_id = Some(tid.clone());
-        self.thread_ready = true;
+        self.set_active_thread(tid.clone());
         vec![
             Event::new(Payload::SessionStarted(SessionStarted {
                 session_id: tid.clone(),
@@ -1630,6 +1628,9 @@ impl Codex {
             "item/started" => self.handle_item_started(params),
             "item/completed" => self.handle_item_completed(params),
             "thread/tokenUsage/updated" => {
+                if self.is_foreign_thread(params) {
+                    return Vec::new();
+                }
                 let token_usage = params.get("tokenUsage").cloned().unwrap_or(Value::Null);
                 if !token_usage.is_null() {
                     self.latest_token_usage = Some(token_usage.clone());
@@ -1651,8 +1652,7 @@ impl Codex {
             return Vec::new();
         }
         let is_new_thread = self.thread_id.as_deref() != Some(tid.as_str());
-        self.thread_id = Some(tid.clone());
-        self.thread_ready = true;
+        self.set_active_thread(tid.clone());
         self.flush_pending_prompts();
         if is_new_thread {
             vec![Event::new(Payload::SessionStarted(SessionStarted {
@@ -2092,6 +2092,20 @@ impl Codex {
             return false;
         }
         self.thread_id.as_deref().is_some_and(|cur| cur != tid)
+    }
+
+    fn set_active_thread(&mut self, tid: String) {
+        if self.thread_id.as_deref() != Some(tid.as_str()) {
+            self.clear_thread_scoped_status_cache();
+        }
+        self.thread_id = Some(tid);
+        self.thread_ready = true;
+    }
+
+    fn clear_thread_scoped_status_cache(&mut self) {
+        self.latest_usage = None;
+        self.latest_token_usage = None;
+        self.pending_status = None;
     }
 
     fn seen_completed_turn(&mut self, turn_id: &str) -> bool {
@@ -4810,6 +4824,122 @@ mod tests {
         dialect.thread_id = Some("thread-live".into());
         dialect.thread_ready = true;
         dialect
+    }
+
+    #[test]
+    fn codex_new_thread_status_does_not_reuse_previous_thread_usage() {
+        let mut dialect = Codex::new();
+        dialect.init(&cfg(PermissionMode::Default));
+        dialect.thread_id = Some("thread-old".into());
+        dialect.thread_ready = true;
+
+        let old_usage_frame = br#"{"method":"thread/tokenUsage/updated","params":{"threadId":"thread-old","tokenUsage":{"total":{"totalTokens":107,"inputTokens":100,"outputTokens":7},"last":{"totalTokens":77},"modelContextWindow":200}}}"#;
+        let old_usage_events = dialect.translate(old_usage_frame);
+        assert!(
+            old_usage_events
+                .iter()
+                .any(|event| matches!(event.payload, Payload::UsageDelta(_))),
+            "old thread usage should be accepted before /new"
+        );
+
+        let CommandDispatch::Deferred(new_frames) = dialect
+            .handle_system_command(&AgentCommandInvocation {
+                name: "new".into(),
+                args: None,
+                values: Value::Null,
+                source: AgentCommandSource::AdapterMapped,
+            })
+            .expect("new dispatch")
+        else {
+            panic!("expected deferred /new dispatch");
+        };
+        let new_request = rpc_request_value(&new_frames[0]);
+        assert_eq!(new_request["method"], json!("thread/start"));
+        let new_events = dialect.translate(&rpc_success_response(
+            &new_request["id"],
+            json!({
+                "thread": {
+                    "id": "thread-new",
+                    "cwd": "/tmp/codex-runtime",
+                    "cliVersion": "0.130.0",
+                    "turns": []
+                },
+                "model": "gpt-5.5",
+                "reasoningEffort": "xhigh"
+            }),
+        ));
+        assert!(new_events.iter().any(|event| {
+            matches!(
+                &event.payload,
+                Payload::SessionStarted(started) if started.session_id == "thread-new"
+            )
+        }));
+
+        let delayed_old_usage_events = dialect.translate(old_usage_frame);
+        assert!(
+            delayed_old_usage_events.is_empty(),
+            "delayed old-thread usage must not affect the active new thread: {delayed_old_usage_events:?}"
+        );
+
+        let CommandDispatch::Deferred(status_frames) = dialect
+            .handle_system_command(&AgentCommandInvocation {
+                name: "status".into(),
+                args: None,
+                values: Value::Null,
+                source: AgentCommandSource::AdapterMapped,
+            })
+            .expect("status dispatch")
+        else {
+            panic!("expected deferred /status dispatch");
+        };
+        let status_request = rpc_request_value(&status_frames[0]);
+        assert_eq!(status_request["method"], json!("thread/read"));
+        assert_eq!(status_request["params"]["threadId"], json!("thread-new"));
+
+        let status_read_events = dialect.translate(&rpc_success_response(
+            &status_request["id"],
+            json!({
+                "thread": {
+                    "id": "thread-new",
+                    "cwd": "/tmp/codex-runtime",
+                    "cliVersion": "0.130.0",
+                    "turns": []
+                }
+            }),
+        ));
+        assert!(status_read_events.is_empty());
+
+        let config_frames = dialect.drain_out_frames();
+        let config_request = rpc_request_value(&config_frames[0]);
+        assert_eq!(config_request["method"], json!("config/read"));
+        let status_events = dialect.translate(&rpc_success_response(
+            &config_request["id"],
+            json!({
+                "config": {
+                    "model": "gpt-5.5",
+                    "model_reasoning_effort": "xhigh"
+                }
+            }),
+        ));
+        let status = status_events
+            .iter()
+            .find_map(|event| match &event.payload {
+                Payload::CommandResult(result) => match &result.result {
+                    CommandResultData::Status(status) => Some(status),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("status command result");
+        assert_eq!(status.session_id.as_deref(), Some("thread-new"));
+        assert!(
+            status.tokens.is_none(),
+            "new empty thread must not inherit old token usage: {status:?}"
+        );
+        assert!(
+            status.context.is_none(),
+            "new empty thread must not inherit old context usage: {status:?}"
+        );
     }
 
     #[test]
