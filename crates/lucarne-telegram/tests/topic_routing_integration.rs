@@ -24,9 +24,9 @@ use lucarne::{
         AgentModelCatalog, AgentModelOption, AgentModelSelection, AgentPermissionCatalog,
         AgentPermissionOption, AgentPermissionSelection, AgentProvider, AgentReasoningOption,
         AgentSession, AgentSkillCatalog, AgentSkillSummary, AgentStatus, ApprovalDecision,
-        ApprovalRequest, CallId, Event, InstanceId, InterventionResponse, MessageEvent,
-        MessageRole, OpenSession, ProbeResult, ProviderId, ReasoningEvent, ResumeSession,
-        SessionId, SessionRef, ToolCallEvent, ToolResultEvent,
+        ApprovalRequest, Attachment as AgentAttachment, CallId, Event, InstanceId,
+        InterventionResponse, MessageEvent, MessageRole, OpenSession, ProbeResult, ProviderId,
+        ReasoningEvent, ResumeSession, SessionId, SessionRef, ToolCallEvent, ToolResultEvent,
     },
     control_plane::{
         ChannelBinding, ChannelBindingId, ControlPlaneSqliteStore, ProviderSessionId,
@@ -35,9 +35,9 @@ use lucarne::{
     core_service::{LucarneCore, OpenWorkspaceRequest, ResumeWorkspaceRequest, SubmitTurnRequest},
 };
 use lucarne_channel::{
-    agent_message::compact_path, Channel, ChannelError, ChannelEvent, ChatId, CommandQuery,
-    CommandQueryResult, FileUpload, IncomingAttachment, IncomingMessage, MessageId,
-    OutgoingMessage, Result, TextFormat, WorkspaceHandle, WorkspaceId,
+    agent_message::compact_path, Attachment as ChannelAttachment, Channel, ChannelError,
+    ChannelEvent, ChatId, CommandQuery, CommandQueryResult, FileUpload, IncomingAttachment,
+    IncomingMessage, MessageId, OutgoingMessage, Result, TextFormat, WorkspaceHandle, WorkspaceId,
 };
 use lucarne_telegram::state::WorkSession;
 use lucarne_telegram::{bot::Bot, state::BotState};
@@ -760,6 +760,188 @@ async fn journey_07_send_prompt_renders_reasoning_tool_calls_without_footer() {
         .await
         .expect("prompt journey run should stop")
         .expect("prompt journey task should not panic");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn process_draft_is_visible_omitted_then_deleted_after_turn_completion() {
+    let _test_lock = test_lock();
+    let provider = Arc::new(ProviderProbe::with_pending_submit_events(Vec::new()));
+    let core = core_with_provider(Arc::clone(&provider));
+    bind_workspace_with_project_path(&core, "workspace-a", "9", "thread-1", "/tmp/project-a");
+
+    let channel = Arc::new(RecordingChannel::streaming());
+    let bot = bot_with_state(Arc::clone(&channel), Arc::clone(&core));
+    let run = tokio::spawn(Arc::clone(&bot).run());
+    channel.push_event(ChannelEvent::Message(topic_message(
+        "9",
+        "m-prompt",
+        "show progress",
+    )));
+
+    wait_until(|| provider.submit_calls() == vec![("thread-1".into(), "show progress".into())])
+        .await;
+    let long_reasoning = format!("{}LATEST_PROCESS_TAIL", "old process detail ".repeat(160));
+    provider
+        .emit_to_session(
+            "thread-1",
+            Event::Reasoning(ReasoningEvent {
+                text: long_reasoning.into(),
+            }),
+        )
+        .await;
+
+    assert!(
+        eventually(|| {
+            topic_messages(&channel, "9").iter().any(|sent| {
+                sent.message.body.contains("earlier updates omitted")
+                    && sent.message.body.contains("LATEST_PROCESS_TAIL")
+                    && !sent
+                        .message
+                        .body
+                        .starts_with("old process detail old process detail")
+            })
+        })
+        .await,
+        "process draft should be visible with old content omitted; sent={:?}; edits={:?}",
+        channel.sent_messages(),
+        channel.edited_messages()
+    );
+    let process_message_id = topic_messages(&channel, "9")
+        .into_iter()
+        .find(|sent| sent.message.body.contains("LATEST_PROCESS_TAIL"))
+        .expect("process draft message")
+        .id;
+
+    provider
+        .emit_to_session(
+            "thread-1",
+            Event::TurnCompleted(lucarne::agent_runtime::events::TurnCompletedEvent {
+                turn_id: "turn-1".into(),
+                usage: None,
+            }),
+        )
+        .await;
+
+    assert!(
+        eventually(|| {
+            channel
+                .deleted_messages()
+                .iter()
+                .any(|id| id == &process_message_id)
+        })
+        .await,
+        "process draft should be deleted after turn completion; process_message_id={process_message_id}; sent={:?}; edits={:?}; deleted={:?}",
+        channel.sent_messages(),
+        channel.edited_messages(),
+        channel.deleted_messages()
+    );
+    assert!(
+        active_topic_messages(&channel, "9")
+            .iter()
+            .all(|sent| !sent.message.body.contains("LATEST_PROCESS_TAIL")),
+        "completed turn must delete process draft: sent={:?} edits={:?} deleted={:?}",
+        channel.sent_messages(),
+        channel.edited_messages(),
+        channel.deleted_messages()
+    );
+    assert!(
+        active_topic_messages(&channel, "9")
+            .iter()
+            .any(|sent| sent.message.body.contains("✓ 完成")),
+        "completion status should remain visible"
+    );
+
+    channel.close_events();
+    timeout(Duration::from_secs(2), run)
+        .await
+        .expect("process cleanup run should stop")
+        .expect("process cleanup task should not panic");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn image_attachment_long_caption_is_split_at_telegram_delivery() {
+    use base64::Engine as _;
+
+    let _test_lock = test_lock();
+    let provider = Arc::new(ProviderProbe::with_pending_submit_events(Vec::new()));
+    let core = core_with_provider(Arc::clone(&provider));
+    bind_workspace_with_project_path(&core, "workspace-a", "9", "thread-1", "/tmp/project-a");
+
+    let channel = Arc::new(RecordingChannel::streaming());
+    let bot = bot_with_state(Arc::clone(&channel), Arc::clone(&core));
+    let run = tokio::spawn(Arc::clone(&bot).run());
+    channel.push_event(ChannelEvent::Message(topic_message(
+        "9",
+        "m-prompt",
+        "generate image",
+    )));
+
+    wait_until(|| provider.submit_calls() == vec![("thread-1".into(), "generate image".into())])
+        .await;
+    let caption = format!("{}OVERFLOW_TAIL", "x".repeat(900));
+    provider
+        .emit_to_session(
+            "thread-1",
+            Event::Attachment(AgentAttachment {
+                id: "ig_long".into(),
+                filename: "codex-image-ig_long.png".into(),
+                media_type: "image/png".into(),
+                data_base64: base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3]),
+                caption: Some(caption.into()),
+            }),
+        )
+        .await;
+    provider
+        .emit_to_session(
+            "thread-1",
+            Event::TurnCompleted(lucarne::agent_runtime::events::TurnCompletedEvent {
+                turn_id: "turn-1".into(),
+                usage: None,
+            }),
+        )
+        .await;
+
+    assert!(
+        eventually(|| {
+            channel.sent_attachments().len() == 1
+                && topic_messages(&channel, "9")
+                    .iter()
+                    .any(|sent| sent.message.body == "OVERFLOW_TAIL")
+        })
+        .await,
+        "long caption should produce one attachment and one overflow message; attachments={:?}; sent={:?}",
+        channel.sent_attachments(),
+        channel.sent_messages()
+    );
+    let attachment = channel
+        .sent_attachments()
+        .into_iter()
+        .next()
+        .expect("sent attachment");
+    assert_eq!(attachment.chat, "100");
+    assert_eq!(attachment.topic, "9");
+    let attached_caption = attachment
+        .attachment
+        .caption
+        .as_deref()
+        .expect("attachment caption");
+    assert_eq!(attached_caption.chars().count(), 900);
+    assert!(attached_caption.chars().all(|ch| ch == 'x'));
+    let overflow = topic_messages(&channel, "9")
+        .into_iter()
+        .find(|sent| sent.message.body == "OVERFLOW_TAIL")
+        .expect("overflow message");
+    assert_eq!(overflow.message.format, TextFormat::Plain);
+    assert_eq!(
+        overflow.message.reply_to,
+        Some(MessageId::new(attachment.id))
+    );
+
+    channel.close_events();
+    timeout(Duration::from_secs(2), run)
+        .await
+        .expect("image caption split run should stop")
+        .expect("image caption split task should not panic");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -5724,12 +5906,21 @@ struct SentMessage {
     message: OutgoingMessage,
 }
 
+#[derive(Clone, Debug)]
+struct SentAttachment {
+    id: String,
+    chat: String,
+    topic: String,
+    attachment: ChannelAttachment,
+}
+
 struct RecordingChannel {
     events: StdMutex<Option<Vec<ChannelEvent>>>,
     event_gap: Duration,
     live_tx: StdMutex<Option<mpsc::UnboundedSender<ChannelEvent>>>,
     live_rx: StdMutex<Option<mpsc::UnboundedReceiver<ChannelEvent>>>,
     sent: StdMutex<Vec<SentMessage>>,
+    attachments: StdMutex<Vec<SentAttachment>>,
     edits: StdMutex<Vec<SentMessage>>,
     deleted: StdMutex<Vec<String>>,
     deleted_workspaces: StdMutex<Vec<String>>,
@@ -5756,6 +5947,7 @@ impl RecordingChannel {
             live_tx: StdMutex::new(None),
             live_rx: StdMutex::new(None),
             sent: StdMutex::new(Vec::new()),
+            attachments: StdMutex::new(Vec::new()),
             edits: StdMutex::new(Vec::new()),
             deleted: StdMutex::new(Vec::new()),
             deleted_workspaces: StdMutex::new(Vec::new()),
@@ -5795,6 +5987,7 @@ impl RecordingChannel {
             live_tx: StdMutex::new(Some(tx)),
             live_rx: StdMutex::new(Some(rx)),
             sent: StdMutex::new(Vec::new()),
+            attachments: StdMutex::new(Vec::new()),
             edits: StdMutex::new(Vec::new()),
             deleted: StdMutex::new(Vec::new()),
             deleted_workspaces: StdMutex::new(Vec::new()),
@@ -5833,6 +6026,10 @@ impl RecordingChannel {
 
     fn sent_messages(&self) -> Vec<SentMessage> {
         self.sent.lock().unwrap().clone()
+    }
+
+    fn sent_attachments(&self) -> Vec<SentAttachment> {
+        self.attachments.lock().unwrap().clone()
     }
 
     fn edited_messages(&self) -> Vec<SentMessage> {
@@ -5904,6 +6101,22 @@ impl Channel for RecordingChannel {
             chat: target.chat.as_str().to_string(),
             topic: target.workspace.as_str().to_string(),
             message: msg,
+        });
+        Ok(message_id)
+    }
+
+    async fn send_attachment(
+        &self,
+        target: &WorkspaceHandle,
+        attachment: ChannelAttachment,
+    ) -> Result<MessageId> {
+        let id = self.next_message_id.fetch_add(1, Ordering::SeqCst);
+        let message_id = MessageId::new(format!("attachment-{id}"));
+        self.attachments.lock().unwrap().push(SentAttachment {
+            id: message_id.as_str().to_string(),
+            chat: target.chat.as_str().to_string(),
+            topic: target.workspace.as_str().to_string(),
+            attachment,
         });
         Ok(message_id)
     }

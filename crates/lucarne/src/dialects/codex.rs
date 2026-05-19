@@ -1874,19 +1874,15 @@ impl Codex {
             return Vec::new();
         }
         let short_id = if id.trim().is_empty() { "image" } else { id };
-        let caption = item
-            .get("revisedPrompt")
-            .or_else(|| item.get("revised_prompt"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|text| !text.is_empty() && text.chars().count() <= 256)
-            .map(SmolStr::from);
+        // Codex `revisedPrompt` / `revised_prompt` is image-model prompt
+        // metadata, not user-facing caption text. Keep it hidden here; channel
+        // layers may split true captions when providers expose one.
         vec![Event::new(Payload::Attachment(event::Attachment {
             id: SmolStr::from(short_id),
             filename: SmolStr::from(format!("codex-image-{short_id}.png")),
             media_type: SmolStr::from("image/png"),
             data_base64: result.to_string(),
-            caption,
+            caption: None,
         }))]
     }
 
@@ -4943,7 +4939,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_image_generation_completed_emits_attachment() {
+    fn codex_image_generation_completed_emits_attachment_without_prompt_caption() {
         use base64::Engine as _;
 
         let mut dialect = Codex::new();
@@ -4966,7 +4962,7 @@ mod tests {
         assert_eq!(attachment.filename.as_str(), "codex-image-ig_abc123.png");
         assert_eq!(attachment.media_type.as_str(), "image/png");
         assert_eq!(attachment.data_base64, png);
-        assert_eq!(attachment.caption.as_deref(), Some("short caption"));
+        assert_eq!(attachment.caption, None);
     }
 
     #[test]

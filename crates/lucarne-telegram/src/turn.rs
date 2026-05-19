@@ -35,7 +35,7 @@ use lucarne::event::CommandResultData;
 use lucarne_channel::{
     agent_message::{format_cost_duration, AgentMessageFooter},
     robust::retry_attachment_delivery,
-    robust::send_with_fallback,
+    robust::{send_with_fallback, send_with_fallback_all},
     types::{
         Attachment as ChannelAttachment, ChannelError, MessageId, OutgoingMessage, WorkspaceHandle,
     },
@@ -81,6 +81,9 @@ const ACTIVITY_DETAIL_MAX: usize = 80;
 const EVENT_LOG_TEXT_MAX: usize = 2000;
 /// Maximum decoded bytes accepted for one agent attachment.
 const MAX_ATTACHMENT_BYTES: usize = 8 * 1024 * 1024;
+/// Telegram attachment captions are capped by platform policy; leave headroom
+/// and send overflow as a separate message from Telegram delivery code.
+const TELEGRAM_ATTACHMENT_CAPTION_CHARS: usize = 900;
 /// Format a [`Duration`] as a compact human string: `5s`, `2m 13s`, `1h 04m`.
 pub fn format_elapsed(d: Duration) -> String {
     let secs = d.as_secs();
@@ -971,6 +974,41 @@ async fn send_channel_attachment_with_retries(
     .await
 }
 
+fn split_telegram_attachment_caption(caption: &str) -> (String, Option<String>) {
+    match caption
+        .char_indices()
+        .nth(TELEGRAM_ATTACHMENT_CAPTION_CHARS)
+        .map(|(idx, _)| idx)
+    {
+        Some(split_at) => (
+            caption[..split_at].to_string(),
+            Some(caption[split_at..].to_string()),
+        ),
+        None => (caption.to_string(), None),
+    }
+}
+
+async fn send_attachment_caption_overflow(
+    channel: &dyn Channel,
+    target: &WorkspaceHandle,
+    provider_id: &str,
+    body: String,
+    reply_to: MessageId,
+) -> Vec<MessageId> {
+    let msg = OutgoingMessage::plain(body).reply_to(reply_to);
+    match send_with_fallback_all(channel, target, msg, provider_id).await {
+        Ok(ids) => ids,
+        Err(err) => {
+            warn!(
+                target: "lucarne_telegram::turn",
+                error = %err,
+                "attachment caption overflow send failed"
+            );
+            Vec::new()
+        }
+    }
+}
+
 async fn deliver_pending_attachments(
     channel: &dyn Channel,
     target: &WorkspaceHandle,
@@ -981,33 +1019,47 @@ async fn deliver_pending_attachments(
     for pending in attachments {
         let attachment = pending.attachment;
         let reply_to = pending.reply_to;
-        let channel_attachment = match channel_attachment_from_event(&attachment, reply_to.clone())
-        {
-            Ok(channel_attachment) => channel_attachment,
-            Err(err) => {
-                warn!(
-                    target: "lucarne_telegram::turn",
-                    attachment_id = %attachment.id,
-                    error = %err,
-                    "attachment conversion failed; sending failure details"
-                );
-                if let Some(id) = send_attachment_delivery_failure(
-                    channel,
-                    target,
-                    provider_id,
-                    &attachment,
-                    reply_to,
-                    &err,
-                )
-                .await
-                {
-                    message_ids.push(id);
+        let (channel_attachment, caption_overflow) =
+            match channel_attachment_from_event(&attachment, reply_to.clone()) {
+                Ok(channel_attachment) => channel_attachment,
+                Err(err) => {
+                    warn!(
+                        target: "lucarne_telegram::turn",
+                        attachment_id = %attachment.id,
+                        error = %err,
+                        "attachment conversion failed; sending failure details"
+                    );
+                    if let Some(id) = send_attachment_delivery_failure(
+                        channel,
+                        target,
+                        provider_id,
+                        &attachment,
+                        reply_to,
+                        &err,
+                    )
+                    .await
+                    {
+                        message_ids.push(id);
+                    }
+                    continue;
                 }
-                continue;
-            }
-        };
+            };
         match send_channel_attachment_with_retries(channel, target, channel_attachment).await {
-            Ok(id) => message_ids.push(id),
+            Ok(id) => {
+                message_ids.push(id.clone());
+                if let Some(overflow) = caption_overflow {
+                    message_ids.extend(
+                        send_attachment_caption_overflow(
+                            channel,
+                            target,
+                            provider_id,
+                            overflow,
+                            id,
+                        )
+                        .await,
+                    );
+                }
+            }
             Err(err) => {
                 warn!(
                     target: "lucarne_telegram::turn",
@@ -1040,7 +1092,7 @@ async fn deliver_pending_attachments(
 fn channel_attachment_from_event(
     attachment: &AgentAttachment,
     reply_to: Option<MessageId>,
-) -> Result<ChannelAttachment, String> {
+) -> Result<(ChannelAttachment, Option<String>), String> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(attachment.data_base64.as_bytes())
         .map_err(|err| format!("attachment {} has invalid base64: {err}", attachment.id))?;
@@ -1057,13 +1109,16 @@ fn channel_attachment_from_event(
         attachment.media_type.to_string(),
         bytes,
     );
+    let mut caption_overflow = None;
     if let Some(caption) = attachment.caption.as_ref() {
-        channel_attachment = channel_attachment.with_caption(caption.to_string());
+        let (caption, overflow) = split_telegram_attachment_caption(caption.as_str());
+        channel_attachment = channel_attachment.with_caption(caption);
+        caption_overflow = overflow;
     }
     if let Some(reply_to) = reply_to {
         channel_attachment = channel_attachment.reply_to(reply_to);
     }
-    Ok(channel_attachment)
+    Ok((channel_attachment, caption_overflow))
 }
 
 fn immediate_command_result_from_timeline(
@@ -2082,6 +2137,49 @@ mod tests {
         assert!(recorded
             .iter()
             .any(|(kind, _payload)| *kind == TimelineItemKind::Attachment));
+    }
+
+    #[tokio::test]
+    async fn deliver_pending_attachments_splits_long_caption_to_followup_message() {
+        let test_channel = Arc::new(TestChannel::default());
+        let channel: Arc<dyn Channel> = test_channel.clone();
+        let target = test_target();
+        let png = base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3]);
+        let caption = format!("{}TAIL", "a".repeat(TELEGRAM_ATTACHMENT_CAPTION_CHARS));
+
+        let ids = deliver_pending_attachments(
+            &*channel,
+            &target,
+            "test",
+            vec![PendingAttachmentDelivery {
+                attachment: AgentAttachment {
+                    id: "ig_long".into(),
+                    filename: "codex-image-ig_long.png".into(),
+                    media_type: "image/png".into(),
+                    data_base64: png,
+                    caption: Some(caption.into()),
+                },
+                reply_to: None,
+            }],
+        )
+        .await;
+
+        assert_eq!(
+            ids,
+            vec![MessageId::new("attachment-1"), MessageId::new("1")]
+        );
+        let attachments = test_channel.attachments.lock().unwrap();
+        assert_eq!(attachments.len(), 1);
+        let attached_caption = attachments[0].caption.as_deref().expect("caption");
+        assert_eq!(
+            attached_caption.chars().count(),
+            TELEGRAM_ATTACHMENT_CAPTION_CHARS
+        );
+        assert!(attached_caption.chars().all(|ch| ch == 'a'));
+        let sends = test_channel.sends.lock().unwrap();
+        assert_eq!(sends.len(), 1);
+        assert_eq!(sends[0].body, "TAIL");
+        assert_eq!(sends[0].reply_to, Some(MessageId::new("attachment-1")));
     }
 
     #[tokio::test]

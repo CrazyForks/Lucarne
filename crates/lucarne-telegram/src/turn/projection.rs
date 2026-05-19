@@ -196,9 +196,17 @@ impl DraftStream {
         provider_id: &str,
         footer: Option<&AgentMessageFooter>,
     ) -> DraftFinalizeResult {
+        let thought_preview_id = self
+            .current
+            .as_ref()
+            .filter(|current| current.kind == DraftKind::Thought)
+            .and_then(|_| self.fallback_msg_id.clone());
         self.current.take();
 
         if let Some(msg) = self.final_rich_message.take() {
+            if let Some(id) = thought_preview_id {
+                self.delete_thought_preview(channel, target, &id).await;
+            }
             let msg = self.with_reply(msg);
             let bytes = msg.body.len();
             let mut result = DraftFinalizeResult {
@@ -215,6 +223,9 @@ impl DraftStream {
         }
 
         let Some(final_text) = self.final_message.take() else {
+            if let Some(id) = thought_preview_id {
+                self.delete_thought_preview(channel, target, &id).await;
+            }
             return DraftFinalizeResult::default();
         };
         let final_text = match footer {
@@ -254,6 +265,20 @@ impl DraftStream {
             }
         }
         result
+    }
+
+    async fn delete_thought_preview(
+        &mut self,
+        channel: &dyn Channel,
+        target: &WorkspaceHandle,
+        id: &MessageId,
+    ) {
+        if self.fallback_msg_id.as_ref() == Some(id) {
+            self.fallback_msg_id.take();
+        }
+        if let Err(e) = channel.delete(target, id).await {
+            warn!(error = %e, "thought preview delete failed");
+        }
     }
 
     fn with_reply(&self, mut msg: OutgoingMessage) -> OutgoingMessage {
