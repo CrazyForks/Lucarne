@@ -641,7 +641,7 @@ EOF
           path: release-metadata.env
           if-no-files-found: error
 
-      - name: Create or update GitHub Release
+      - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -649,10 +649,10 @@ EOF
           set -euo pipefail
           TAG="${{ steps.release.outputs.tag }}"
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/*.tar.gz dist/checksums.txt --clobber
-          else
-            gh release create "$TAG" dist/*.tar.gz dist/checksums.txt --title "$TAG" --notes "lucarned $TAG" --verify-tag
+            echo "Release $TAG already exists; refusing to overwrite assets" >&2
+            exit 1
           fi
+          gh release create "$TAG" dist/*.tar.gz dist/checksums.txt --title "$TAG" --notes "lucarned $TAG" --verify-tag
 
   formula-test:
     name: Test formula ${{ matrix.name }}
