@@ -2452,8 +2452,23 @@ impl LucarneCore {
         &self,
         scope: AgentResourceScope,
     ) -> Result<AgentResourceSnapshot, CoreError> {
-        let observed_sessions = self.observed_recent_sessions_for_scope(&scope);
-        let targets = self.agent_resource_targets(scope)?;
+        let mut observed_sessions = self.observed_recent_sessions_for_scope(&scope);
+        let mut targets = self.agent_resource_targets(scope)?;
+        for target in &mut targets {
+            if let Some(observed) = observed_sessions
+                .iter()
+                .find(|session| session.provider_session_id == target.provider_session_id)
+            {
+                target.last_active_unix = observed.last_active_unix;
+                target.last_active_display = observed.last_active_display.clone();
+            }
+        }
+        let managed_session_ids = targets
+            .iter()
+            .map(|target| target.provider_session_id.clone())
+            .collect::<HashSet<_>>();
+        observed_sessions
+            .retain(|session| !managed_session_ids.contains(&session.provider_session_id));
         if targets.iter().all(|target| target.pid.is_none()) {
             let mut snapshot = build_agent_resource_snapshot(targets, &[]);
             snapshot.observed_sessions = observed_sessions;
@@ -4188,6 +4203,59 @@ mod tests {
             !rendered.contains("last active: `unknown`"),
             "managed live agents should render last active from live session state"
         );
+    }
+
+    #[tokio::test]
+    async fn agent_resource_snapshot_hides_managed_sessions_from_observed_and_uses_observed_activity(
+    ) {
+        let process_id = std::process::id() as i32;
+        let runtime = Arc::new(AgentRuntime::new());
+        runtime.register(Arc::new(PidProvider { process_id }));
+        let core = LucarneCore::from_runtime_and_store(
+            runtime,
+            ControlPlaneSqliteStore::open_in_memory().expect("store"),
+        )
+        .expect("core");
+        let opened = core
+            .open_workspace_with_events(OpenWorkspaceRequest {
+                provider_id: "codex",
+                project_path: Some(PathBuf::from("/tmp/resource-status-managed-observed")),
+                title: "managed observed".into(),
+            })
+            .await
+            .expect("open workspace");
+        let provider_session_id = core
+            .workspace_binding(&opened.workspace.workspace_id)
+            .and_then(|workspace| workspace.active_provider_session_id)
+            .expect("active provider session");
+        {
+            let mut observed = observed_session_for_test("session-pid", Some(process_id));
+            observed.workspace_id = opened.workspace.workspace_id.clone();
+            observed.provider_session_id = provider_session_id.clone();
+            observed.native_resume_ref = "session-pid".into();
+            observed.last_active_unix = 1_776_960_000;
+            observed.last_active_display = "05-01 00:00:00".into();
+            core.observed_sessions
+                .write()
+                .expect("observed session registry lock")
+                .insert(provider_session_id, observed);
+        }
+
+        let snapshot = core
+            .agent_resource_snapshot(AgentResourceScope::All)
+            .await
+            .expect("resource snapshot");
+
+        assert_eq!(snapshot.managed_agent_count, 1);
+        assert!(
+            snapshot.observed_sessions.is_empty(),
+            "managed live session must not also render as observed"
+        );
+        assert_eq!(snapshot.agents[0].last_active_display, "05-01 00:00:00");
+        let rendered = crate::core_service::render_agent_resource_snapshot(&snapshot);
+        assert!(rendered.contains("observed recent: `0`"));
+        assert!(!rendered.contains("\n\nobserved recent\n\n"));
+        assert!(rendered.contains("last active: `05-01 00:00:00`"));
     }
 
     #[tokio::test]
