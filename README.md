@@ -7,7 +7,11 @@
 ![Telegram](https://img.shields.io/badge/channel-Telegram-26A5E4?logo=telegram)
 ![WeChat](https://img.shields.io/badge/channel-WeChat-07C160?logo=wechat)
 
+
+
 **Agents 完成、卡住、需要你时，Lucarne 会在手机上叫你。**
+
+![Lucarne AI Poster](docs/assets/lucarne-ai-poster.png)
 
 - Agents 在本地电脑上跑，人可以放下电脑；微信 / Telegram 随时同步关键进展
 - 权限审批、问题确认、失败通知，都变成手机上的可处理事件
@@ -17,29 +21,7 @@
 - 高性能低内存的轻量常驻进程，闲置agent自动释放
 - 无需在手机安装新的app，安全接收最及时的消息通知
 
----
 
-## Demo
-
-> 素材待补。请按下列文件名录制并放入 `docs/assets/`，README 会自动展示。
-
-### Telegram `/panel` 多 Agent 面板
-
-![Telegram /panel 唤出面板并查看多 Agent 状态](docs/assets/demo-telegram-panel.gif)
-
-建议录制内容：在 Telegram 输入 `/panel` → 面板展示 Overview → 切换 Workspaces / Sessions → 查看 Claude、Codex、Gemini、Copilot、Pi 状态。
-
-### 微信引用消息，AI 接续上下文
-
-![微信引用上一条消息后 AI 完美接续上下文](docs/assets/demo-wechat-quote-context.png)
-
-建议截图内容：微信里引用 Lucarne 推送的 Agent 通知 → 发送追问 → AI 回复保留原 session 上下文。
-
-### Telegram 点击 `[Approve]` 批准 Claude 执行命令
-
-![Telegram 点击 Approve 批准 Claude 执行命令](docs/assets/demo-telegram-approve-claude.gif)
-
-建议录制内容：Claude 请求执行 shell / 文件修改 → Telegram 出现 `[Approve]` `[Deny]` → 点击 `[Approve]` → Agent 继续执行并返回结果。
 
 ---
 
