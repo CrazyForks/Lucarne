@@ -2583,8 +2583,7 @@ fn render_wechat_help() -> &'static str {
 /config global bypass on|off — toggle global permission bypass\n\
 /config global notifications on|off — toggle global notifications\n\
 /status — show global status, or quoted workspace status\n\
-/kill all|<session_id:pid> — kill agent processes\n\
-Reply to an agent notification to continue that session.\n"
+/kill all|<session_id:pid> — kill agent processes\n"
 }
 
 #[cfg(test)]
@@ -3229,7 +3228,7 @@ mod tests {
         assert!(replies[0].text.contains("commands"));
         assert!(replies[0].text.contains("/config global bypass on|off"));
         assert!(replies[0].text.contains("/status"));
-        assert!(replies[0]
+        assert!(!replies[0]
             .text
             .contains("Reply to an agent notification to continue that session."));
     }
