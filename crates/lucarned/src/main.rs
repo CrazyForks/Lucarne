@@ -58,6 +58,7 @@ state:
 
 logging:
   filter: "info,lucarne=debug,lucarned=debug"
+  stderr_filter: warn
   dir: ~/.lucarned/logs
   file: null
   max_files: 16
@@ -213,9 +214,10 @@ async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
 
 fn init_tracing(file_config: &LucarnedFileConfig) -> Result<(), Box<dyn std::error::Error>> {
     lucarne::memory_profile_snapshot!("lucarned.init_tracing.start");
-    let filter_spec = log_filter_spec(file_config);
-    let stderr_filter = parse_log_filter(&filter_spec);
-    let file_filter = parse_log_filter(&filter_spec);
+    let file_filter_spec = log_filter_spec(file_config);
+    let stderr_filter_spec = stderr_log_filter_spec(file_config);
+    let stderr_filter = parse_log_filter(&stderr_filter_spec);
+    let file_filter = parse_log_filter(&file_filter_spec);
     lucarne::memory_profile_snapshot!("lucarned.init_tracing.after_filters");
 
     let config = log_file_config_from_config(file_config);
@@ -321,6 +323,7 @@ struct StateFileConfig {
 #[derive(Clone, Debug, Default, Deserialize)]
 struct LoggingFileConfig {
     filter: Option<String>,
+    stderr_filter: Option<String>,
     dir: Option<String>,
     file: Option<String>,
     max_files: Option<usize>,
@@ -504,6 +507,13 @@ fn log_filter_spec(config: &LucarnedFileConfig) -> String {
         .ok()
         .or_else(|| config.logging.filter.clone())
         .unwrap_or_else(default_log_filter_spec)
+}
+
+fn stderr_log_filter_spec(config: &LucarnedFileConfig) -> String {
+    std::env::var("LUCARNE_STDERR_LOG")
+        .ok()
+        .or_else(|| config.logging.stderr_filter.clone())
+        .unwrap_or_else(|| "warn".to_string())
 }
 
 fn default_log_filter_spec() -> String {
@@ -758,7 +768,50 @@ fn ensure_yaml_child_mapping<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::{
+        ffi::OsString,
+        io::Write,
+        sync::{Mutex, OnceLock},
+    };
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct EnvRestore {
+        saved: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            for (key, value) in self.saved.drain(..).rev() {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    fn with_env<R>(vars: &[(&'static str, Option<&str>)], f: impl FnOnce() -> R) -> R {
+        let _guard = env_lock().lock().expect("env lock");
+        let restore = EnvRestore {
+            saved: vars
+                .iter()
+                .map(|(key, _)| (*key, std::env::var_os(key)))
+                .collect(),
+        };
+        for (key, value) in vars {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        let result = f();
+        drop(restore);
+        result
+    }
 
     #[test]
     fn cli_parses_init_subcommand() {
@@ -816,6 +869,11 @@ mod tests {
             "lucarne::memory_profile_snapshot!(\"lucarned.init_tracing.after_nonblocking\")"
         ));
         assert!(lucarne_observability.contains("LUCARNE_MEMORY_PROFILE_PAUSE_MS"));
+    }
+
+    #[test]
+    fn default_config_exposes_separate_stderr_filter() {
+        assert!(DEFAULT_LUCARNED_CONFIG.contains("stderr_filter: warn"));
     }
 
     #[test]
@@ -914,6 +972,7 @@ state:
   db: ~/.lucarned/custom.sqlite3
 logging:
   filter: info,lucarned=debug
+  stderr_filter: warn,lucarned=info
   dir: ~/.lucarned/custom-logs
   max_files: 7
   buffered_lines: 64
@@ -931,6 +990,10 @@ health:
         assert_eq!(
             config.logging.filter.as_deref(),
             Some("info,lucarned=debug")
+        );
+        assert_eq!(
+            config.logging.stderr_filter.as_deref(),
+            Some("warn,lucarned=info")
         );
         assert_eq!(
             config.logging.dir.as_deref(),
@@ -1215,6 +1278,54 @@ health:
         assert_eq!(
             health_addr_from_config(&enabled).expect("enabled health config"),
             Some("127.0.0.1:7766".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn log_filter_defaults_stderr_to_warn() {
+        with_env(&[("RUST_LOG", None), ("LUCARNE_STDERR_LOG", None)], || {
+            let config = LucarnedFileConfig::default();
+
+            assert_eq!(log_filter_spec(&config), default_log_filter_spec());
+            assert_eq!(stderr_log_filter_spec(&config), "warn");
+        });
+    }
+
+    #[test]
+    fn log_filter_uses_rust_log_for_file_and_dedicated_sources_for_stderr() {
+        with_env(
+            &[
+                ("RUST_LOG", Some("debug,lucarned=trace")),
+                ("LUCARNE_STDERR_LOG", None),
+            ],
+            || {
+                let config = LucarnedFileConfig::from_yaml_str(
+                    r#"
+logging:
+  filter: info,lucarned=debug
+  stderr_filter: warn,lucarned=info
+"#,
+                )
+                .expect("parse lucarned config");
+
+                assert_eq!(log_filter_spec(&config), "debug,lucarned=trace");
+                assert_eq!(stderr_log_filter_spec(&config), "warn,lucarned=info");
+            },
+        );
+
+        with_env(
+            &[("LUCARNE_STDERR_LOG", Some("error,lucarned=warn"))],
+            || {
+                let config = LucarnedFileConfig::from_yaml_str(
+                    r#"
+logging:
+  stderr_filter: warn,lucarned=info
+"#,
+                )
+                .expect("parse lucarned config");
+
+                assert_eq!(stderr_log_filter_spec(&config), "error,lucarned=warn");
+            },
         );
     }
 

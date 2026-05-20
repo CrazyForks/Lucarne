@@ -9,6 +9,7 @@ use serde::Serialize;
 
 const DEFAULT_STATE_DB: &str = "~/.lucarned/state.sqlite3";
 const DEFAULT_LOG_FILTER: &str = "info,lucarne=debug,lucarned=debug";
+const DEFAULT_STDERR_LOG_FILTER: &str = "warn";
 const DEFAULT_LOG_DIR: &str = "~/.lucarned/logs";
 const DEFAULT_HEALTH_ADDR: &str = "127.0.0.1:7766";
 const DEFAULT_CONTEXT_EXPIRY_REMINDER_TEMPLATE: &str =
@@ -257,6 +258,7 @@ impl<'a> From<&'a InitConfigDraft> for ConfigYaml<'a> {
             },
             logging: LoggingYaml {
                 filter: DEFAULT_LOG_FILTER,
+                stderr_filter: DEFAULT_STDERR_LOG_FILTER,
                 dir: DEFAULT_LOG_DIR,
                 file: None,
                 max_files: 16,
@@ -295,6 +297,7 @@ struct StateYaml {
 #[derive(Serialize)]
 struct LoggingYaml {
     filter: &'static str,
+    stderr_filter: &'static str,
     dir: &'static str,
     file: Option<String>,
     max_files: u16,
@@ -445,6 +448,7 @@ mod tests {
         );
         assert!(yaml.contains("state:"));
         assert!(yaml.contains("db: ~/.lucarned/state.sqlite3"));
+        assert!(yaml.contains("stderr_filter: warn"));
         assert!(yaml.contains("turn:"));
         assert!(yaml.contains("inactivity_secs: 1800"));
         assert!(yaml.contains("deadline_secs: 3600"));
