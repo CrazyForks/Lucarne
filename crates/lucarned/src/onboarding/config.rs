@@ -391,6 +391,10 @@ impl<'a> From<&'a WechatDraft> for WechatYaml<'a> {
                 expiry_reminder_template: DEFAULT_CONTEXT_EXPIRY_REMINDER_TEMPLATE,
             },
             rate_limit: WechatRateLimitYaml {
+                retry_after_secs: 90,
+                max_retries: 3,
+                interaction_window_secs: 300,
+                interaction_threshold: 6,
                 interaction_prompt: DEFAULT_RATE_LIMIT_INTERACTION_PROMPT,
             },
         }
@@ -406,6 +410,10 @@ struct WechatContextYaml {
 
 #[derive(Serialize)]
 struct WechatRateLimitYaml {
+    retry_after_secs: u16,
+    max_retries: u8,
+    interaction_window_secs: u16,
+    interaction_threshold: u8,
     interaction_prompt: &'static str,
 }
 
@@ -449,6 +457,13 @@ mod tests {
         assert!(yaml.contains("telegram:"));
         assert!(yaml.contains("wechat:"));
         assert!(yaml.contains("enabled: false"));
+        assert!(yaml.contains("retry_after_secs: 90"));
+        assert!(yaml.contains("max_retries: 3"));
+        assert!(yaml.contains("interaction_window_secs: 300"));
+        assert!(yaml.contains("interaction_threshold: 6"));
+        assert!(yaml.contains(
+            "interaction_prompt: 微信主动通知快到发送限制了，请回复任意消息以刷新会话。"
+        ));
     }
 
     #[test]

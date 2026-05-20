@@ -45,6 +45,28 @@ impl Default for WechatContextExpiryReminderConfig {
     }
 }
 
+/// Adapter-owned WeChat outbound rate-limit configuration.
+#[derive(Debug, Clone)]
+pub struct WechatRateLimitConfig {
+    pub retry_after: Duration,
+    pub max_retries: usize,
+    pub interaction_window: Duration,
+    pub interaction_threshold: usize,
+    pub interaction_prompt: Option<String>,
+}
+
+impl Default for WechatRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            retry_after: Duration::from_secs(90),
+            max_retries: WECHAT_RATE_LIMIT_MAX_RETRIES,
+            interaction_window: Duration::from_secs(300),
+            interaction_threshold: 6,
+            interaction_prompt: Some(DEFAULT_RATE_LIMIT_INTERACTION_PROMPT.to_string()),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct WechatConfig {
     pub base_url: Option<String>,
@@ -54,7 +76,7 @@ pub struct WechatConfig {
     pub route_tag: Option<String>,
     pub markdown_filter: bool,
     pub context_expiry_reminder: Option<WechatContextExpiryReminderConfig>,
-    pub rate_limit_interaction_prompt: Option<String>,
+    pub rate_limit: WechatRateLimitConfig,
     pub force_login: bool,
     pub notify_user_ids: Vec<String>,
 }
@@ -69,7 +91,10 @@ impl Default for WechatConfig {
             route_tag: None,
             markdown_filter: true,
             context_expiry_reminder: None,
-            rate_limit_interaction_prompt: None,
+            rate_limit: WechatRateLimitConfig {
+                interaction_prompt: None,
+                ..WechatRateLimitConfig::default()
+            },
             force_login: false,
             notify_user_ids: Vec::new(),
         }
@@ -142,7 +167,7 @@ impl AdapterPlugin for WechatAdapterPlugin {
             restored_users,
             force_login = config.force_login,
             context_expiry_reminder_enabled = config.context_expiry_reminder.is_some(),
-            rate_limit_interaction_prompt_enabled = config.rate_limit_interaction_prompt.is_some(),
+            rate_limit_interaction_prompt_enabled = config.rate_limit.interaction_prompt.is_some(),
             "wechat adapter spawning"
         );
 
@@ -183,18 +208,7 @@ fn wechat_config_from_adapter_config(config: &AdapterConfig) -> WechatConfig {
             .and_then(parse_bool)
             .unwrap_or(true),
         context_expiry_reminder: wechat_context_expiry_reminder_from_adapter_config(config),
-        rate_limit_interaction_prompt: Some(
-            config
-                .channel_value(
-                    "LUCARNE_WECHAT_RATE_LIMIT_INTERACTION_PROMPT",
-                    "wechat",
-                    "rate_limit.interaction_prompt",
-                )
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or(DEFAULT_RATE_LIMIT_INTERACTION_PROMPT)
-                .to_string(),
-        ),
+        rate_limit: wechat_rate_limit_from_adapter_config(config),
         force_login: config
             .channel_value("LUCARNE_WECHAT_FORCE_LOGIN", "wechat", "force_login")
             .and_then(parse_bool)
@@ -258,9 +272,79 @@ fn wechat_context_expiry_reminder_from_adapter_config(
     })
 }
 
+fn wechat_rate_limit_from_adapter_config(config: &AdapterConfig) -> WechatRateLimitConfig {
+    let default = WechatRateLimitConfig::default();
+    let retry_after = config
+        .channel_value(
+            "LUCARNE_WECHAT_RATE_LIMIT_RETRY_AFTER_SECS",
+            "wechat",
+            "rate_limit.retry_after_secs",
+        )
+        .and_then(parse_duration_secs)
+        .unwrap_or(default.retry_after);
+    let max_retries = config
+        .channel_value(
+            "LUCARNE_WECHAT_RATE_LIMIT_MAX_RETRIES",
+            "wechat",
+            "rate_limit.max_retries",
+        )
+        .and_then(parse_usize)
+        .unwrap_or(default.max_retries);
+    let interaction_window = config
+        .channel_value(
+            "LUCARNE_WECHAT_RATE_LIMIT_INTERACTION_WINDOW_SECS",
+            "wechat",
+            "rate_limit.interaction_window_secs",
+        )
+        .and_then(parse_duration_secs)
+        .unwrap_or(default.interaction_window);
+    let interaction_threshold = config
+        .channel_value(
+            "LUCARNE_WECHAT_RATE_LIMIT_INTERACTION_THRESHOLD",
+            "wechat",
+            "rate_limit.interaction_threshold",
+        )
+        .and_then(parse_usize_allow_zero)
+        .unwrap_or(default.interaction_threshold);
+    let interaction_prompt = Some(
+        config
+            .channel_value(
+                "LUCARNE_WECHAT_RATE_LIMIT_INTERACTION_PROMPT",
+                "wechat",
+                "rate_limit.interaction_prompt",
+            )
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(
+                default
+                    .interaction_prompt
+                    .as_deref()
+                    .unwrap_or(DEFAULT_RATE_LIMIT_INTERACTION_PROMPT),
+            )
+            .to_string(),
+    );
+
+    WechatRateLimitConfig {
+        retry_after,
+        max_retries,
+        interaction_window,
+        interaction_threshold,
+        interaction_prompt,
+    }
+}
+
 fn parse_duration_secs(value: &str) -> Option<Duration> {
     let secs = value.trim().parse::<u64>().ok()?;
     (secs > 0).then(|| Duration::from_secs(secs))
+}
+
+fn parse_usize(value: &str) -> Option<usize> {
+    let value = value.trim().parse::<usize>().ok()?;
+    (value > 0).then_some(value)
+}
+
+fn parse_usize_allow_zero(value: &str) -> Option<usize> {
+    value.trim().parse::<usize>().ok()
 }
 
 fn parse_bool(value: &str) -> Option<bool> {
@@ -305,7 +389,7 @@ async fn run_wechat_adapter_with_transport(
         transport,
         WechatServiceOptions {
             initial_user_ids,
-            rate_limit_interaction_prompt: config.rate_limit_interaction_prompt.clone(),
+            rate_limit_interaction_prompt: config.rate_limit.interaction_prompt.clone(),
             global_config_persistence,
             ..WechatServiceOptions::default()
         },
@@ -401,7 +485,10 @@ fn configure_wechat_client_builder(
 ) -> WechatIlinkClientBuilder {
     builder = builder
         .markdown_filter(config.markdown_filter)
-        .rate_limit_max_retries(WECHAT_RATE_LIMIT_MAX_RETRIES);
+        .rate_limit_retry_after(config.rate_limit.retry_after)
+        .rate_limit_max_retries(config.rate_limit.max_retries)
+        .rate_limit_interaction_window(config.rate_limit.interaction_window)
+        .rate_limit_interaction_threshold(config.rate_limit.interaction_threshold);
     if let Some(base_url) = config.base_url.clone() {
         builder = builder.base_url(base_url);
     }
@@ -855,6 +942,23 @@ mod tests {
     }
 
     #[test]
+    fn configures_wechat_rate_limit_builder_options() {
+        let source = include_str!("adapter.rs")
+            .split("\n#[cfg(test)]")
+            .next()
+            .expect("production source");
+
+        assert!(source.contains(".rate_limit_retry_after(config.rate_limit.retry_after)"));
+        assert!(source.contains(".rate_limit_max_retries(config.rate_limit.max_retries)"));
+        assert!(
+            source.contains(".rate_limit_interaction_window(config.rate_limit.interaction_window)")
+        );
+        assert!(source.contains(
+            ".rate_limit_interaction_threshold(config.rate_limit.interaction_threshold)"
+        ));
+    }
+
+    #[test]
     fn memory_profile_snapshots_mark_wechat_spawn_phases() {
         let source = include_str!("adapter.rs");
 
@@ -951,11 +1055,32 @@ mod tests {
     }
 
     #[test]
-    fn config_defaults_rate_limit_interaction_prompt() {
+    fn wechat_config_default_keeps_rate_limit_prompt_disabled() {
+        let config = WechatConfig::default();
+
+        assert_eq!(config.rate_limit.retry_after, Duration::from_secs(90));
+        assert_eq!(config.rate_limit.max_retries, WECHAT_RATE_LIMIT_MAX_RETRIES);
+        assert_eq!(
+            config.rate_limit.interaction_window,
+            Duration::from_secs(300)
+        );
+        assert_eq!(config.rate_limit.interaction_threshold, 6);
+        assert!(config.rate_limit.interaction_prompt.is_none());
+    }
+
+    #[test]
+    fn config_defaults_rate_limit_options() {
         let config = wechat_config_from_adapter_config(&AdapterConfig::default());
 
+        assert_eq!(config.rate_limit.retry_after, Duration::from_secs(90));
+        assert_eq!(config.rate_limit.max_retries, WECHAT_RATE_LIMIT_MAX_RETRIES);
         assert_eq!(
-            config.rate_limit_interaction_prompt.as_deref(),
+            config.rate_limit.interaction_window,
+            Duration::from_secs(300)
+        );
+        assert_eq!(config.rate_limit.interaction_threshold, 6);
+        assert_eq!(
+            config.rate_limit.interaction_prompt.as_deref(),
             Some(DEFAULT_RATE_LIMIT_INTERACTION_PROMPT)
         );
     }
@@ -1019,9 +1144,54 @@ mod tests {
         assert_eq!(config.ilink_app_id.as_deref(), Some("custom-app"));
         assert!(!config.markdown_filter);
         assert_eq!(
-            config.rate_limit_interaction_prompt.as_deref(),
+            config.rate_limit.interaction_prompt.as_deref(),
             Some("请回复任意消息刷新微信窗口。")
         );
+    }
+
+    #[test]
+    fn config_parses_rate_limit_options_from_env() {
+        let config = AdapterConfig::from_env([
+            ("LUCARNE_WECHAT_RATE_LIMIT_RETRY_AFTER_SECS", "55"),
+            ("LUCARNE_WECHAT_RATE_LIMIT_MAX_RETRIES", "1"),
+            ("LUCARNE_WECHAT_RATE_LIMIT_INTERACTION_WINDOW_SECS", "180"),
+            ("LUCARNE_WECHAT_RATE_LIMIT_INTERACTION_THRESHOLD", "0"),
+            ("LUCARNE_WECHAT_RATE_LIMIT_INTERACTION_PROMPT", "env prompt"),
+        ]);
+
+        let config = wechat_config_from_adapter_config(&config);
+
+        assert_eq!(config.rate_limit.retry_after, Duration::from_secs(55));
+        assert_eq!(config.rate_limit.max_retries, 1);
+        assert_eq!(
+            config.rate_limit.interaction_window,
+            Duration::from_secs(180)
+        );
+        assert_eq!(config.rate_limit.interaction_threshold, 0);
+        assert_eq!(
+            config.rate_limit.interaction_prompt.as_deref(),
+            Some("env prompt")
+        );
+    }
+
+    #[test]
+    fn config_accepts_partial_rate_limit_overrides() {
+        let retry_only =
+            AdapterConfig::from_env([("LUCARNE_WECHAT_RATE_LIMIT_RETRY_AFTER_SECS", "44")]);
+        let threshold_only =
+            AdapterConfig::from_env([("LUCARNE_WECHAT_RATE_LIMIT_INTERACTION_THRESHOLD", "0")]);
+
+        let retry_only = wechat_config_from_adapter_config(&retry_only).rate_limit;
+        assert_eq!(retry_only.retry_after, Duration::from_secs(44));
+        assert_eq!(retry_only.max_retries, WECHAT_RATE_LIMIT_MAX_RETRIES);
+        assert_eq!(retry_only.interaction_window, Duration::from_secs(300));
+        assert_eq!(retry_only.interaction_threshold, 6);
+
+        let threshold_only = wechat_config_from_adapter_config(&threshold_only).rate_limit;
+        assert_eq!(threshold_only.retry_after, Duration::from_secs(90));
+        assert_eq!(threshold_only.max_retries, WECHAT_RATE_LIMIT_MAX_RETRIES);
+        assert_eq!(threshold_only.interaction_window, Duration::from_secs(300));
+        assert_eq!(threshold_only.interaction_threshold, 0);
     }
 
     #[test]
@@ -1040,6 +1210,10 @@ channels:
       expiry_remind_before_secs: 120
       expiry_reminder_template: "还有 {remaining_secs} 秒"
     rate_limit:
+      retry_after_secs: 45
+      max_retries: 2
+      interaction_window_secs: 120
+      interaction_threshold: 4
       interaction_prompt: "请回复任意消息"
 "#,
         )
@@ -1054,8 +1228,15 @@ channels:
         assert_eq!(reminder.expires_after, Duration::from_secs(3600));
         assert_eq!(reminder.remind_before, Duration::from_secs(120));
         assert_eq!(reminder.prompt_template, "还有 {remaining_secs} 秒");
+        assert_eq!(config.rate_limit.retry_after, Duration::from_secs(45));
+        assert_eq!(config.rate_limit.max_retries, 2);
         assert_eq!(
-            config.rate_limit_interaction_prompt.as_deref(),
+            config.rate_limit.interaction_window,
+            Duration::from_secs(120)
+        );
+        assert_eq!(config.rate_limit.interaction_threshold, 4);
+        assert_eq!(
+            config.rate_limit.interaction_prompt.as_deref(),
             Some("请回复任意消息")
         );
 

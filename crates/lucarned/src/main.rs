@@ -94,6 +94,10 @@ channels:
       expiry_remind_before_secs: 300
       expiry_reminder_template: "会话将在 {remaining_minutes} 分钟后到期，请回复以保持会话可用。"
     rate_limit:
+      retry_after_secs: 90
+      max_retries: 3
+      interaction_window_secs: 300
+      interaction_threshold: 6
       interaction_prompt: "微信主动通知快到发送限制了，请回复任意消息以刷新会话。"
 "#;
 
@@ -812,6 +816,17 @@ mod tests {
             "lucarne::memory_profile_snapshot!(\"lucarned.init_tracing.after_nonblocking\")"
         ));
         assert!(lucarne_observability.contains("LUCARNE_MEMORY_PROFILE_PAUSE_MS"));
+    }
+
+    #[test]
+    fn default_config_exposes_wechat_rate_limit_knobs() {
+        assert!(DEFAULT_LUCARNED_CONFIG.contains("retry_after_secs: 90"));
+        assert!(DEFAULT_LUCARNED_CONFIG.contains("max_retries: 3"));
+        assert!(DEFAULT_LUCARNED_CONFIG.contains("interaction_window_secs: 300"));
+        assert!(DEFAULT_LUCARNED_CONFIG.contains("interaction_threshold: 6"));
+        assert!(DEFAULT_LUCARNED_CONFIG.contains(
+            "interaction_prompt: \"微信主动通知快到发送限制了，请回复任意消息以刷新会话。\""
+        ));
     }
 
     #[test]

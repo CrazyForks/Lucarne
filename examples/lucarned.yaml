@@ -1,3 +1,4 @@
+# 启用的 agent provider；省略则启用全部内置 provider。
 agents:
   - claude
   - codex
@@ -6,38 +7,42 @@ agents:
   - pi
 
 state:
-  db: ~/.lucarned/state.sqlite3
+  db: ~/.lucarned/state.sqlite3 # SQLite 状态库路径。
 
 logging:
-  filter: "info,lucarne=info,lucarned=info"
-  dir: ~/.lucarned/logs
-  max_files: 16
+  filter: "info,lucarne=info,lucarned=info" # tracing 过滤器。
+  dir: ~/.lucarned/logs # 日志目录。
+  max_files: 16 # 最多保留日志文件数。
 
 turn:
-  inactivity_secs: 1800 # 30min 无事件则 turn 失败
-  deadline_secs: 3600 # 1h turn 绝对上限
+  inactivity_secs: 1800 # 30min 无事件则 turn 失败。
+  deadline_secs: 3600 # 1h turn 绝对上限。
 
 session:
-  idle_timeout_secs: 7200 # 2h 闲置自动关闭
+  idle_timeout_secs: 7200 # 2h 闲置自动关闭 live session。
 
 config:
   global:
-    bypass: false
-    notifications: true
+    bypass: false # 全局绕过 agent 权限确认。
+    notifications: true # 全局开启通知。
 
 channels:
   telegram:
-    enabled: true
-    token: "123456:TELEGRAM_BOT_TOKEN"
-    entry_chat_id: "123456789"
+    enabled: true # 启用 Telegram 通道。
+    token: "123456:TELEGRAM_BOT_TOKEN" # Telegram Bot Token。
+    entry_chat_id: "123456789" # 入口 chat id。
 
   wechat:
-    enabled: true
-    credential_path: ~/.lucarned/wechat-credentials.json
-    force_login: false
+    enabled: true # 启用 WeChat 通道。
+    credential_path: ~/.lucarned/wechat-credentials.json # WeChat 登录凭证文件。
+    force_login: false # true 时忽略旧凭证，强制扫码登录。
     context:
-      ttl_secs: 7200
-      expiry_remind_before_secs: 300
-      expiry_reminder_template: 会话将在 {remaining_minutes} 分钟后到期，请回复以保持会话可用。
+      ttl_secs: 7200 # WeChat context 预计有效期。
+      expiry_remind_before_secs: 300 # context 到期前多久提醒用户回复刷新。
+      expiry_reminder_template: 会话将在 {remaining_minutes} 分钟后到期，请回复以保持会话可用。 # context 到期提醒文案。
     rate_limit:
-      interaction_prompt: 微信主动通知快到发送限制了，请回复任意消息以刷新会话。
+      retry_after_secs: 90 # WeChat ret=-2/errcode=-2 后退避多久再重试。
+      max_retries: 3 # 命中限流后的最大重试次数。
+      interaction_window_secs: 300 # 主动发送计数滚动窗口。
+      interaction_threshold: 6 # 窗口内主动发送达到多少条时提示用户回复刷新；0 表示禁用该提示事件。
+      interaction_prompt: 微信主动通知快到发送限制了，请回复任意消息以刷新会话。 # 发送窗口快到限制时的提醒文案。
