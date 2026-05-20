@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -7,8 +9,11 @@ from pathlib import Path
 
 
 UPDATER = Path(__file__).with_name("update-homebrew-formula.py")
+REPO_ROOT = Path(__file__).resolve().parents[2]
+CHECKED_IN_FORMULA = REPO_ROOT / "Formula" / "lucarned.rb"
 ARM_SHA = "a" * 64
 X86_SHA = "b" * 64
+SERVICE_PATH_ENV_LINE = 'environment_variables PATH: ENV.fetch("HOMEBREW_PATH", std_service_path_env)'
 
 
 class UpdateHomebrewFormulaTest(unittest.TestCase):
@@ -72,7 +77,40 @@ class UpdateHomebrewFormulaTest(unittest.TestCase):
             self.assertNotIn("wechat-ilink = \\{ path", output)
             self.assertIn('bin.install "bin/lucarned"', output)
             self.assertIn("brew services start lucarned", output)
+            self.assertIn(SERVICE_PATH_ENV_LINE, output)
             self.assertIn('assert_match "enabled: false", config.read', output)
+
+    def test_checked_in_formula_service_exports_invoking_path(self) -> None:
+        output = CHECKED_IN_FORMULA.read_text(encoding="utf-8")
+
+        self.assertIn(SERVICE_PATH_ENV_LINE, output)
+
+    def test_homebrew_service_plist_embeds_invoking_path(self) -> None:
+        brew = shutil.which("brew")
+        if brew is None:
+            self.skipTest("brew is not available")
+        user_path = "/tmp/lucarne-user-bin:/opt/homebrew/bin:/usr/bin:/bin"
+        env = os.environ.copy()
+        env["PATH"] = user_path
+        env["HOMEBREW_DEVELOPER"] = "1"
+        ruby = (
+            'require "formula"; '
+            'formula = Formulary.factory(ARGV[0]); '
+            'puts formula.service.to_plist'
+        )
+
+        result = subprocess.run(
+            [brew, "ruby", "-e", ruby, str(CHECKED_IN_FORMULA)],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            env=env,
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn("<key>EnvironmentVariables</key>", result.stdout)
+        self.assertIn(f"<string>{user_path}</string>", result.stdout)
 
     def test_rejects_bad_arm64_sha(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

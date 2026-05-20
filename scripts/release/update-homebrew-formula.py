@@ -50,6 +50,7 @@ FORMULA_TEMPLATE = r'''class Lucarned < Formula
 
   service do
     run [opt_bin/"lucarned"]
+    environment_variables PATH: ENV.fetch("HOMEBREW_PATH", std_service_path_env)
     keep_alive false
     log_path var/"log/lucarned/brew.out.log"
     error_log_path var/"log/lucarned/brew.err.log"
