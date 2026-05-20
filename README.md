@@ -178,3 +178,6 @@ cargo +nightly test -Zbuild-dir-new-layout
 ## License
 
 MIT
+
+#
+> Friend link: [linux.do](https://linux.do/)
