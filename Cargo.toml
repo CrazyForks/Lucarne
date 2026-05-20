@@ -49,9 +49,6 @@ serde_yaml = "0.9"
 rusqlite = "0.31"
 reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
 
-[patch.crates-io]
-wechat-ilink = { path = "../wechat-ilink" }
-
 [profile.release]
 opt-level = "z"
 lto = true

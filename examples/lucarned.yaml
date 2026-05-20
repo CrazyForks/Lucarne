@@ -35,3 +35,9 @@ channels:
     enabled: true
     credential_path: ~/.lucarned/wechat-credentials.json
     force_login: false
+    context:
+      ttl_secs: 7200
+      expiry_remind_before_secs: 300
+      expiry_reminder_template: 会话将在 {remaining_minutes} 分钟后到期，请回复以保持会话可用。
+    rate_limit:
+      interaction_prompt: 微信主动通知快到发送限制了，请回复任意消息以刷新会话。

@@ -1,0 +1,356 @@
+name: Release lucarned
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (for example v0.1.0)'
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-26
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+    steps:
+      - name: Resolve release tag
+        id: release
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          tag="$RELEASE_TAG"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release tag: $tag" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout release ref
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ steps.release.outputs.tag }}
+          persist-credentials: false
+
+      - name: Validate Cargo workspace package version
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          expected = os.environ["VERSION"]
+          with Path("Cargo.toml").open("rb") as cargo_toml:
+              data = tomllib.load(cargo_toml)
+          actual = data.get("workspace", {}).get("package", {}).get("version")
+          if actual != expected:
+              raise SystemExit(
+                  f"Cargo.toml workspace.package.version {actual!r} does not match tag version {expected!r}"
+              )
+          PY
+
+      - name: Install Rust nightly
+        run: rustup toolchain install nightly --profile minimal
+
+      - name: Build lucarned
+        run: cargo +nightly build --release -Zbuild-dir-new-layout --locked -p lucarned
+
+      - name: Locate and run binary help
+        id: binary
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          bin="$(find target -type f -path '*/release/lucarned' -perm -111 | head -n 1)"
+          if [[ -z "$bin" ]]; then
+            echo "lucarned release binary not found" >&2
+            exit 1
+          fi
+          BIN="$bin"
+          file_output="$(file "$BIN")"
+          echo "$file_output"
+          case "$TARGET" in
+            aarch64-apple-darwin)
+              if [[ "$file_output" != *arm64* ]]; then
+                echo "lucarned binary is not arm64: $file_output" >&2
+                exit 1
+              fi
+              ;;
+            x86_64-apple-darwin)
+              if [[ "$file_output" != *x86_64* ]]; then
+                echo "lucarned binary is not x86_64: $file_output" >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "unexpected target: $TARGET" >&2
+              exit 1
+              ;;
+          esac
+          "$BIN" --help >/dev/null
+          echo "path=$BIN" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test default config
+        env:
+          BIN: ${{ steps.binary.outputs.path }}
+        run: |
+          set -euo pipefail
+          tmp_home="$(mktemp -d)"
+          trap 'rm -rf "$tmp_home"' EXIT
+          HOME="$tmp_home" "$BIN"
+          config="$tmp_home/.lucarned/lucarned.yaml"
+          test -f "$config"
+          grep -q 'agents:' "$config"
+          grep -q 'channels:' "$config"
+
+      - name: Check dynamic libraries
+        env:
+          BIN: ${{ steps.binary.outputs.path }}
+        run: |
+          set -euo pipefail
+          otool -L "$BIN" | tee otool.txt
+          if grep -E '/opt/homebrew|/usr/local/(Cellar|opt)' otool.txt; then
+            echo "lucarned links Homebrew dynamic libraries" >&2
+            exit 1
+          fi
+
+      - name: Package tarball
+        env:
+          BIN: ${{ steps.binary.outputs.path }}
+          TAG: ${{ steps.release.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          rm -rf dist package
+          mkdir -p dist package/bin
+          cp "$BIN" package/bin/lucarned
+          cp LICENSE package/LICENSE
+          cp README.md package/README.md
+          tarball="dist/lucarned-$TAG-$TARGET.tar.gz"
+          tar -C package -czf "$tarball" ./bin/lucarned ./LICENSE ./README.md
+          tar -tzf "$tarball" | sort | tee package-contents.txt
+          for entry in ./bin/lucarned ./LICENSE ./README.md; do
+            if ! grep -Fx "$entry" package-contents.txt >/dev/null; then
+              echo "missing tarball entry: $entry" >&2
+              exit 1
+            fi
+          done
+
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lucarned-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish-assets:
+    name: Publish release assets
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+      arm64_sha: ${{ steps.checksums.outputs.arm64_sha }}
+      x86_64_sha: ${{ steps.checksums.outputs.x86_64_sha }}
+    steps:
+      - name: Resolve release tag
+        id: release
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          tag="$RELEASE_TAG"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release tag: $tag" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout release ref
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ steps.release.outputs.tag }}
+          persist-credentials: false
+
+      - name: Download tarball artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: lucarned-*
+          merge-multiple: true
+
+      - name: Generate checksums and metadata
+        id: checksums
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum *.tar.gz | sort -k2 > checksums.txt
+          cat checksums.txt
+          arm64_sha="$(awk '/aarch64-apple-darwin/ { print $1; exit }' checksums.txt)"
+          x86_64_sha="$(awk '/x86_64-apple-darwin/ { print $1; exit }' checksums.txt)"
+          if [[ -z "$arm64_sha" ]]; then
+            echo "missing aarch64-apple-darwin checksum" >&2
+            exit 1
+          fi
+          if [[ -z "$x86_64_sha" ]]; then
+            echo "missing x86_64-apple-darwin checksum" >&2
+            exit 1
+          fi
+          echo "arm64_sha=$arm64_sha" >> "$GITHUB_OUTPUT"
+          echo "x86_64_sha=$x86_64_sha" >> "$GITHUB_OUTPUT"
+          {
+            echo "VERSION=$VERSION"
+            echo "TAG=$TAG"
+            echo "ARM64_SHA=$arm64_sha"
+            echo "X86_64_SHA=$x86_64_sha"
+          } > release-metadata.env
+
+      - name: Upload release metadata artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-metadata
+          path: dist/release-metadata.env
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; refusing to overwrite assets" >&2
+            exit 1
+          fi
+          gh release create "$TAG" dist/*.tar.gz dist/checksums.txt --title "$TAG" --notes "lucarned $TAG" --verify-tag
+
+  formula-test:
+    name: Formula test (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    needs: publish-assets
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS Apple Silicon
+            runner: macos-26
+          - name: macOS Intel
+            runner: macos-15-intel
+    steps:
+      - name: Checkout release ref
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ needs.publish-assets.outputs.tag }}
+          persist-credentials: false
+
+      - name: Download release metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: release-metadata
+
+      - name: Generate formula
+        run: |
+          set -euo pipefail
+          source release-metadata.env
+          python3 scripts/release/update-homebrew-formula.py Formula/lucarned.rb --version "$VERSION" --arm64-sha "$ARM64_SHA" --x86-64-sha "$X86_64_SHA"
+
+      - name: Validate formula syntax
+        run: ruby -c Formula/lucarned.rb
+
+      - name: Create temporary tap
+        run: |
+          set -euo pipefail
+          brew tap-new tuchg/lucarne --no-git
+          cp Formula/lucarned.rb "$(brew --repo tuchg/lucarne)/Formula/lucarned.rb"
+
+      - name: Verify stable formula dependencies
+        run: |
+          set -euo pipefail
+          DEPS="$(brew deps --include-build tuchg/lucarne/lucarned)"
+          printf '%s\n' "$DEPS"
+          if printf '%s\n' "$DEPS" | grep -E '^(rust|pkg-config|openssl@3)$'; then
+            echo "Stable binary formula must not depend on Rust, pkg-config, or openssl@3" >&2
+            exit 1
+          fi
+
+      - name: Install and test formula
+        run: |
+          set -euo pipefail
+          brew install tuchg/lucarne/lucarned
+          brew test tuchg/lucarne/lucarned
+
+  update-formula:
+    name: Update Homebrew formula
+    runs-on: ubuntu-latest
+    needs:
+      - publish-assets
+      - formula-test
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Download release metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: release-metadata
+
+      - name: Generate formula
+        run: |
+          set -euo pipefail
+          source release-metadata.env
+          python3 scripts/release/update-homebrew-formula.py Formula/lucarned.rb --version "$VERSION" --arm64-sha "$ARM64_SHA" --x86-64-sha "$X86_64_SHA"
+
+      - name: Validate formula syntax
+        run: ruby -c Formula/lucarned.rb
+
+      - name: Commit and push formula
+        run: |
+          set -euo pipefail
+          source release-metadata.env
+          if git diff --quiet -- Formula/lucarned.rb; then
+            echo "Formula already up to date"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/lucarned.rb
+          git commit -m "brew: update lucarned v$VERSION"
+          git push origin HEAD:main

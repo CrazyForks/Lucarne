@@ -12,3 +12,4 @@ data/instruments/
 data/wechat-contexts.json
 .idea
 .pi
+__pycache__/

@@ -1,85 +1,64 @@
-# Lucarne
 
-![Build](https://img.shields.io/badge/build-passing-brightgreen)
+![Lucarne AI Poster](docs/assets/lucarne-ai-poster.png)
+
+[![Release](https://github.com/tuchg/Lucarne/actions/workflows/release.yml/badge.svg)](https://github.com/tuchg/Lucarne/actions/workflows/release.yml)
 ![Coverage](https://img.shields.io/badge/coverage-67%2F67%20journeys-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
-![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange?logo=rust)
 ![Telegram](https://img.shields.io/badge/channel-Telegram-26A5E4?logo=telegram)
 ![WeChat](https://img.shields.io/badge/channel-WeChat-07C160?logo=wechat)
 
-**Agents 完成、卡住、需要你时，Lucarne 会在手机上叫你。**
+English | [中文](README.cn.md)
 
-- Agents 在本地电脑上跑，人可以放下电脑；微信 / Telegram 随时同步关键进展
-- 权限审批、问题确认、失败通知，都变成手机上的可处理事件
-- 微信扫码接收agents消息，引用消息即可自动接续对应上下文
-- Telegram 控制台查看所有 Agent、工作区、历史会话
-- 查看本机agents历史会话、本机当下正在运行的agent
-- 高性能低内存的轻量常驻进程，闲置agent自动释放
-- 无需在手机安装新的app，安全接收最及时的消息通知
+**Stop babysitting your local AI agents.**
 
----
-
-## Demo
-
-> 素材待补。请按下列文件名录制并放入 `docs/assets/`，README 会自动展示。
-
-### Telegram `/panel` 多 Agent 面板
-
-![Telegram /panel 唤出面板并查看多 Agent 状态](docs/assets/demo-telegram-panel.gif)
-
-建议录制内容：在 Telegram 输入 `/panel` → 面板展示 Overview → 切换 Workspaces / Sessions → 查看 Claude、Codex、Gemini、Copilot、Pi 状态。
-
-### 微信引用消息，AI 接续上下文
-
-![微信引用上一条消息后 AI 完美接续上下文](docs/assets/demo-wechat-quote-context.png)
-
-建议截图内容：微信里引用 Lucarne 推送的 Agent 通知 → 发送追问 → AI 回复保留原 session 上下文。
-
-### Telegram 点击 `[Approve]` 批准 Claude 执行命令
-
-![Telegram 点击 Approve 批准 Claude 执行命令](docs/assets/demo-telegram-approve-claude.gif)
-
-建议录制内容：Claude 请求执行 shell / 文件修改 → Telegram 出现 `[Approve]` `[Deny]` → 点击 `[Approve]` → Agent 继续执行并返回结果。
+- No new mobile app required; receive timely, secure notifications through existing channels
+- Zero-intrusion setup: no hooks, no skills, no MCP, no project changes; scan a QR code and start using it in one step
+- Agents run on your local computer, so you can step away while WeChat / Telegram keep you synced on key progress
+- Permission approvals, clarifying questions, and failure notifications become actionable mobile events
+- Scan a WeChat QR code to receive agent messages; quote a message to continue the matching context automatically
+- Use the Telegram console to view all agents, workspaces, and historical sessions
+- View local agent session history and agents currently running on this machine
+- Lightweight resident process with high performance and low memory use; idle agents are released automatically
 
 ---
 
-## 快速启动（Homebrew）
+## Quick Start (Homebrew)
 
-### 1. 安装
+### 1. Install
 
 ```bash
 brew tap tuchg/Lucarne https://github.com/tuchg/Lucarne
 brew install lucarned
 ```
 
-### 2. 初始化
+### 2. Initialize
 
 ```bash
 lucarned init
 ```
 
-初始化会引导你：
+Initialization guides you through:
 
-- 选择启用的 Agent：`claude`、`codex`、`copilot`、`gemini`、`pi`
-- 配置 Telegram Bot Token 和入口 chat（可选）
-- 扫码登录微信（可选）
-- 生成配置文件：`~/.lucarned/lucarned.yaml`
+- Selecting enabled agents: `claude`, `codex`, `copilot`, `gemini`, `pi`
+- Configuring a Telegram Bot Token and entry chat (optional)
+- Logging in to WeChat by QR code (optional)
+- Generating the config file: `~/.lucarned/lucarned.yaml`
 
-### 3. 启动后台服务
+### 3. Start the background service
 
 ```bash
 brew services start lucarned
 ```
 
-### 4. 打开 Telegram 面板 （可选）
+### 4. Open the Telegram panel (optional)
 
 ```text
 /panel
 ```
 
-看到 Lucarne 面板后，即可新建 workspace、绑定 Agent、恢复历史 session、审批命令。
+After the Lucarne panel appears, you can create workspaces, bind agents, resume historical sessions, and approve commands.
 
-### 常用命令
+### Common commands
 
 ```bash
 brew services restart lucarned
@@ -87,20 +66,20 @@ brew services stop lucarned
 ```
 
 ```text
-配置: ~/.lucarned/lucarned.yaml
-状态: ~/.lucarned/state.sqlite3
-日志: ~/.lucarned/logs/lucarned.YYYY-MM-DD.log
+Config: ~/.lucarned/lucarned.yaml
+State:  ~/.lucarned/state.sqlite3
+Logs:   ~/.lucarned/logs/lucarned.YYYY-MM-DD.log
 ```
 
 ---
 
-## 配置示例
+## Configuration Example
 
-完整示例见 [`examples/lucarned.yaml`](examples/lucarned.yaml)。
+See the full example at [`examples/lucarned.yaml`](examples/lucarned.yaml).
 
-初始化后，实际配置位于：`~/.lucarned/lucarned.yaml`。
+After initialization, the active config lives at: `~/.lucarned/lucarned.yaml`.
 
-也可用环境变量覆盖：
+You can also override settings with environment variables:
 
 ```bash
 export TELEGRAM_BOT_TOKEN="123456:..."
@@ -110,40 +89,40 @@ export LUCARNE_AUTHORIZED_USER_IDS="111111,222222"
 
 ---
 
-## 使用方式
+## Usage
 
-完整命令参考见 [`docs/commands.md`](docs/commands.md)。README 只保留核心路径。
+See the full command reference at [`docs/commands.md`](docs/commands.md). This README keeps only the core paths.
 
-### WeChat：引用即路由
+### WeChat: quote-to-route
 
-1. Lucarne 把 Agent 进展推送到微信。
-2. 引用通知并回复，Lucarne 自动恢复对应 agent session。
-3. 继续追问，自动接续原上下文。
+1. Lucarne pushes agent progress to WeChat.
+2. Quote a notification and reply; Lucarne automatically restores the matching agent session.
+3. Continue the conversation with the original context attached.
 
-微信引用路由支持双策略：优先 `message_id`，失败后用引用文本哈希兜底。
+WeChat quote routing uses two strategies: it prefers `message_id`, then falls back to a quoted-text hash.
 
-### Telegram：移动端多 Agent 控制台
+### Telegram: mobile multi-agent console
 
-1. 在入口 chat 发送 `/panel`。
-2. 点 `New` 或发送 `/aN` 新建 Agent workspace。
-3. 进入 workspace topic，像聊天一样给 Agent 派任务。
-4. Agent 请求权限时，点 `[Approve]` / `[Deny]`。
-5. 需要查看状态时发 `/status`；需要中断时发 `/interrupt`；需要分支时发 `/fork`。
+1. Send `/panel` in the entry chat.
+2. Tap `New` or send `/aN` to create an agent workspace.
+3. Enter the workspace topic and assign tasks to agents like a normal chat.
+4. When an agent asks for permission, tap `[Approve]` / `[Deny]`.
+5. Send `/status` to inspect state, `/interrupt` to stop work, or `/fork` to branch a session.
 
-Telegram workspace 映射为 Forum Topic。一个项目一个 topic；一个 topic 可绑定一个 live Agent session。
-- Telegram支持WeChat所有功能
+Telegram workspaces map to Forum Topics. One project gets one topic; one topic can bind one live agent session.
+- Telegram supports every WeChat feature.
 
 ---
 
-## 架构概览
+## Architecture Overview
 
 ```
 ┌─────────────┐  ┌─────────────┐
-│  Telegram   │  │   WeChat    │  ← 用户接触面
+│  Telegram   │  │   WeChat    │  ← User-facing channels
 └──────┬──────┘  └──────┬──────┘
        │                │
    lucarne-         lucarne-
-   telegram         wechat          ← Channel adapter（命令、通知、队列、重试）
+   telegram         wechat          ← Channel adapter (commands, notifications, queues, retries)
        │                │
        └───────┬────────┘
           lucarne-adapter           ← Plugin registry
@@ -153,28 +132,28 @@ Telegram workspace 映射为 Forum Topic。一个项目一个 topic；一个 top
          agent-sessions             ← Provider parse / discovery / watch
                │
     ┌──────┬──────┬──────┬──────┐
-  Claude  Codex Gemini Copilot  Pi  ← Agent CLI 进程
+  Claude  Codex Gemini Copilot  Pi  ← Agent CLI processes
 ```
 ---
 
-## Agent 能力矩阵
+## Agent Capability Matrix
 
-| 能力 | Claude | Codex | Gemini | Copilot | Pi |
+| Capability | Claude | Codex | Gemini | Copilot | Pi |
 |---|---:|---:|---:|---:|---:|
-| 推理 / Thinking | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 工具调用 | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 结构化审批 | ✅ | ✅ | ✅ | — | ✅ |
+| Reasoning / Thinking | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Tool calls | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Structured approval | ✅ | ✅ | ✅ | — | ✅ |
 | AskUserQuestion | ✅ | ✅ | ✅ | — | — |
-| 使用量追踪 | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 中断 | ✅ | ✅ | ✅ | — | ✅ |
+| Usage tracking | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Interrupt | ✅ | ✅ | ✅ | — | ✅ |
 | Resume | ✅ | ✅ | ✅ | — | ✅ |
-| 子 Agent | ✅ | ✅ | — | — | — |
-| 原生命令 | ✅ | ✅ | ✅ | — | ✅ |
-| Fork（创建分支会话） | ✅ | ✅ | — | — | ✅ |
+| Sub-agents | ✅ | ✅ | — | — | — |
+| Native commands | ✅ | ✅ | ✅ | — | ✅ |
+| Fork (create branched session) | ✅ | ✅ | — | — | ✅ |
 
 ---
 
-## 开发
+## Development
 
 ```bash
 git clone https://github.com/tuchg/Lucarne.git
@@ -186,12 +165,12 @@ cargo +nightly test -Zbuild-dir-new-layout
 ---
 
 ## Roadmap
-- [ ] Linux 支持：补齐安装说明、服务管理、发布包与 smoke test
-- [ ] Windows 支持：补齐安装说明、后台运行、路径 / 进程兼容与发布包
-- [ ] 消息模式 steer/queue
-- [ ] agent-sessions 整理为独立crate
-- [ ] 支持远程 agent 环境
-- [ ] More channels：Discord、Slack、飞书、钉钉、Matrix、QQ 等更多入口
+- [ ] Linux support: installation docs, service management, release packages, and smoke tests
+- [ ] Windows support: installation docs, background execution, path / process compatibility, and release packages
+- [ ] Message modes: steer / queue
+- [ ] Split `agent-sessions` into an independent crate
+- [ ] Support remote agent environments
+- [ ] More channels: Discord, Slack, Feishu, DingTalk, Matrix, QQ, and more
 - [ ] ....
 
 ---
