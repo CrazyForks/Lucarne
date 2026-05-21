@@ -942,6 +942,47 @@ impl BotState {
         Ok(hydrated)
     }
 
+    pub fn hydrate_workspace(
+        &self,
+        ws: &WorkspaceId,
+        default_chat: &ChatId,
+    ) -> Result<Option<WorkSession>, StateStoreError> {
+        if let Some(session) = self.get(ws) {
+            return Ok(Some(session));
+        }
+        let Some(workspace) = self.core.workspace_binding(&control_workspace_id(ws)) else {
+            return Ok(None);
+        };
+        let channel_bindings = self.core.channel_bindings_for_workspace(&workspace.workspace_id);
+        let telegram_binding = channel_bindings
+            .iter()
+            .find(|binding| binding.channel.as_str() == "telegram" && binding.topic_id.is_some())
+            .or_else(|| {
+                channel_bindings
+                    .iter()
+                    .find(|binding| binding.channel.as_str() == "telegram")
+            });
+        let (chat, topic) = telegram_binding
+            .map(|binding| {
+                (
+                    ChatId::new(binding.chat_id.as_str()),
+                    binding
+                        .topic_id
+                        .as_ref()
+                        .map(|topic| WorkspaceId::new(topic.as_str())),
+                )
+            })
+            .unwrap_or_else(|| (default_chat.clone(), None));
+        let session = self.session_from_workspace_binding(workspace, chat)?;
+        let mut g = self.inner.write().unwrap();
+        if let Some(topic) = topic {
+            insert_session(&mut g, session.clone(), topic);
+        } else {
+            g.sessions.insert(ws.clone(), session.clone());
+        }
+        Ok(Some(session))
+    }
+
     pub fn hydrate_workspace_for_handle(
         &self,
         handle: &WorkspaceHandle,

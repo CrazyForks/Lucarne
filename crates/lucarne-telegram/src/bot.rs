@@ -426,7 +426,14 @@ impl Bot {
         handle: &WorkspaceHandle,
         reply_to: &MessageId,
     ) -> Result<Option<WorkSession>, String> {
-        match self.state.get(ws) {
+        let session = match self.state.get(ws) {
+            Some(session) => Some(session),
+            None => self
+                .state
+                .hydrate_workspace(ws, &handle.chat)
+                .map_err(|err| err.to_string())?,
+        };
+        match session {
             Some(mut latest) => {
                 self.repair_history_replay_resume_ref(&mut latest, handle)?;
                 Ok(Some(latest))
@@ -11225,6 +11232,91 @@ done
                 .iter()
                 .all(|msg| !msg.body.contains("no longer routable")),
             "notification follow-up should not lose routing"
+        );
+    }
+
+    #[tokio::test]
+    async fn notification_reply_after_restart_hydrates_workspace_session() {
+        let channel = Arc::new(RecordingChannel::default());
+        let inputs = Arc::new(StdMutex::new(Vec::new()));
+        let runtime = runtime_with_recorder(Arc::clone(&inputs));
+        let core = core_with_runtime(runtime);
+        let entry = WorkspaceHandle::new(ChatId::new("100"), WorkspaceId::new(""));
+        let state = BotState::new_with_core(Arc::clone(&core));
+        let notification = WorkspaceHandle::new(ChatId::new("100"), WorkspaceId::new("77"));
+        state
+            .set_notification_handle(&notification)
+            .expect("persist notification topic");
+        let session = WorkSession {
+            workspace: WorkspaceId::new("codex:thread-restart"),
+            chat: ChatId::new("200"),
+            provider_id: "codex",
+            project_path: Some(PathBuf::from("/tmp/project")),
+            title: "codex restart".into(),
+            live: None,
+            resume_ref: Some("thread-restart".into()),
+        };
+        state
+            .upsert_with_topic(session.clone(), WorkspaceId::new("workspace-topic"))
+            .expect("persist workspace session");
+        let provider_session_id = state
+            .active_provider_session_id(&session.workspace)
+            .expect("provider session id");
+        state
+            .register_message_session_binding(
+                channel.name(),
+                &notification.chat,
+                &MessageId::new("sent-before-restart"),
+                provider_session_id,
+            )
+            .expect("persist notification routing");
+
+        let restarted_state = BotState::new_with_core(Arc::clone(&core));
+        let restarted_bot = Arc::new(Bot::new_with_state_and_history_watch(
+            Arc::clone(&channel) as Arc<dyn Channel>,
+            Arc::clone(&core),
+            entry,
+            Arc::clone(&restarted_state),
+            false,
+        ));
+        assert!(
+            restarted_bot.state.get(&session.workspace).is_none(),
+            "restart begins without workspace sessions in memory"
+        );
+
+        restarted_bot
+            .clone()
+            .handle(ChannelEvent::Message(IncomingMessage {
+                message_id: MessageId::new("user-after-restart"),
+                chat: notification.chat.clone(),
+                workspace: Some(notification.workspace.clone()),
+                reply_to: Some(MessageId::new("sent-before-restart")),
+                user: "alice".into(),
+                text: Some("continue after restart".into()),
+                attachments: Vec::new(),
+            }))
+            .await
+            .expect("notification reply after restart");
+
+        assert!(
+            restarted_bot.state.get(&session.workspace).is_some(),
+            "notification reply should hydrate the workspace session"
+        );
+        let submitted = inputs
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|input| input.text.as_str().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(submitted, ["continue after restart"]);
+        assert!(
+            channel
+                .sent
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|msg| !msg.body.contains("no longer bound")),
+            "hydrated notification reply must not report a missing binding"
         );
     }
 
