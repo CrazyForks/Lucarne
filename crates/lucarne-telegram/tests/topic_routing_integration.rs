@@ -859,6 +859,39 @@ async fn process_draft_is_visible_omitted_then_deleted_after_turn_completion() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn topic_prompt_reports_agent_start_error_to_telegram_user() {
+    let _test_lock = test_lock();
+    let provider = Arc::new(ProviderProbe::with_resume_error(
+        "adapter: resolve command \"pi\" in PATH",
+    ));
+    let core = core_with_provider(Arc::clone(&provider));
+    bind_workspace_with_project_path(&core, "workspace-a", "9", "thread-1", "/tmp/project-a");
+
+    let channel = Arc::new(RecordingChannel::streaming());
+    let bot = bot_with_state(Arc::clone(&channel), Arc::clone(&core));
+    let run = tokio::spawn(Arc::clone(&bot).run());
+    channel.push_event(ChannelEvent::Message(topic_message(
+        "9",
+        "m-prompt",
+        "run tests",
+    )));
+
+    let failure = eventually_topic_message(&channel, "9", |message| {
+        message.body.contains("⚠ agent start failed")
+            && message.body.contains("resolve command \"pi\" in PATH")
+    })
+    .await;
+    assert_eq!(failure.format, TextFormat::Markdown);
+    assert_eq!(provider.resumes(), vec!["thread-1".to_string()]);
+
+    channel.close_events();
+    timeout(Duration::from_secs(2), run)
+        .await
+        .expect("error reporting run should stop")
+        .expect("error reporting task should not panic");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn image_attachment_long_caption_is_split_at_telegram_delivery() {
     use base64::Engine as _;
 
@@ -6696,6 +6729,7 @@ struct ProviderProbe {
     open_args: Arc<StdMutex<Vec<serde_json::Value>>>,
     resumes: Arc<StdMutex<Vec<String>>>,
     resume_args: Arc<StdMutex<Vec<serde_json::Value>>>,
+    resume_error: Option<String>,
     lifecycle_calls: Arc<StdMutex<Vec<(String, String)>>>,
     command_catalog: AgentCommandCatalog,
     model_catalog: Option<AgentModelCatalog>,
@@ -6726,6 +6760,7 @@ impl Default for ProviderProbe {
             open_args: Arc::new(StdMutex::new(Vec::new())),
             resumes: Arc::new(StdMutex::new(Vec::new())),
             resume_args: Arc::new(StdMutex::new(Vec::new())),
+            resume_error: None,
             lifecycle_calls: Arc::new(StdMutex::new(Vec::new())),
             command_catalog: AgentCommandCatalog::default(),
             model_catalog: None,
@@ -6825,6 +6860,13 @@ impl ProviderProbe {
         Self {
             submit_events,
             auto_complete_turn: false,
+            ..Self::default()
+        }
+    }
+
+    fn with_resume_error(error: &str) -> Self {
+        Self {
+            resume_error: Some(error.to_string()),
             ..Self::default()
         }
     }
@@ -6958,6 +7000,12 @@ impl AgentProvider for ProviderProbe {
             .unwrap()
             .push(req.session_ref.0.to_string());
         self.resume_args.lock().unwrap().push(req.args);
+        if let Some(error) = self.resume_error.as_ref() {
+            return Err(AgentError {
+                kind: AgentErrorKind::Internal,
+                message: error.clone().into(),
+            });
+        }
         Ok(Box::new(self.recording_session(req.session_ref.0.as_str())))
     }
 }

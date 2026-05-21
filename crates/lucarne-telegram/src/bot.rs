@@ -1600,7 +1600,7 @@ impl Bot {
                         provider = session.provider_id,
                         "agent session open/resume failed"
                     );
-                    let msg = OutgoingMessage::markdown(format!("⚠ open failed: {err}"));
+                    let msg = OutgoingMessage::markdown(format!("⚠ agent start failed: {err}"));
                     send_with_fallback(&*self.channel, handle, msg, session.provider_id)
                         .await
                         .map_err(|err| err.to_string())?;
@@ -4394,7 +4394,7 @@ impl Bot {
         _idx: Option<usize>,
         error: &str,
     ) -> Result<(), String> {
-        let msg = OutgoingMessage::markdown(format!("⚠ resume failed: {error}"));
+        let msg = OutgoingMessage::markdown(format!("⚠ agent start failed: {error}"));
         send_with_fallback(&*self.channel, handle, msg, provider)
             .await
             .map(|_| ())
@@ -7357,6 +7357,7 @@ mod tests {
                 message.body.starts_with('⚠')
                     || message.body.contains("open failed")
                     || message.body.contains("resume failed")
+                    || message.body.contains("agent start failed")
             })
             .map(|message| message.body.clone())
             .collect::<Vec<_>>();

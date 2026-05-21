@@ -1388,7 +1388,9 @@ where
         self.start_typing_keepalive(workspace_id.clone(), user_id);
         if let Err(err) = self.ensure_live(&workspace_id).await {
             self.stop_typing_keepalive(&workspace_id);
-            return Err(err);
+            let body = format!("⚠ agent start failed: {err}");
+            self.transport.reply(&message, &body).await?;
+            return Ok(());
         }
         self.core
             .begin_direct_notification_suppression(&workspace_id);
@@ -1408,7 +1410,9 @@ where
             Err(err) => {
                 self.core.end_direct_notification_suppression(&workspace_id);
                 self.stop_typing_keepalive(&workspace_id);
-                return Err(WechatError::Core(err.to_string()));
+                let body = format!("⚠ agent submit failed: {err}");
+                self.transport.reply(&message, &body).await?;
+                return Ok(());
             }
         };
         self.remember_pending_reply(submitted.turn_id, workspace_id, message);
@@ -2764,6 +2768,68 @@ mod tests {
             "assistant reply text should be bound for continued quoted replies"
         );
         assert!(!core.direct_notification_suppressed(&workspace_id));
+    }
+
+    #[tokio::test]
+    async fn quoted_reply_reports_agent_start_error_to_wechat_user() {
+        let provider = Arc::new(FakeProvider::default());
+        let core = test_core(Arc::clone(&provider));
+        let opened = core
+            .open_workspace_with_events(OpenWorkspaceRequest {
+                provider_id: "codex",
+                project_path: Some("/tmp/workspace-a".into()),
+                title: "workspace-a".into(),
+            })
+            .await
+            .expect("open workspace");
+        let workspace_id = opened.workspace.workspace_id.clone();
+        let live_instance_id = lucarne::control_plane::LiveInstanceId::new(
+            opened.session.instance_id().0.as_str(),
+        );
+        let mut events = core.watch_events();
+        let transport = Arc::new(FakeTransport::default());
+        let service = WechatNotificationService::new(
+            Arc::clone(&core),
+            Arc::clone(&transport),
+            WechatServiceOptions {
+                initial_user_ids: vec!["user-1".into()],
+                ..WechatServiceOptions::default()
+            },
+        );
+
+        provider.emit_assistant("thread-1", "background complete");
+        service
+            .handle_core_event(next_timeline_event(&mut events).await)
+            .await
+            .expect("deliver notification");
+        core.detach_live_session(&workspace_id, &live_instance_id, "test detached")
+            .await
+            .expect("detach live session");
+        provider.set_resume_failure("adapter: resolve command \"pi\" in PATH");
+
+        service
+            .handle_incoming(WechatIncoming::new(
+                "user-reply-1",
+                "user-1",
+                "please continue",
+                Some(transport.sends()[0].message_id.clone()),
+            ))
+            .await
+            .expect("report start error");
+
+        let replies = transport.replies();
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].reply_to_message_id, "user-reply-1");
+        assert!(
+            replies[0].text.contains("⚠ agent start failed"),
+            "{}",
+            replies[0].text
+        );
+        assert!(
+            replies[0].text.contains("resolve command \"pi\" in PATH"),
+            "{}",
+            replies[0].text
+        );
     }
 
     #[tokio::test]
@@ -5657,6 +5723,7 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
         sessions: StdMutex<HashMap<String, mpsc::Sender<AgentEvent>>>,
         next: StdMutex<u64>,
         resume_delay: StdMutex<Option<Duration>>,
+        resume_failure: StdMutex<Option<String>>,
         resume_args: StdMutex<Vec<String>>,
         submit_prefix_messages: StdMutex<Vec<String>>,
         submit_failure: StdMutex<Option<String>>,
@@ -5679,6 +5746,7 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
                 sessions: StdMutex::new(HashMap::new()),
                 next: StdMutex::new(0),
                 resume_delay: StdMutex::new(None),
+                resume_failure: StdMutex::new(None),
                 resume_args: StdMutex::new(Vec::new()),
                 submit_prefix_messages: StdMutex::new(Vec::new()),
                 submit_failure: StdMutex::new(None),
@@ -5701,6 +5769,10 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
 
         fn set_resume_delay(&self, delay: Duration) {
             *self.resume_delay.lock().expect("resume delay lock") = Some(delay);
+        }
+
+        fn set_resume_failure(&self, error: &str) {
+            *self.resume_failure.lock().expect("resume failure lock") = Some(error.to_string());
         }
 
         fn set_submit_prefix_messages(&self, messages: Vec<&str>) {
@@ -5785,6 +5857,17 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
             let delay = *self.resume_delay.lock().expect("resume delay lock");
             if let Some(delay) = delay {
                 tokio::time::sleep(delay).await;
+            }
+            if let Some(error) = self
+                .resume_failure
+                .lock()
+                .expect("resume failure lock")
+                .clone()
+            {
+                return Err(AgentError {
+                    kind: AgentErrorKind::Internal,
+                    message: error.into(),
+                });
             }
             Ok(Box::new(self.session(req.session_ref.0.to_string())))
         }
