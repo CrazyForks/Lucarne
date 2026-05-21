@@ -37,6 +37,7 @@ use wechat_ilink::{UserInteractionReason, WechatContext};
 
 const DEFAULT_TYPING_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(4);
 const DEFAULT_PENDING_REPLY_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+const STARTUP_HELP_MAX_RETRIES: u8 = 3;
 const MAX_PENDING_REPLIES: usize = 10;
 const MAX_PENDING_NOTIFICATIONS: usize = 10;
 const MAX_PENDING_INTERVENTIONS: usize = 10;
@@ -205,6 +206,7 @@ pub struct WechatNotificationService<T> {
 #[derive(Default)]
 struct WechatState {
     users: BTreeSet<String>,
+    startup_help_retries: HashMap<String, u8>,
     pending_replies: HashMap<TurnId, WechatPendingReply>,
     pending_reply_order: VecDeque<TurnId>,
     pending_notifications: VecDeque<WechatPendingNotification>,
@@ -308,6 +310,7 @@ where
             transport,
             state: Mutex::new(WechatState {
                 users: options.initial_user_ids.into_iter().collect(),
+                startup_help_retries: HashMap::new(),
                 pending_replies: HashMap::new(),
                 pending_reply_order: VecDeque::new(),
                 pending_notifications: VecDeque::new(),
@@ -365,6 +368,7 @@ where
                     }
                 }
                 _ = pending_retry.tick() => {
+                    self.retry_pending_startup_help(true).await;
                     self.retry_pending_notifications().await?;
                     self.retry_completed_pending_replies().await?;
                 }
@@ -524,8 +528,13 @@ where
         if users.is_empty() {
             return;
         }
+        self.remember_pending_startup_help_users(users);
+        self.retry_pending_startup_help(false).await;
+    }
+
+    async fn retry_pending_startup_help(&self, count_failures_as_retries: bool) {
         let body = render_wechat_startup_help();
-        for user_id in users {
+        for user_id in self.pending_startup_help_users() {
             if let Some(remaining) = self.rate_limit_remaining() {
                 debug!(
                     target: "lucarne_wechat::service",
@@ -543,6 +552,9 @@ where
                         user_id = %user_id,
                         "wechat startup help skipped: no stored context for user"
                     );
+                    if count_failures_as_retries {
+                        self.record_startup_help_retry_failure(&user_id);
+                    }
                     continue;
                 }
                 Err(err) => {
@@ -552,11 +564,15 @@ where
                         error = %err,
                         "wechat startup help context lookup failed"
                     );
+                    if count_failures_as_retries {
+                        self.record_startup_help_retry_failure(&user_id);
+                    }
                     continue;
                 }
             };
             match self.transport.send(&context, &body).await {
                 Ok(receipt) => {
+                    self.forget_pending_startup_help(&user_id);
                     debug!(
                         target: "lucarne_wechat::service",
                         user_id = %user_id,
@@ -576,6 +592,9 @@ where
                         error = %message,
                         "wechat startup help rate limited"
                     );
+                    if count_failures_as_retries {
+                        self.record_startup_help_retry_failure(&user_id);
+                    }
                 }
                 Err(err) => {
                     warn!(
@@ -584,6 +603,9 @@ where
                         error = %err,
                         "wechat startup help send failed"
                     );
+                    if count_failures_as_retries {
+                        self.record_startup_help_retry_failure(&user_id);
+                    }
                 }
             }
         }
@@ -1776,6 +1798,59 @@ where
             .iter()
             .cloned()
             .collect()
+    }
+
+    fn remember_pending_startup_help_users(&self, users: Vec<String>) {
+        let mut state = self.state.lock().expect("wechat service state lock");
+        for user_id in users {
+            state.startup_help_retries.entry(user_id).or_insert(0);
+        }
+    }
+
+    fn pending_startup_help_users(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .expect("wechat service state lock")
+            .startup_help_retries
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    fn forget_pending_startup_help(&self, user_id: &str) {
+        self.state
+            .lock()
+            .expect("wechat service state lock")
+            .startup_help_retries
+            .remove(user_id);
+    }
+
+    fn record_startup_help_retry_failure(&self, user_id: &str) {
+        let abandoned_retries = {
+            let mut state = self.state.lock().expect("wechat service state lock");
+            let retries = {
+                let Some(retries) = state.startup_help_retries.get_mut(user_id) else {
+                    return;
+                };
+                *retries = retries.saturating_add(1);
+                *retries
+            };
+            if retries >= STARTUP_HELP_MAX_RETRIES {
+                state.startup_help_retries.remove(user_id);
+                Some(retries)
+            } else {
+                None
+            }
+        };
+        if let Some(retries) = abandoned_retries {
+            warn!(
+                target: "lucarne_wechat::service",
+                user_id = %user_id,
+                retries,
+                max_retries = STARTUP_HELP_MAX_RETRIES,
+                "wechat startup help abandoned after bounded retries"
+            );
+        }
     }
 
     fn rate_limit_remaining(&self) -> Option<Duration> {
@@ -4491,6 +4566,78 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
     }
 
     #[tokio::test]
+    async fn run_loop_retries_startup_help_after_send_failure() {
+        let provider = Arc::new(FakeProvider::default());
+        let core = test_core(provider);
+        let transport = Arc::new(FakeTransport::default());
+        transport.fail_sends("network down");
+        let service = Arc::new(WechatNotificationService::new(
+            core,
+            Arc::clone(&transport),
+            WechatServiceOptions {
+                initial_user_ids: vec!["user-1".into()],
+                pending_reply_retry_interval: Duration::from_millis(10),
+                ..WechatServiceOptions::default()
+            },
+        ));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let run = tokio::spawn({
+            let service = Arc::clone(&service);
+            async move { service.run_until_shutdown(shutdown_rx).await }
+        });
+
+        wait_until(|| transport.send_attempt_count() >= 1).await;
+        assert!(transport.sends().is_empty());
+
+        transport.clear_send_failures();
+        wait_until(|| {
+            transport.sends().iter().any(|send| {
+                send.user_id == "user-1"
+                    && send.text.contains("👋 lucarned 已启动。")
+                    && send.text.contains("/help — 显示帮助")
+            })
+        })
+        .await;
+
+        shutdown_tx.send(true).expect("stop service");
+        run.await
+            .expect("wechat service task should join")
+            .expect("wechat service should stop cleanly");
+    }
+
+    #[tokio::test]
+    async fn run_loop_abandons_startup_help_after_three_failed_retries() {
+        let provider = Arc::new(FakeProvider::default());
+        let core = test_core(provider);
+        let transport = Arc::new(FakeTransport::default());
+        transport.fail_sends("network down");
+        let service = Arc::new(WechatNotificationService::new(
+            core,
+            Arc::clone(&transport),
+            WechatServiceOptions {
+                initial_user_ids: vec!["user-1".into()],
+                pending_reply_retry_interval: Duration::from_millis(10),
+                ..WechatServiceOptions::default()
+            },
+        ));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let run = tokio::spawn({
+            let service = Arc::clone(&service);
+            async move { service.run_until_shutdown(shutdown_rx).await }
+        });
+
+        wait_until(|| transport.send_attempt_count() >= 4).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(transport.send_attempt_count(), 4);
+        assert!(transport.sends().is_empty());
+
+        shutdown_tx.send(true).expect("stop service");
+        run.await
+            .expect("wechat service task should join")
+            .expect("wechat service should stop cleanly");
+    }
+
+    #[tokio::test]
     async fn run_loop_continues_after_incoming_handler_error() {
         let provider = Arc::new(FakeProvider::default());
         let core = test_core(provider);
@@ -6293,6 +6440,7 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
     struct FakeTransport {
         next: StdMutex<u64>,
         sends: StdMutex<Vec<SentRecord>>,
+        send_attempts: StdMutex<usize>,
         replies: StdMutex<Vec<ReplyRecord>>,
         attachments: StdMutex<Vec<AttachmentRecord>>,
         typings: StdMutex<Vec<String>>,
@@ -6409,6 +6557,10 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
             self.sends.lock().expect("sends lock").clone()
         }
 
+        fn send_attempt_count(&self) -> usize {
+            *self.send_attempts.lock().expect("send attempts lock")
+        }
+
         fn replies(&self) -> Vec<ReplyRecord> {
             self.replies.lock().expect("replies lock").clone()
         }
@@ -6496,6 +6648,7 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
             context: &WechatContext,
             text: &str,
         ) -> Result<WechatSendReceipt, WechatError> {
+            *self.send_attempts.lock().expect("send attempts lock") += 1;
             if let Some(retry_after) = *self.send_rate_limit.lock().expect("send rate limit lock") {
                 return Err(WechatError::RateLimited {
                     retry_after,
