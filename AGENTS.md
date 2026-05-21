@@ -30,6 +30,30 @@ cargo +nightly test -Zbuild-dir-new-layout
 cargo +nightly clippy -Zbuild-dir-new-layout --all-targets --all-features
 ```
 
+## Release Process
+
+Do not create GitHub Releases manually.
+
+Release flow:
+
+1. Bump workspace version in `Cargo.toml`.
+2. Regenerate/update `Cargo.lock` only for workspace package version changes.
+3. Run verification:
+   `cargo +nightly test -Zbuild-dir-new-layout --locked --workspace --all-features -- --quiet`
+4. Commit version bump.
+5. Push `main`.
+6. Create and push annotated tag, for example:
+   `git tag -a v0.2.2 -m "v0.2.2"`
+   `git push origin v0.2.2`
+7. Let GitHub Actions create the release, upload assets, and update the Homebrew formula.
+
+Never run `gh release create` manually before the release workflow finishes. The workflow refuses to overwrite an existing release.
+
+If a blank release was created by mistake:
+
+1. Delete the GitHub Release only; keep the git tag.
+2. Rerun the failed release workflow for the same tag.
+
 ## Provider Boundaries
 
 Provider responsibility must not be moved into public/common/core layers.
