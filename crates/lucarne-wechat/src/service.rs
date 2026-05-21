@@ -22,16 +22,13 @@ use lucarne::{
         WorkspaceId,
     },
     core_service::{
-        render_agent_resource_snapshot, render_kill_agent_report, AgentResourceEntry,
-        AgentResourceScope, AgentResourceSnapshot, CoreEvent, KillAgentRequest, KillAgentTarget,
-        LucarneCore, ResumeWorkspaceRequest, SubmitTurnRequest,
+        AgentResourceEntry, AgentResourceScope, AgentResourceSnapshot, CoreEvent, KillAgentReport,
+        KillAgentRequest, KillAgentTarget, LucarneCore, ResumeWorkspaceRequest, SubmitTurnRequest,
     },
 };
 use lucarne_adapter::{GlobalConfigPersistence, GlobalConfigUpdate};
 use lucarne_channel::{
-    agent_message::{
-        compact_path, format_cost_duration, render_agent_message_markdown, AgentMessageFooter,
-    },
+    agent_message::{compact_path, format_cost_duration},
     robust::retry_attachment_delivery,
 };
 use tokio::{sync::oneshot, time::MissedTickBehavior};
@@ -43,6 +40,8 @@ const DEFAULT_PENDING_REPLY_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_PENDING_REPLIES: usize = 10;
 const MAX_PENDING_NOTIFICATIONS: usize = 10;
 const MAX_PENDING_INTERVENTIONS: usize = 10;
+const WECHAT_STALE_NOTIFICATION: &str = "⚠️ 这条通知已无法路由，请重新引用最新的 agent 通知。";
+const WECHAT_REPLY_REQUIRED: &str = "💬 请引用一条 agent 通知后再回复，以继续对应会话。";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WechatSendReceipt {
@@ -441,9 +440,9 @@ where
                 event: AgentEvent::TurnFailed(failed),
             } => {
                 let text = if failed.error.is_empty() {
-                    "agent turn failed".to_string()
+                    "agent 执行失败".to_string()
                 } else {
-                    format!("agent turn failed: {}", failed.error)
+                    format!("agent 执行失败：{}", failed.error)
                 };
                 let Some(reply_target) = self.mark_pending_reply_failed(&turn_id, text) else {
                     return Ok(());
@@ -500,12 +499,9 @@ where
         let has_quote = message.quoted_message_id.is_some() || message.quoted_text.is_some();
         let Some(binding) = self.resolve_quoted_binding(&message) else {
             let body = if has_quote {
-                "That notification is no longer routable.".to_string()
+                WECHAT_STALE_NOTIFICATION.to_string()
             } else {
-                format!(
-                    "Reply to an agent notification to continue that session.\n\n{}",
-                    render_wechat_help()
-                )
+                format!("{WECHAT_REPLY_REQUIRED}\n\n{}", render_wechat_help())
             };
             self.transport.reply(&message, &body).await?;
             return Ok(());
@@ -515,7 +511,7 @@ where
             .workspace_for_provider_session(&binding.provider_session_id)
         else {
             self.transport
-                .reply(&message, "That notification is no longer routable.")
+                .reply(&message, WECHAT_STALE_NOTIFICATION)
                 .await?;
             return Ok(());
         };
@@ -1388,7 +1384,7 @@ where
         self.start_typing_keepalive(workspace_id.clone(), user_id);
         if let Err(err) = self.ensure_live(&workspace_id).await {
             self.stop_typing_keepalive(&workspace_id);
-            let body = format!("⚠ agent start failed: {err}");
+            let body = format!("⚠️ agent 启动失败：{err}");
             self.transport.reply(&message, &body).await?;
             return Ok(());
         }
@@ -1410,7 +1406,7 @@ where
             Err(err) => {
                 self.core.end_direct_notification_suppression(&workspace_id);
                 self.stop_typing_keepalive(&workspace_id);
-                let body = format!("⚠ agent submit failed: {err}");
+                let body = format!("⚠️ 消息提交失败：{err}");
                 self.transport.reply(&message, &body).await?;
                 return Ok(());
             }
@@ -1517,7 +1513,7 @@ where
             SlashCommand::New => {
                 let Some(scope) = self.slash_scope(message)? else {
                     self.transport
-                        .reply(message, "That notification is no longer routable.")
+                        .reply(message, WECHAT_STALE_NOTIFICATION)
                         .await?;
                     return Ok(());
                 };
@@ -1547,7 +1543,7 @@ where
             SlashCommand::Status => {
                 let Some(scope) = self.slash_scope(message)? else {
                     self.transport
-                        .reply(message, "That notification is no longer routable.")
+                        .reply(message, WECHAT_STALE_NOTIFICATION)
                         .await?;
                     return Ok(());
                 };
@@ -1558,7 +1554,7 @@ where
                             .agent_resource_snapshot(AgentResourceScope::All)
                             .await
                             .map_err(|err| WechatError::Core(err.to_string()))?;
-                        render_agent_resource_snapshot(&snapshot)
+                        render_wechat_agent_resource_snapshot(&snapshot)
                     }
                     SlashScope::Workspace(workspace) => {
                         self.core
@@ -1590,7 +1586,7 @@ where
             SlashCommand::Kill(target) => {
                 let Some(scope) = self.slash_scope(message)? else {
                     self.transport
-                        .reply(message, "That notification is no longer routable.")
+                        .reply(message, WECHAT_STALE_NOTIFICATION)
                         .await?;
                     return Ok(());
                 };
@@ -1606,12 +1602,12 @@ where
                     .await
                     .map_err(|err| WechatError::Core(err.to_string()))?;
                 self.transport
-                    .reply(message, &render_kill_agent_report(&report))
+                    .reply(message, &render_wechat_kill_agent_report(&report))
                     .await?;
             }
             SlashCommand::InvalidKill => {
                 self.transport
-                    .reply(message, "usage: `/kill all` or `/kill <session_id:pid>`")
+                    .reply(message, "用法：`/kill all` 或 `/kill <session_id:pid>`")
                     .await?;
             }
         }
@@ -2282,18 +2278,18 @@ fn attachment_binding_text(attachment: &AgentAttachment) -> String {
         .caption
         .as_ref()
         .map(|caption| caption.to_string())
-        .unwrap_or_else(|| format!("[attachment: {}]", attachment.filename))
+        .unwrap_or_else(|| format!("[附件：{}]", attachment.filename))
 }
 
 fn render_attachment_delivery_failure(attachment: &AgentAttachment, error: &str) -> String {
     let error = error.trim();
     let error = if error.is_empty() {
-        "Unknown attachment delivery error"
+        "未知附件发送错误"
     } else {
         error
     };
     format!(
-        "Attachment delivery failed.\n\nFile: {}\nMedia type: {}\nAttachment id: {}\nError: {}",
+        "附件发送失败。\n\n文件：{}\n媒体类型：{}\n附件 ID：{}\n错误：{}",
         attachment.filename, attachment.media_type, attachment.id, error
     )
 }
@@ -2304,17 +2300,45 @@ fn render_agent_message(
     session_ref: &str,
     cost: Option<String>,
 ) -> String {
-    render_agent_message_markdown(
-        text,
-        &AgentMessageFooter {
-            cost,
-            session: Some(session_ref.to_string()),
-            cwd: Some(compact_path(
-                &workspace.project_path.display().to_string(),
-                58,
-            )),
-        },
-    )
+    let (text, extracted_cost) = split_wechat_trailing_cost(text);
+    let mut footer_lines = Vec::new();
+    if let Some(cost) = cost.as_deref().or(extracted_cost) {
+        footer_lines.push(format!("耗时：{cost}"));
+    }
+    footer_lines.push(format!("会话：`{session_ref}`"));
+    footer_lines.push(format!(
+        "目录：`{}`",
+        compact_path(&workspace.project_path.display().to_string(), 58)
+    ));
+    let text = text.trim();
+    if footer_lines.is_empty() {
+        text.to_string()
+    } else if text.is_empty() {
+        footer_lines.join("\n")
+    } else {
+        format!("{}\n\n==========\n{}", text, footer_lines.join("\n"))
+    }
+}
+
+fn split_wechat_trailing_cost(text: &str) -> (&str, Option<&str>) {
+    let trimmed = text.trim_end();
+    let Some((before, line)) = trimmed.rsplit_once('\n') else {
+        return (text.trim(), None);
+    };
+    if !before.ends_with('\n') {
+        return (text.trim(), None);
+    }
+    let line = line.trim();
+    let cost = line
+        .strip_prefix("cost:")
+        .or_else(|| line.strip_prefix("耗时:"))
+        .or_else(|| line.strip_prefix("耗时："))
+        .map(str::trim)
+        .filter(|cost| !cost.is_empty());
+    match cost {
+        Some(cost) => (before.trim_end(), Some(cost)),
+        None => (text.trim(), None),
+    }
 }
 
 fn render_wechat_workspace_status(
@@ -2323,57 +2347,57 @@ fn render_wechat_workspace_status(
     resource_snapshot: &AgentResourceSnapshot,
 ) -> String {
     let mut body = format!(
-        "status\nworkspace: `{}`\ncwd: `{}`",
+        "📊 状态\n工作区：`{}`\n目录：`{}`",
         workspace.workspace_id.as_str(),
         workspace.project_path.display()
     );
     if let Some(status) = status {
         if let Some(version) = status.provider_version.as_deref() {
-            body.push_str(&format!("\nversion: `{version}`"));
+            body.push_str(&format!("\n版本：`{version}`"));
         }
         if let Some(provider) = status.provider_id.as_ref() {
-            body.push_str(&format!("\nprovider: `{provider}`"));
+            body.push_str(&format!("\n提供方：`{provider}`"));
         }
         if let Some(model) = status.model.as_deref() {
-            body.push_str(&format!("\nmodel: `{model}`"));
+            body.push_str(&format!("\n模型：`{model}`"));
             match (status.model_detail.as_deref(), status.reasoning.as_deref()) {
                 (Some(detail), Some(reasoning)) => {
-                    body.push_str(&format!(" (`{detail}`, reasoning {reasoning})"));
+                    body.push_str(&format!("（`{detail}`，推理 {reasoning}）"));
                 }
-                (Some(detail), None) => body.push_str(&format!(" (`{detail}`)")),
+                (Some(detail), None) => body.push_str(&format!("（`{detail}`）")),
                 (None, Some(reasoning)) => {
-                    body.push_str(&format!(" (reasoning {reasoning})"));
+                    body.push_str(&format!("（推理 {reasoning}）"));
                 }
                 (None, None) => {}
             }
         }
         if let Some(directory) = status.directory.as_deref() {
-            body.push_str(&format!("\ndirectory: `{directory}`"));
+            body.push_str(&format!("\n目录：`{directory}`"));
         }
         if let Some(permissions) = status.permission_mode.as_deref() {
-            body.push_str(&format!("\npermissions: `{permissions}`"));
+            body.push_str(&format!("\n权限：`{permissions}`"));
         }
         if let Some(path) = status.agents_md.as_deref() {
-            body.push_str(&format!("\nagents.md: `{path}`"));
+            body.push_str(&format!("\nAGENTS.md：`{path}`"));
         }
         if let Some(account) = status.account.as_deref() {
-            body.push_str(&format!("\naccount: {account}"));
+            body.push_str(&format!("\n账号：{account}"));
         }
         if let Some(base_url) = status.base_url.as_deref() {
-            body.push_str(&format!("\nbase url: `{base_url}`"));
+            body.push_str(&format!("\n基础 URL：`{base_url}`"));
         }
         if let Some(proxy) = status.proxy.as_deref() {
-            body.push_str(&format!("\nproxy: `{proxy}`"));
+            body.push_str(&format!("\n代理：`{proxy}`"));
         }
         if let Some(sources) = status.setting_sources.as_deref() {
-            body.push_str(&format!("\nsetting sources: {sources}"));
+            body.push_str(&format!("\n配置来源：{sources}"));
         }
         if let Some(session) = status
             .native_resume_ref
             .as_deref()
             .or_else(|| status.provider_session_id.as_ref().map(|id| id.as_str()))
         {
-            body.push_str(&format!("\nsession: `{session}`"));
+            body.push_str(&format!("\n会话：`{session}`"));
         }
         let token_usage = status.token_usage.clone().or_else(|| {
             status
@@ -2384,7 +2408,7 @@ fn render_wechat_workspace_status(
         if let Some(tokens) = &token_usage {
             if tokens.input_tokens.is_some() || tokens.output_tokens.is_some() {
                 body.push_str(&format!(
-                    "\ntoken usage: {} in / {} out",
+                    "\nToken 用量：{} 输入 / {} 输出",
                     compact_number(tokens.input_tokens.unwrap_or(0)),
                     compact_number(tokens.output_tokens.unwrap_or(0))
                 ));
@@ -2405,21 +2429,21 @@ fn render_wechat_workspace_status(
                     }
                 });
                 body.push_str(&format!(
-                    "\ncontext: {}/{} ({}%)",
+                    "\n上下文：{}/{}（{}%）",
                     compact_number(used),
                     compact_number(max),
                     percent
                 ));
                 if let Some(compactions) = status.compactions {
-                    body.push_str(&format!(" · compactions: {compactions}"));
+                    body.push_str(&format!(" · 压缩：{compactions}"));
                 }
             }
         }
         if let Some(state) = status.live_instance_state {
-            body.push_str(&format!("\nlive: `{}`", format_live_state(state)));
+            body.push_str(&format!("\n运行状态：`{}`", format_live_state(state)));
         }
         if let Some(binding) = status.channel_binding_state.as_deref() {
-            body.push_str(&format!("\nchannel: `{binding}`"));
+            body.push_str(&format!("\n通道：`{binding}`"));
         }
     }
     if let Some(resource) = resource_snapshot.agents.first() {
@@ -2428,27 +2452,106 @@ fn render_wechat_workspace_status(
     body
 }
 
+fn render_wechat_agent_resource_snapshot(snapshot: &AgentResourceSnapshot) -> String {
+    let mut body = format!(
+        "📊 agent 资源\n托管 agent：`{}`\n最近历史会话：`{}`\n实际进程：`{}`\nCPU：`{:.1}%`\n内存：`{}`",
+        snapshot.managed_agent_count,
+        snapshot.observed_sessions.len(),
+        snapshot.process_count,
+        snapshot.total_cpu_percent,
+        format_resource_bytes(snapshot.total_memory_bytes),
+    );
+    for agent in &snapshot.agents {
+        body.push_str("\n\n");
+        body.push_str(agent.identity.as_deref().unwrap_or("未识别"));
+        body.push('\n');
+        body.push_str(&format!(
+            "工作区：`{}`\n提供方：`{}`\n会话：`{}`\n最近活跃：`{}`\nPID：`{}`\n进程数：`{}`\nCPU：`{:.1}%`\n内存：`{}`",
+            agent.workspace_id.as_str(),
+            agent.provider_id,
+            agent.native_resume_ref,
+            non_empty_or_unknown(&agent.last_active_display),
+            agent
+                .pid
+                .map(|pid| pid.to_string())
+                .unwrap_or_else(|| "未知".to_string()),
+            agent.process_count,
+            agent.cpu_percent,
+            format_resource_bytes(agent.memory_bytes),
+        ));
+    }
+    if !snapshot.observed_sessions.is_empty() {
+        body.push_str("\n\n最近历史会话");
+        for session in &snapshot.observed_sessions {
+            body.push_str("\n\n");
+            body.push_str(session.title.as_ref());
+            body.push('\n');
+            body.push_str(&format!(
+                "工作区：`{}`\n提供方：`{}`\n会话：`{}`\n最近活跃：`{}`",
+                session.workspace_id.as_str(),
+                session.provider_id,
+                session.native_resume_ref,
+                non_empty_or_unknown(&session.last_active_display),
+            ));
+            if let Some(cwd) = session.cwd.as_ref() {
+                body.push_str(&format!("\n目录：`{}`", cwd.display()));
+            }
+        }
+    }
+    body
+}
+
+fn render_wechat_kill_agent_report(report: &KillAgentReport) -> String {
+    let mut body = format!("🛑 终止 agent\n已终止：`{}`", report.killed.len());
+    for killed in &report.killed {
+        body.push_str("\n\n");
+        body.push_str(killed.identity.as_deref().unwrap_or("未识别"));
+        body.push('\n');
+        body.push_str(&format!(
+            "工作区：`{}`\n会话：`{}`\nPID：`{}`",
+            killed.workspace_id.as_str(),
+            killed.native_resume_ref,
+            killed
+                .pid
+                .map(|pid| pid.to_string())
+                .unwrap_or_else(|| "未知".to_string()),
+        ));
+    }
+    if let Some(identity) = report.not_found.as_deref() {
+        body.push_str(&format!("\n\n未找到：`{identity}`"));
+    }
+    body
+}
+
+fn non_empty_or_unknown(value: &str) -> &str {
+    if value.trim().is_empty() {
+        "未知"
+    } else {
+        value
+    }
+}
+
 fn format_live_state(state: lucarne::control_plane::LiveInstanceState) -> &'static str {
     match state {
-        lucarne::control_plane::LiveInstanceState::Starting => "starting",
-        lucarne::control_plane::LiveInstanceState::Idle => "idle",
-        lucarne::control_plane::LiveInstanceState::Running => "running",
-        lucarne::control_plane::LiveInstanceState::WaitingPermission => "waiting_permission",
-        lucarne::control_plane::LiveInstanceState::Closing => "closing",
-        lucarne::control_plane::LiveInstanceState::Closed => "closed",
-        lucarne::control_plane::LiveInstanceState::Failed => "failed",
-        lucarne::control_plane::LiveInstanceState::Stale => "stale",
+        lucarne::control_plane::LiveInstanceState::Starting => "启动中",
+        lucarne::control_plane::LiveInstanceState::Idle => "空闲",
+        lucarne::control_plane::LiveInstanceState::Running => "运行中",
+        lucarne::control_plane::LiveInstanceState::WaitingPermission => "等待授权",
+        lucarne::control_plane::LiveInstanceState::Closing => "关闭中",
+        lucarne::control_plane::LiveInstanceState::Closed => "已关闭",
+        lucarne::control_plane::LiveInstanceState::Failed => "失败",
+        lucarne::control_plane::LiveInstanceState::Stale => "已过期",
     }
 }
 
 fn render_wechat_resource(resource: &AgentResourceEntry, body: &mut String) {
     body.push_str(&format!(
-        "\nprocess identity: `{}`\npid: `{}`\nprocesses: `{}`\ncpu: `{:.1}%`\nmemory: `{}`",
-        resource.identity.as_deref().unwrap_or("unidentified"),
+        "\n进程标识：`{}`\nPID：`{}`\n进程数：`{}`\nCPU：`{:.1}%`\n内存：`{}`",
+        resource.identity.as_deref().unwrap_or("未识别"),
         resource
             .pid
             .map(|pid| pid.to_string())
-            .unwrap_or_else(|| "unknown".to_string()),
+            .unwrap_or_else(|| "未知".to_string()),
         resource.process_count,
         resource.cpu_percent,
         format_resource_bytes(resource.memory_bytes),
@@ -2598,22 +2701,22 @@ fn parse_on_off(value: &str) -> Option<bool> {
 
 fn on_off(enabled: bool) -> &'static str {
     if enabled {
-        "on"
+        "开启"
     } else {
-        "off"
+        "关闭"
     }
 }
 
 fn render_global_config(settings: &lucarne::control_plane::EffectiveSettings) -> String {
     format!(
-        "config\nscope: global\nbypass: {}\nnotifications: {}",
+        "⚙️ 配置\n范围：全局\n权限绕过：{}\n通知：{}",
         on_off(settings.session.force_bypass_permissions),
         on_off(settings.notifications.enabled)
     )
 }
 
 fn render_wechat_new_usage() -> &'static str {
-    "Reply to an agent notification with `/new` to start a new session for that workspace."
+    "请引用一条 agent 通知后发送 `/new`，为该工作区开启新会话。"
 }
 
 fn render_wechat_new_session(
@@ -2622,20 +2725,22 @@ fn render_wechat_new_session(
     workspace: &WorkspaceBinding,
 ) -> String {
     format!(
-        "New {provider_id} session\ncwd: `{}`\nsession: `{session_ref}`\n\nReply to this message to start.",
+        "🆕 新的 {provider_id} 会话\n目录：`{}`\n会话：`{session_ref}`\n\n回复此消息即可开始。",
         workspace.project_path.display()
     )
 }
 
 fn render_wechat_help() -> &'static str {
-    "commands\n\
-/help — show this help\n\
-/config — show global config\n\
-/config global bypass on|off — toggle global permission bypass\n\
-/config global notifications on|off — toggle global notifications\n\
-/status — show global status, or quoted workspace status\n\
-/new — start a new quoted workspace session\n\
-/kill all|<session_id:pid> — kill agent processes\n"
+    "📖 命令\n\
+/help — 显示帮助\n\
+/config — 查看全局配置\n\
+/config global bypass on|off — 开关全局权限绕过（参数保持使用 on/off）\n\
+/config global notifications on|off — 开关全局通知（参数保持使用 on/off）\n\
+/status — 查看全局状态；引用通知时查看该工作区状态\n\
+/new — 引用通知后开启该工作区的新会话\n\
+/kill all|<session_id:pid> — 终止 agent 进程\n\
+\n⚠️ 微信说明\n\
+微信主动通知有频率和会话时效限制。如果长时间没收到 agent 消息，可以随便发一条消息刷新会话。\n"
 }
 
 #[cfg(test)]
@@ -2671,12 +2776,12 @@ mod tests {
 
         let body = render_agent_message("done", &workspace, "thread-1", None);
 
-        assert!(body.contains("cwd: `…/opensource/conductor/lucarnex`"));
+        assert!(body.contains("目录：`…/opensource/conductor/lucarnex`"));
         assert!(!body.contains("/Volumes/Data"));
     }
 
     fn compact_cwd_footer(path: &Path) -> String {
-        format!("cwd: `{}`", compact_path(&path.display().to_string(), 58))
+        format!("目录：`{}`", compact_path(&path.display().to_string(), 58))
     }
 
     #[tokio::test]
@@ -2713,8 +2818,8 @@ mod tests {
         assert_eq!(sends.len(), 1);
         assert_eq!(sends[0].user_id, "user-1");
         assert!(sends[0].text.contains("background complete"));
-        assert!(sends[0].text.contains("session: `thread-1`"));
-        assert!(sends[0].text.contains("cwd: `/tmp/workspace-a`"));
+        assert!(sends[0].text.contains("会话：`thread-1`"));
+        assert!(sends[0].text.contains("目录：`/tmp/workspace-a`"));
         assert!(
             core.message_session_binding("wechat", "user-1", &sends[0].message_id)
                 .is_some(),
@@ -2749,7 +2854,7 @@ mod tests {
         assert!(
             replies[0]
                 .text
-                .contains("==========\ncost: 0s\nsession: `thread-1`\ncwd: `/tmp/workspace-a`"),
+                .contains("==========\n耗时：0s\n会话：`thread-1`\n目录：`/tmp/workspace-a`"),
             "assistant reply footer must keep cost/session/cwd in one shared block: {}",
             replies[0].text
         );
@@ -2821,7 +2926,7 @@ mod tests {
         assert_eq!(replies.len(), 1);
         assert_eq!(replies[0].reply_to_message_id, "user-reply-1");
         assert!(
-            replies[0].text.contains("⚠ agent start failed"),
+            replies[0].text.contains("⚠️ agent 启动失败"),
             "{}",
             replies[0].text
         );
@@ -3084,8 +3189,8 @@ mod tests {
 
         let replies = transport.replies();
         assert_eq!(replies.len(), 1);
-        assert!(replies[0].text.contains("agent resources"));
-        assert!(replies[0].text.contains("managed agents: `1`"));
+        assert!(replies[0].text.contains("📊 agent 资源"));
+        assert!(replies[0].text.contains("托管 agent：`1`"));
         assert!(replies[0]
             .text
             .contains(&format!("thread-1:{}", std::process::id())));
@@ -3127,13 +3232,13 @@ mod tests {
 
         let replies = transport.replies();
         assert_eq!(replies.len(), 1);
-        assert!(replies[0].text.contains("status"));
-        assert!(replies[0].text.contains("workspace: `"));
-        assert!(replies[0].text.contains("cwd: `/tmp/workspace-a`"));
-        assert!(replies[0].text.contains("session: `thread-1`"));
-        assert!(replies[0].text.contains("live: `idle`"));
+        assert!(replies[0].text.contains("📊 状态"));
+        assert!(replies[0].text.contains("工作区：`"));
+        assert!(replies[0].text.contains("目录：`/tmp/workspace-a`"));
+        assert!(replies[0].text.contains("会话：`thread-1`"));
+        assert!(replies[0].text.contains("运行状态：`空闲`"));
         assert!(replies[0].text.contains(&format!(
-            "process identity: `thread-1:{}",
+            "进程标识：`thread-1:{}",
             std::process::id()
         )));
     }
@@ -3194,19 +3299,19 @@ mod tests {
         assert_eq!(provider.status_calls(), 1);
         let replies = transport.replies();
         assert_eq!(replies.len(), 1);
-        assert!(replies[0].text.contains("version: `codex-test`"));
+        assert!(replies[0].text.contains("版本：`codex-test`"));
         assert!(replies[0]
             .text
-            .contains("model: `gpt-5` (`high`, reasoning max)"));
+            .contains("模型：`gpt-5`（`high`，推理 max）"));
         assert!(replies[0]
             .text
-            .contains("permissions: `danger-full-access`"));
-        assert!(replies[0].text.contains("token usage: 1.2k in / 567 out"));
+            .contains("权限：`danger-full-access`"));
+        assert!(replies[0].text.contains("Token 用量：1.2k 输入 / 567 输出"));
         assert!(replies[0]
             .text
-            .contains("context: 42k/128k (33%) · compactions: 2"));
+            .contains("上下文：42k/128k（33%） · 压缩：2"));
         assert!(replies[0].text.contains(&format!(
-            "process identity: `thread-1:{}",
+            "进程标识：`thread-1:{}",
             std::process::id()
         )));
     }
@@ -3234,7 +3339,7 @@ mod tests {
 
         let replies = transport.replies();
         assert_eq!(replies.len(), 1);
-        assert_eq!(replies[0].text, "That notification is no longer routable.");
+        assert_eq!(replies[0].text, WECHAT_STALE_NOTIFICATION);
     }
 
     #[tokio::test]
@@ -3285,8 +3390,8 @@ mod tests {
         let replies = transport.replies();
         assert_eq!(replies.len(), 1);
         assert_eq!(replies[0].reply_to_message_id, "new-1");
-        assert!(replies[0].text.contains("New codex session"));
-        assert!(replies[0].text.contains("session: `thread-2`"));
+        assert!(replies[0].text.contains("🆕 新的 codex 会话"));
+        assert!(replies[0].text.contains("会话：`thread-2`"));
         let ack_message_id = replies[0].message_id.clone();
         let binding = core
             .message_session_binding("wechat", "user-1", &ack_message_id)
@@ -3308,7 +3413,7 @@ mod tests {
         assert_eq!(replies.len(), 2);
         assert_eq!(replies[1].reply_to_message_id, "user-reply-new");
         assert!(replies[1].text.contains("reply: hello new session"));
-        assert!(replies[1].text.contains("session: `thread-2`"));
+        assert!(replies[1].text.contains("会话：`thread-2`"));
     }
 
     #[tokio::test]
@@ -3336,7 +3441,7 @@ mod tests {
         assert_eq!(replies.len(), 1);
         assert_eq!(
             replies[0].text,
-            "Reply to an agent notification with `/new` to start a new session for that workspace."
+            render_wechat_new_usage()
         );
     }
 
@@ -3374,10 +3479,10 @@ mod tests {
         let replies = transport.replies();
         assert_eq!(replies.len(), 2);
         for reply in &replies {
-            assert!(reply.text.contains("config"));
-            assert!(reply.text.contains("scope: global"));
-            assert!(reply.text.contains("bypass: on"));
-            assert!(reply.text.contains("notifications: on"));
+            assert!(reply.text.contains("⚙️ 配置"));
+            assert!(reply.text.contains("范围：全局"));
+            assert!(reply.text.contains("权限绕过：开启"));
+            assert!(reply.text.contains("通知：开启"));
         }
     }
 
@@ -3442,13 +3547,13 @@ mod tests {
 
         let replies = transport.replies();
         assert_eq!(replies.len(), 1);
-        assert!(replies[0].text.contains("commands"));
+        assert!(replies[0].text.contains("📖 命令"));
         assert!(replies[0].text.contains("/config global bypass on|off"));
         assert!(replies[0].text.contains("/status"));
         assert!(replies[0].text.contains("/new"));
         assert!(!replies[0]
             .text
-            .contains("Reply to an agent notification to continue that session."));
+            .contains(WECHAT_REPLY_REQUIRED));
     }
 
     #[tokio::test]
@@ -3493,7 +3598,7 @@ mod tests {
             sends[0].text
         );
         assert!(
-            sends[0].text.contains("\n\n==========\ncost: 14s"),
+            sends[0].text.contains("\n\n==========\n耗时：14s"),
             "created Pi notification should use synthesized completion cost: {}",
             sends[0].text
         );
@@ -3637,7 +3742,7 @@ mod tests {
         assert!(!replies[0].text.contains("working first"));
         assert!(
             replies[0].text.contains(
-                "==========\ncost: 0s\nsession: `thread-1`\ncwd: `/tmp/workspace-turn-complete`"
+                "==========\n耗时：0s\n会话：`thread-1`\n目录：`/tmp/workspace-turn-complete`"
             ),
             "completed reply should keep cost/session/cwd in one shared block: {}",
             replies[0].text
@@ -3767,7 +3872,7 @@ mod tests {
         let replies = transport.replies();
         assert_eq!(replies.len(), 1);
         assert_eq!(replies[0].reply_to_message_id, "user-reply-1");
-        assert_eq!(replies[0].text, "agent turn failed: agent went silent");
+        assert_eq!(replies[0].text, "agent 执行失败：agent went silent");
         assert!(
             !core.direct_notification_suppressed(&workspace_id),
             "turn failure should end direct notification suppression"
@@ -4455,10 +4560,10 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
         assert_eq!(replies.len(), 2);
         assert_eq!(replies[0].reply_to_message_id, "user-reply-second");
         assert!(replies[0].text.contains("reply: reply to second"));
-        assert!(replies[0].text.contains("session: `thread-2`"));
+        assert!(replies[0].text.contains("会话：`thread-2`"));
         assert_eq!(replies[1].reply_to_message_id, "user-reply-first");
         assert!(replies[1].text.contains("reply: reply to first"));
-        assert!(replies[1].text.contains("session: `thread-1`"));
+        assert!(replies[1].text.contains("会话：`thread-1`"));
     }
 
     #[tokio::test]
@@ -4635,7 +4740,7 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
     }
 
     #[tokio::test]
-    async fn failed_attachment_notification_sends_english_failure_message_after_bounded_retries() {
+    async fn failed_attachment_notification_sends_chinese_failure_message_after_bounded_retries() {
         let provider = Arc::new(FakeProvider::default());
         let core = test_core(Arc::clone(&provider));
         let opened = core
@@ -4676,11 +4781,11 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
         assert!(transport.attachments().is_empty());
         let sends = transport.sends();
         assert_eq!(sends.len(), 1);
-        assert!(sends[0].text.contains("Attachment delivery failed."));
-        assert!(sends[0].text.contains("File: too-large.png"));
+        assert!(sends[0].text.contains("附件发送失败。"));
+        assert!(sends[0].text.contains("文件：too-large.png"));
         assert!(sends[0]
             .text
-            .contains("Error: media upload failed: 413 payload too large"));
+            .contains("错误：media upload failed: 413 payload too large"));
         assert_eq!(
             transport.attachment_send_attempt_count(),
             lucarne_channel::robust::ATTACHMENT_DELIVERY_MAX_RETRIES + 1
@@ -4689,7 +4794,7 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
     }
 
     #[tokio::test]
-    async fn rate_limited_attachment_notification_sends_english_failure_message_without_infinite_retry(
+    async fn rate_limited_attachment_notification_sends_chinese_failure_message_without_infinite_retry(
     ) {
         let provider = Arc::new(FakeProvider::default());
         let core = test_core(Arc::clone(&provider));
@@ -4731,9 +4836,9 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
         assert!(transport.attachments().is_empty());
         let sends = transport.sends();
         assert_eq!(sends.len(), 1);
-        assert!(sends[0].text.contains("Attachment delivery failed."));
-        assert!(sends[0].text.contains("File: rate-limited.png"));
-        assert!(sends[0].text.contains("Error: ret=-2"));
+        assert!(sends[0].text.contains("附件发送失败。"));
+        assert!(sends[0].text.contains("文件：rate-limited.png"));
+        assert!(sends[0].text.contains("错误：ret=-2"));
         assert_eq!(service.pending_notification_count(), 0);
     }
 
@@ -4801,11 +4906,11 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
         let replies = transport.replies();
         assert_eq!(replies.len(), 2);
         assert!(replies[0].text.contains("text still arrives"));
-        assert!(replies[1].text.contains("Attachment delivery failed."));
-        assert!(replies[1].text.contains("File: bad-image.png"));
+        assert!(replies[1].text.contains("附件发送失败。"));
+        assert!(replies[1].text.contains("文件：bad-image.png"));
         assert!(replies[1]
             .text
-            .contains("Error: media upload failed: invalid base64"));
+            .contains("错误：media upload failed: invalid base64"));
         assert_eq!(
             transport.attachment_reply_attempt_count(),
             lucarne_channel::robust::ATTACHMENT_DELIVERY_MAX_RETRIES + 1
@@ -4880,9 +4985,9 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
         let replies = transport.replies();
         assert_eq!(replies.len(), 2);
         assert!(replies[0].text.contains("text still arrives"));
-        assert!(replies[1].text.contains("Attachment delivery failed."));
-        assert!(replies[1].text.contains("File: rate-limited.png"));
-        assert!(replies[1].text.contains("Error: ret=-2"));
+        assert!(replies[1].text.contains("附件发送失败。"));
+        assert!(replies[1].text.contains("文件：rate-limited.png"));
+        assert!(replies[1].text.contains("错误：ret=-2"));
     }
 
     #[test]
@@ -5363,7 +5468,7 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
             transport.sends().iter().any(|send| {
                 send.user_id == "user-1"
                     && send.text.contains("wechat live watch complete")
-                    && send.text.contains("session: `watch-thread-wechat`")
+                    && send.text.contains("会话：`watch-thread-wechat`")
                     && send.text.contains(compact_cwd_footer(&project).as_str())
             })
         })
@@ -5409,9 +5514,9 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
         assert_eq!(replies.len(), 1);
         assert!(replies[0]
             .text
-            .starts_with("Reply to an agent notification to continue that session.\n\ncommands"));
-        assert!(replies[0].text.contains("/help — show this help"));
-        assert!(replies[0].text.contains("/config — show global config"));
+            .starts_with("💬 请引用一条 agent 通知后再回复，以继续对应会话。\n\n📖 命令"));
+        assert!(replies[0].text.contains("/help — 显示帮助"));
+        assert!(replies[0].text.contains("/config — 查看全局配置"));
 
         provider.emit_assistant("thread-1", "later notification");
         service
