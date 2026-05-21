@@ -621,7 +621,7 @@ impl Bot {
         if self.core.direct_notification_suppressed(&workspace_id) {
             return Ok(());
         }
-        if session.live.is_some() {
+        if session.live.is_some() && self.state.topic_for_workspace(&session.workspace).is_some() {
             return self
                 .send_watched_agent_message_to_session_topic(&session, text.as_ref())
                 .await;
@@ -11008,6 +11008,77 @@ done
             .expect("notification handle should be refreshed");
         assert_eq!(current.chat.as_str(), "100");
         assert_eq!(current.workspace.as_str(), "1");
+    }
+
+    #[tokio::test]
+    async fn history_watch_message_for_live_unbound_workspace_uses_agent_notification() {
+        let channel = Arc::new(RecordingChannel::default());
+        let runtime = Arc::new(AgentRuntime::new());
+        runtime.register(Arc::new(RecordingProvider::new_with_provider_id(
+            "pi",
+            Arc::new(StdMutex::new(Vec::new())),
+            Arc::new(StdMutex::new(Vec::new())),
+            test_command_catalog(),
+        )));
+        let core = core_with_runtime(runtime);
+        let bot = Arc::new(Bot::new(
+            Arc::clone(&channel) as Arc<dyn Channel>,
+            Arc::clone(&core),
+            WorkspaceHandle::new(ChatId::new("100"), WorkspaceId::new("")),
+        ));
+        let workspace = WorkspaceId::new("pi:resume:thread-live");
+        core.upsert_workspace_binding(
+            ControlWorkspaceId::new(workspace.as_str()),
+            OpenWorkspaceRequest {
+                provider_id: "pi",
+                project_path: Some(PathBuf::from("/tmp/project")),
+                title: "pi live".into(),
+            },
+            Some("thread-live"),
+        )
+        .expect("persist unbound workspace");
+        bot.state
+            .hydrate_unbound_control_workspaces(&ChatId::new("100"))
+            .expect("hydrate unbound workspace");
+        assert!(
+            bot.state.topic_for_workspace(&workspace).is_none(),
+            "regression setup requires no Telegram topic binding"
+        );
+        let (_tx, rx) = tokio::sync::broadcast::channel(1);
+        let live = Arc::new(LiveSession {
+            session: Arc::new(ClosedSession::with_ids("thread-live", "instance-live")),
+            events: AsyncMutex::new(CoreWorkspaceEventStream::new(
+                ControlWorkspaceId::new(workspace.as_str()),
+                rx,
+            )),
+            pending_intv: StdMutex::new(HashMap::new()),
+        });
+        bot.state
+            .bind_live(&workspace, live, Some("thread-live".into()))
+            .expect("bind live without topic");
+
+        Arc::clone(&bot)
+            .handle_core_event(CoreEvent::TimelineEvent {
+                workspace_id: ControlWorkspaceId::new(workspace.as_str()),
+                turn_id: None,
+                event: AgentEvent::Message(MessageEvent {
+                    role: MessageRole::Assistant,
+                    text: "assistant reply".into(),
+                    streaming: false,
+                }),
+            })
+            .await
+            .expect("history-watch message should use notification topic");
+
+        assert_eq!(
+            channel.created_workspaces.lock().unwrap().as_slice(),
+            [("100".to_string(), "agent notifications".to_string(), "1".to_string())]
+        );
+        assert_eq!(channel.sent_targets.lock().unwrap().as_slice(), ["1"]);
+        let sent = channel.sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].body.contains("assistant reply"));
+        assert!(sent[0].body.contains("session: `thread-live`"));
     }
 
     #[tokio::test]
