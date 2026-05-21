@@ -633,7 +633,7 @@ EOF
             echo "Release $TAG already exists; refusing to overwrite assets" >&2
             exit 1
           fi
-          gh release create "$TAG" dist/*.tar.gz dist/checksums.txt --title "$TAG" --notes "lucarned $TAG" --verify-tag
+          gh release create "$TAG" dist/*.tar.gz dist/checksums.txt --title "$TAG" --generate-notes --verify-tag
 
   formula-test:
     name: Test formula ${{ matrix.name }}
