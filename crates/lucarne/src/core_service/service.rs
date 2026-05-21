@@ -4107,6 +4107,13 @@ mod tests {
         agent_sessions::agent_provider(id).expect("watch provider")
     }
 
+    fn expected_history_provider_ids() -> Vec<&'static str> {
+        agent_sessions::agent_providers()
+            .into_iter()
+            .map(|provider| provider.id())
+            .collect()
+    }
+
     #[tokio::test]
     async fn direct_notification_suppression_is_counted_runtime_state() {
         let core = LucarneCore::from_runtime_and_store(
@@ -6128,9 +6135,10 @@ mod tests {
         .expect("core");
 
         assert_eq!(core.provider_ids(), &["codex"]);
+        let expected_history_provider_ids = expected_history_provider_ids();
         assert_eq!(
             core.history_provider_ids(),
-            &["codex", "claude", "gemini", "copilot", "pi"]
+            expected_history_provider_ids.as_slice()
         );
     }
 
@@ -6177,9 +6185,10 @@ mod tests {
         .expect("core");
 
         assert_eq!(core.provider_ids(), &["codex"]);
+        let expected_history_provider_ids = expected_history_provider_ids();
         assert_eq!(
             core.history_provider_ids(),
-            &["codex", "claude", "gemini", "copilot", "pi"]
+            expected_history_provider_ids.as_slice()
         );
 
         let entry = core

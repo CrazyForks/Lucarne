@@ -11072,7 +11072,11 @@ done
 
         assert_eq!(
             channel.created_workspaces.lock().unwrap().as_slice(),
-            [("100".to_string(), "agent notifications".to_string(), "1".to_string())]
+            [(
+                "100".to_string(),
+                "agent notifications".to_string(),
+                "1".to_string()
+            )]
         );
         assert_eq!(channel.sent_targets.lock().unwrap().as_slice(), ["1"]);
         let sent = channel.sent.lock().unwrap();
