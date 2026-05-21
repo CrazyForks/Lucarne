@@ -55,7 +55,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 
 const MAX_CANONICAL_DIFF_LEN: usize = 12_000;
-const CODEX_BYPASS_PERMISSION_PROFILE_ID: &str = ":danger-no-sandbox";
+const CODEX_FULL_ACCESS_PERMISSION_PROFILE_ID: &str = ":danger-full-access";
 const CODEX_PERMISSION_PRESETS: &[CodexPermissionPreset] = &[
     CodexPermissionPreset {
         id: "default",
@@ -87,11 +87,11 @@ const CODEX_PERMISSION_PRESETS: &[CodexPermissionPreset] = &[
     CodexPermissionPreset {
         id: "bypass",
         display_name: "Bypass",
-        description: "Codex requests the built-in :danger-no-sandbox permission profile for new or resumed threads. Managed requirements can still constrain the effective profile.",
+        description: "Codex uses dangerous startup arguments plus legacy danger-full-access sandbox params for new or resumed threads. Managed requirements can still constrain the effective mode.",
         approval_policy: "never",
         approvals_reviewer: "user",
-        sandbox_mode: "",
-        default_permissions: Some(CODEX_BYPASS_PERMISSION_PROFILE_ID),
+        sandbox_mode: "danger-full-access",
+        default_permissions: None,
     },
 ];
 #[derive(Clone, Copy, Debug)]
@@ -3510,17 +3510,14 @@ fn codex_permission_preset_from_result(result: &Value) -> Option<&'static CodexP
     let sandbox_mode = codex_result_sandbox_mode(result);
     let has_permission_profile = codex_result_has_permission_profile(result);
 
-    if codex_active_permission_profile_id(result) == Some(CODEX_BYPASS_PERMISSION_PROFILE_ID)
-        || (!has_permission_profile
-            && codex_result_default_permissions(result) == Some(CODEX_BYPASS_PERMISSION_PROFILE_ID))
-    {
-        return codex_permission_preset("bypass").ok();
-    }
     if matches!(
         sandbox_mode,
         Some("danger-full-access" | "dangerFullAccess")
     ) || codex_permission_profile_is_disabled(result)
         || codex_permission_profile_is_full_access(result)
+        || codex_active_permission_profile_id(result) == Some(CODEX_FULL_ACCESS_PERMISSION_PROFILE_ID)
+        || (!has_permission_profile
+            && codex_result_default_permissions(result) == Some(CODEX_FULL_ACCESS_PERMISSION_PROFILE_ID))
     {
         return codex_permission_preset("full-access").ok();
     }
@@ -3759,29 +3756,14 @@ fn codex_approval_policy(mode: PermissionMode) -> &'static str {
 }
 
 fn insert_codex_thread_permission_params(m: &mut Map<String, Value>, mode: PermissionMode) {
-    if mode == PermissionMode::Bypass {
-        m.insert("permissions".into(), codex_bypass_permissions_profile());
-    } else {
-        m.insert(
-            "sandbox".into(),
-            Value::String(codex_thread_sandbox(mode).into()),
-        );
-    }
+    m.insert(
+        "sandbox".into(),
+        Value::String(codex_thread_sandbox(mode).into()),
+    );
 }
 
 fn insert_codex_turn_permission_params(m: &mut Map<String, Value>, mode: PermissionMode) {
-    if mode == PermissionMode::Bypass {
-        m.insert("permissions".into(), codex_bypass_permissions_profile());
-    } else {
-        m.insert("sandboxPolicy".into(), codex_turn_sandbox_policy(mode));
-    }
-}
-
-fn codex_bypass_permissions_profile() -> Value {
-    json!({
-        "type": "profile",
-        "id": CODEX_BYPASS_PERMISSION_PROFILE_ID,
-    })
+    m.insert("sandboxPolicy".into(), codex_turn_sandbox_policy(mode));
 }
 
 fn codex_thread_sandbox(mode: PermissionMode) -> &'static str {
@@ -5703,7 +5685,7 @@ mod tests {
     }
 
     #[test]
-    fn bypass_permission_mode_uses_codex_danger_no_sandbox_profile() {
+    fn bypass_permission_mode_uses_legacy_dangerous_sandbox_params() {
         let input = Input {
             text: "hello".into(),
             ..Default::default()
@@ -5713,35 +5695,23 @@ mod tests {
 
         let start = dialect.thread_start_params();
         assert_eq!(start["approvalPolicy"], json!("never"));
-        assert_eq!(
-            start["permissions"],
-            json!({"type": "profile", "id": ":danger-no-sandbox"})
-        );
-        assert!(start.get("sandbox").is_none());
+        assert_eq!(start["sandbox"], json!("danger-full-access"));
+        assert!(start.get("permissions").is_none());
 
         let resume = dialect.thread_resume_params("thread-123");
         assert_eq!(resume["approvalPolicy"], json!("never"));
-        assert_eq!(
-            resume["permissions"],
-            json!({"type": "profile", "id": ":danger-no-sandbox"})
-        );
-        assert!(resume.get("sandbox").is_none());
+        assert_eq!(resume["sandbox"], json!("danger-full-access"));
+        assert!(resume.get("permissions").is_none());
 
         let fork = dialect.thread_fork_params("thread-123");
         assert_eq!(fork["approvalPolicy"], json!("never"));
-        assert_eq!(
-            fork["permissions"],
-            json!({"type": "profile", "id": ":danger-no-sandbox"})
-        );
-        assert!(fork.get("sandbox").is_none());
+        assert_eq!(fork["sandbox"], json!("danger-full-access"));
+        assert!(fork.get("permissions").is_none());
 
         let turn = dialect.turn_start_params("thread-123", &input);
         assert_eq!(turn["approvalPolicy"], json!("never"));
-        assert_eq!(
-            turn["permissions"],
-            json!({"type": "profile", "id": ":danger-no-sandbox"})
-        );
-        assert!(turn.get("sandboxPolicy").is_none());
+        assert_eq!(turn["sandboxPolicy"], json!({"type": "dangerFullAccess"}));
+        assert!(turn.get("permissions").is_none());
     }
 
     #[test]
@@ -5813,7 +5783,7 @@ mod tests {
                 && mode
                     .description
                     .as_deref()
-                    .is_some_and(|description| description.contains(":danger-no-sandbox"))
+                    .is_some_and(|description| description.contains("startup arguments"))
         }));
         assert!(catalog.modes.iter().any(|mode| {
             mode.id.as_str() == "auto-review"
@@ -5825,7 +5795,7 @@ mod tests {
     }
 
     #[test]
-    fn permission_preset_write_keeps_full_access_legacy_and_bypass_profiles() {
+    fn permission_preset_write_keeps_full_access_and_bypass_on_legacy_sandbox() {
         let full = super::codex_permission_preset("full-access").expect("full preset");
         assert_eq!(
             super::codex_permission_preset_write(full, 2),
@@ -5842,8 +5812,8 @@ mod tests {
             super::codex_permission_preset_write(bypass, 2),
             Some(super::CodexPermissionPresetWrite::Batch {
                 edits: vec![
-                    ("sandbox_mode", Value::Null),
-                    ("default_permissions", json!(":danger-no-sandbox")),
+                    ("default_permissions", Value::Null),
+                    ("sandbox_mode", json!("danger-full-access")),
                 ],
             })
         );
@@ -5895,10 +5865,10 @@ mod tests {
             super::codex_permission_preset_from_result(&json!({
                 "approvalPolicy": "never",
                 "permissionProfile": {"type": "disabled"},
-                "activePermissionProfile": {"id": ":danger-no-sandbox"}
+                "activePermissionProfile": {"id": ":danger-full-access"}
             }))
             .map(|preset| preset.id),
-            Some("bypass")
+            Some("full-access")
         );
         assert_eq!(
             super::codex_permission_preset_from_result(&json!({
@@ -5913,7 +5883,7 @@ mod tests {
                 "permissionProfile": {"type": "managed"},
                 "config": {
                     "approval_policy": "never",
-                    "default_permissions": ":danger-no-sandbox"
+                    "default_permissions": ":danger-full-access"
                 }
             }))
             .map(|preset| preset.id),
@@ -5923,11 +5893,11 @@ mod tests {
             super::codex_permission_preset_from_result(&json!({
                 "config": {
                     "approval_policy": "never",
-                    "default_permissions": ":danger-no-sandbox"
+                    "default_permissions": ":danger-full-access"
                 }
             }))
             .map(|preset| preset.id),
-            Some("bypass")
+            Some("full-access")
         );
         assert_eq!(
             super::codex_permission_preset_from_result(&json!({
