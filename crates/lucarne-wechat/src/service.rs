@@ -347,6 +347,7 @@ where
         let mut user_interactions = self.transport.subscribe_user_interactions();
         let mut pending_retry = tokio::time::interval(self.pending_reply_retry_interval);
         pending_retry.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        self.send_startup_help().await;
         loop {
             tokio::select! {
                 changed = shutdown.changed() => {
@@ -516,6 +517,76 @@ where
             return Ok(());
         };
         self.continue_session(workspace.workspace_id, message).await
+    }
+
+    async fn send_startup_help(&self) {
+        let users = self.notification_users();
+        if users.is_empty() {
+            return;
+        }
+        let body = render_wechat_startup_help();
+        for user_id in users {
+            if let Some(remaining) = self.rate_limit_remaining() {
+                debug!(
+                    target: "lucarne_wechat::service",
+                    user_id = %user_id,
+                    remaining_ms = remaining.as_millis() as u64,
+                    "wechat startup help skipped by active rate limit"
+                );
+                continue;
+            }
+            let context = match self.transport.context_for_user(&user_id).await {
+                Ok(Some(context)) => context,
+                Ok(None) => {
+                    warn!(
+                        target: "lucarne_wechat::service",
+                        user_id = %user_id,
+                        "wechat startup help skipped: no stored context for user"
+                    );
+                    continue;
+                }
+                Err(err) => {
+                    warn!(
+                        target: "lucarne_wechat::service",
+                        user_id = %user_id,
+                        error = %err,
+                        "wechat startup help context lookup failed"
+                    );
+                    continue;
+                }
+            };
+            match self.transport.send(&context, &body).await {
+                Ok(receipt) => {
+                    debug!(
+                        target: "lucarne_wechat::service",
+                        user_id = %user_id,
+                        message_ids = ?receipt.message_ids,
+                        "wechat startup help sent"
+                    );
+                }
+                Err(WechatError::RateLimited {
+                    retry_after,
+                    message,
+                }) => {
+                    self.record_rate_limit(retry_after, &message);
+                    warn!(
+                        target: "lucarne_wechat::service",
+                        user_id = %user_id,
+                        retry_after_secs = retry_after.as_secs(),
+                        error = %message,
+                        "wechat startup help rate limited"
+                    );
+                }
+                Err(err) => {
+                    warn!(
+                        target: "lucarne_wechat::service",
+                        user_id = %user_id,
+                        error = %err,
+                        "wechat startup help send failed"
+                    );
+                }
+            }
+        }
     }
 
     async fn deliver_assistant_message(
@@ -2730,6 +2801,10 @@ fn render_wechat_new_session(
     )
 }
 
+fn render_wechat_startup_help() -> String {
+    format!("👋 lucarned 已启动。\n\n{}", render_wechat_help())
+}
+
 fn render_wechat_help() -> &'static str {
     "📖 命令\n\
 /help — 显示帮助\n\
@@ -2888,9 +2963,8 @@ mod tests {
             .await
             .expect("open workspace");
         let workspace_id = opened.workspace.workspace_id.clone();
-        let live_instance_id = lucarne::control_plane::LiveInstanceId::new(
-            opened.session.instance_id().0.as_str(),
-        );
+        let live_instance_id =
+            lucarne::control_plane::LiveInstanceId::new(opened.session.instance_id().0.as_str());
         let mut events = core.watch_events();
         let transport = Arc::new(FakeTransport::default());
         let service = WechatNotificationService::new(
@@ -3237,10 +3311,9 @@ mod tests {
         assert!(replies[0].text.contains("目录：`/tmp/workspace-a`"));
         assert!(replies[0].text.contains("会话：`thread-1`"));
         assert!(replies[0].text.contains("运行状态：`空闲`"));
-        assert!(replies[0].text.contains(&format!(
-            "进程标识：`thread-1:{}",
-            std::process::id()
-        )));
+        assert!(replies[0]
+            .text
+            .contains(&format!("进程标识：`thread-1:{}", std::process::id())));
     }
 
     #[tokio::test]
@@ -3303,17 +3376,14 @@ mod tests {
         assert!(replies[0]
             .text
             .contains("模型：`gpt-5`（`high`，推理 max）"));
-        assert!(replies[0]
-            .text
-            .contains("权限：`danger-full-access`"));
+        assert!(replies[0].text.contains("权限：`danger-full-access`"));
         assert!(replies[0].text.contains("Token 用量：1.2k 输入 / 567 输出"));
         assert!(replies[0]
             .text
             .contains("上下文：42k/128k（33%） · 压缩：2"));
-        assert!(replies[0].text.contains(&format!(
-            "进程标识：`thread-1:{}",
-            std::process::id()
-        )));
+        assert!(replies[0]
+            .text
+            .contains(&format!("进程标识：`thread-1:{}", std::process::id())));
     }
 
     #[tokio::test]
@@ -3439,10 +3509,7 @@ mod tests {
 
         let replies = transport.replies();
         assert_eq!(replies.len(), 1);
-        assert_eq!(
-            replies[0].text,
-            render_wechat_new_usage()
-        );
+        assert_eq!(replies[0].text, render_wechat_new_usage());
     }
 
     #[tokio::test]
@@ -3551,9 +3618,7 @@ mod tests {
         assert!(replies[0].text.contains("/config global bypass on|off"));
         assert!(replies[0].text.contains("/status"));
         assert!(replies[0].text.contains("/new"));
-        assert!(!replies[0]
-            .text
-            .contains(WECHAT_REPLY_REQUIRED));
+        assert!(!replies[0].text.contains(WECHAT_REPLY_REQUIRED));
     }
 
     #[tokio::test]
@@ -4389,6 +4454,40 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
             .expect("join incoming handler")
             .expect("submit reply");
         deliver_until_reply_count(&service, &mut events, &transport, 1).await;
+    }
+
+    #[tokio::test]
+    async fn run_loop_sends_startup_help_to_known_users() {
+        let provider = Arc::new(FakeProvider::default());
+        let core = test_core(provider);
+        let transport = Arc::new(FakeTransport::default());
+        let service = Arc::new(WechatNotificationService::new(
+            core,
+            Arc::clone(&transport),
+            WechatServiceOptions {
+                initial_user_ids: vec!["user-1".into()],
+                ..WechatServiceOptions::default()
+            },
+        ));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let run = tokio::spawn({
+            let service = Arc::clone(&service);
+            async move { service.run_until_shutdown(shutdown_rx).await }
+        });
+
+        wait_until(|| {
+            transport.sends().iter().any(|send| {
+                send.user_id == "user-1"
+                    && send.text.contains("👋 lucarned 已启动。")
+                    && send.text.contains("/help — 显示帮助")
+            })
+        })
+        .await;
+
+        shutdown_tx.send(true).expect("stop service");
+        run.await
+            .expect("wechat service task should join")
+            .expect("wechat service should stop cleanly");
     }
 
     #[tokio::test]

@@ -534,6 +534,13 @@ impl Bot {
             target: "lucarne_telegram::bot",
             "initial panel render skipped; waiting for explicit input"
         );
+        if let Err(err) = self.send_startup_help().await {
+            warn!(
+                target: "lucarne_telegram::bot",
+                error = %err,
+                "telegram startup help send failed"
+            );
+        }
 
         let mut stream = self.channel.subscribe();
         lucarne::memory_profile_snapshot!("lucarne_telegram.bot.run.after_channel_subscribe");
@@ -4794,8 +4801,28 @@ impl Bot {
         self.render_entry_panel().await
     }
 
+    async fn send_startup_help(&self) -> Result<(), String> {
+        let body = format!("👋 lucarned started.\n\n{}", telegram_help_body());
+        let msg = OutgoingMessage::plain(body).silent();
+        self.channel
+            .send(&self.entry, msg)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
     async fn help_commands(&self) -> Result<(), String> {
-        let body = "commands\n\
+        let msg = OutgoingMessage::plain(telegram_help_body()).silent();
+        self.channel
+            .send(&self.entry, msg)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+}
+
+fn telegram_help_body() -> &'static str {
+    "commands\n\
             entry / notifications:\n\
             /panel /start    — refresh panel\n\
             /help            — show this help\n\
@@ -4824,14 +4851,7 @@ impl Bot {
             /fork [target]   — list fork targets or fork one target\n\
             /fN              — fork listed target N\n\
             /new             — start a new conversation\n\
-            /quit            — close the live session";
-        let msg = OutgoingMessage::plain(body).silent();
-        self.channel
-            .send(&self.entry, msg)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(())
-    }
+            /quit            — close the live session"
 }
 
 fn workspace_title_from_history(h: &HistoryEntry) -> String {
@@ -7035,7 +7055,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bot_run_waits_for_explicit_panel_request() {
+    async fn bot_run_sends_startup_help_and_waits_for_explicit_panel_request() {
         let channel = Arc::new(RecordingChannel::default());
         let runtime = Arc::new(AgentRuntime::new());
         runtime.register(Arc::new(RecordingProvider::new(Arc::new(StdMutex::new(
@@ -7053,13 +7073,17 @@ mod tests {
 
         Arc::clone(&bot).run().await;
 
-        assert!(
-            channel.sent.lock().unwrap().is_empty(),
-            "Telegram startup must not proactively send the entry panel"
+        let sent = channel.sent.lock().unwrap().clone();
+        assert_eq!(
+            sent.len(),
+            1,
+            "Telegram startup should send one help message"
         );
+        assert!(sent[0].body.contains("commands"));
+        assert!(sent[0].body.contains("/help            — show this help"));
         assert!(
             channel.edits.lock().unwrap().is_empty(),
-            "Telegram startup must not edit an entry panel either"
+            "Telegram startup must not edit an entry panel"
         );
 
         bot.handle(ChannelEvent::Message(IncomingMessage {
@@ -7083,6 +7107,22 @@ mod tests {
                 .any(|message| message.body.contains("🛠 lucarne")),
             "explicit /panel should still render the entry panel"
         );
+    }
+
+    #[tokio::test]
+    async fn bot_run_ignores_startup_help_send_failure() {
+        let channel = Arc::new(RecordingChannel::default());
+        channel
+            .send_results
+            .lock()
+            .unwrap()
+            .push_back(Err(ChannelError::Transport("startup send failed".into())));
+        let bot = test_bot(Arc::clone(&channel));
+
+        Arc::clone(&bot).run().await;
+
+        assert!(channel.send_results.lock().unwrap().is_empty());
+        assert!(channel.sent.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
