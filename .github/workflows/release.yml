@@ -148,6 +148,9 @@ jobs:
           APT_LISTCHANGES_FRONTEND: none
         run: |
           ${{ matrix.packages_install }}
+      - name: Use clang backend for Windows ARM64 cross build
+        if: ${{ contains(matrix.targets, 'aarch64-pc-windows-msvc') }}
+        run: echo "XWIN_CROSS_COMPILER=clang" >> "$GITHUB_ENV"
       - name: Build artifacts
         run: |
           # Actually do builds and make zips and whatnot
