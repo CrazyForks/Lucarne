@@ -27,6 +27,13 @@ config:
     bypass: false # Globally bypass agent permission prompts.
     notifications: true # Enable notifications globally.
 
+updates:
+  enabled: true # Check GitHub Releases for newer stable lucarned versions.
+  notify: true # Send Telegram/WeChat notifications when an update is available.
+  check_interval_hours: 24 # Minimum hours between GitHub release checks.
+  remind_interval_hours: 24 # Minimum hours between reminders for the same version.
+  repository: tuchg/Lucarne # GitHub repository to check.
+
 channels:
   telegram:
     enabled: true # Enable Telegram channel.
