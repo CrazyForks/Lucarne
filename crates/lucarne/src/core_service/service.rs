@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use rusqlite::Connection;
 use smol_str::SmolStr;
-use tokio::{process::Command, sync::broadcast};
+use tokio::sync::broadcast;
 use tracing::{debug, info, instrument, trace, warn};
 
 use crate::{
@@ -39,6 +39,7 @@ use crate::{
         TurnRecord, TurnSource, WorkspaceBinding, WorkspaceId,
     },
     dialect::PermissionMode,
+    host::process_table::{self, ProcessAggregate, ProcessSample},
 };
 
 use super::{
@@ -2545,7 +2546,9 @@ impl LucarneCore {
             snapshot.observed_sessions = observed_sessions;
             return Ok(snapshot);
         }
-        let samples = process_table_snapshot().await?;
+        let samples = process_table::snapshot()
+            .await
+            .map_err(CoreError::ProcessSnapshot)?;
         let mut snapshot = build_agent_resource_snapshot(targets, &samples);
         snapshot.observed_sessions = observed_sessions;
         Ok(snapshot)
@@ -3359,68 +3362,15 @@ impl AgentProcessTarget {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct ProcessSample {
-    pid: i32,
-    ppid: i32,
-    pgid: i32,
-    rss_bytes: u64,
-    cpu_percent: f32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct ProcessAggregate {
-    process_count: usize,
-    memory_bytes: u64,
-    cpu_percent: f32,
-}
-
-async fn process_table_snapshot() -> Result<Vec<ProcessSample>, CoreError> {
-    let output = Command::new("/bin/ps")
-        .args(["-axo", "pid=,ppid=,pgid=,rss=,%cpu="])
-        .output()
-        .await
-        .map_err(|err| CoreError::ProcessSnapshot(err.to_string()))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(CoreError::ProcessSnapshot(stderr.trim().to_string()));
-    }
-    Ok(parse_process_table(&output.stdout))
-}
-
-fn parse_process_table(stdout: &[u8]) -> Vec<ProcessSample> {
-    String::from_utf8_lossy(stdout)
-        .lines()
-        .filter_map(parse_process_sample)
-        .collect()
-}
-
-fn parse_process_sample(line: &str) -> Option<ProcessSample> {
-    let mut parts = line.split_whitespace();
-    let pid = parts.next()?.parse().ok()?;
-    let ppid = parts.next()?.parse().ok()?;
-    let pgid = parts.next()?.parse().ok()?;
-    let rss_kib = parts.next()?.parse::<u64>().ok()?;
-    let cpu_percent = parts.next()?.parse().ok()?;
-    Some(ProcessSample {
-        pid,
-        ppid,
-        pgid,
-        rss_bytes: rss_kib.saturating_mul(1024),
-        cpu_percent,
-    })
-}
-
 fn build_agent_resource_snapshot(
     targets: Vec<AgentProcessTarget>,
     samples: &[ProcessSample],
 ) -> AgentResourceSnapshot {
-    let children_by_parent = children_by_parent(samples);
     let mut agents = Vec::with_capacity(targets.len());
     for target in targets {
         let aggregate = target
             .pid
-            .map(|pid| aggregate_process_group(pid, samples, &children_by_parent))
+            .map(|pid| process_table::aggregate_for_root(pid, samples))
             .unwrap_or(ProcessAggregate {
                 process_count: 0,
                 memory_bytes: 0,
@@ -3454,59 +3404,6 @@ fn build_agent_resource_snapshot(
         agents,
         observed_sessions: Vec::new(),
     }
-}
-
-fn children_by_parent(samples: &[ProcessSample]) -> HashMap<i32, Vec<i32>> {
-    let mut children = HashMap::<i32, Vec<i32>>::new();
-    for sample in samples {
-        children.entry(sample.ppid).or_default().push(sample.pid);
-    }
-    children
-}
-
-fn aggregate_process_group(
-    root_pid: i32,
-    samples: &[ProcessSample],
-    children_by_parent: &HashMap<i32, Vec<i32>>,
-) -> ProcessAggregate {
-    let mut pids = descendants_of(root_pid, children_by_parent);
-    pids.insert(root_pid);
-    for sample in samples {
-        if sample.pgid == root_pid {
-            pids.insert(sample.pid);
-        }
-    }
-
-    let mut aggregate = ProcessAggregate {
-        process_count: 0,
-        memory_bytes: 0,
-        cpu_percent: 0.0,
-    };
-    for sample in samples {
-        if pids.contains(&sample.pid) {
-            aggregate.process_count += 1;
-            aggregate.memory_bytes = aggregate.memory_bytes.saturating_add(sample.rss_bytes);
-            aggregate.cpu_percent += sample.cpu_percent;
-        }
-    }
-    aggregate
-}
-
-fn descendants_of(root_pid: i32, children_by_parent: &HashMap<i32, Vec<i32>>) -> HashSet<i32> {
-    let mut descendants = HashSet::new();
-    let mut stack = children_by_parent
-        .get(&root_pid)
-        .cloned()
-        .unwrap_or_default();
-    while let Some(pid) = stack.pop() {
-        if !descendants.insert(pid) {
-            continue;
-        }
-        if let Some(children) = children_by_parent.get(&pid) {
-            stack.extend(children.iter().copied());
-        }
-    }
-    descendants
 }
 
 fn remember_live_runtime_turn_claim(
@@ -3857,12 +3754,24 @@ fn stable_resume_token(provider_id: &str, resume_ref: &str) -> String {
 
 fn workspace_title_from_history_entry(entry: &crate::history::HistoryEntry) -> String {
     let base = entry.cwd.as_deref().unwrap_or(&entry.summary);
-    let short_base = base
-        .rsplit('/')
+    let short_base = history_title_path_tail(base);
+    format!("{} - {}", entry.provider_id, short_title(short_base, 32))
+}
+
+#[cfg(not(windows))]
+fn history_title_path_tail(base: &str) -> &str {
+    base.rsplit('/')
         .next()
         .filter(|s| !s.is_empty())
-        .unwrap_or(base);
-    format!("{} - {}", entry.provider_id, short_title(short_base, 32))
+        .unwrap_or(base)
+}
+
+#[cfg(windows)]
+fn history_title_path_tail(base: &str) -> &str {
+    base.rsplit(['/', '\\'])
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(base)
 }
 
 fn history_entry_from_watch_update(
@@ -3963,34 +3872,11 @@ fn observed_session_process_alive(session: &ObservedAgentSession) -> bool {
 }
 
 fn process_id_is_alive(pid: i32) -> bool {
-    if pid <= 0 {
-        return false;
-    }
-    match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None) {
-        Ok(()) => true,
-        Err(nix::errno::Errno::EPERM) => true,
-        Err(_) => false,
-    }
+    crate::host::process::pid_is_alive(pid)
 }
 
 fn observed_session_writer_pid(path: &Path) -> Option<i32> {
-    let output = std::process::Command::new("/usr/sbin/lsof")
-        .args(["-t", "--"])
-        .arg(path)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    parse_lsof_pid_output(&output.stdout)
-}
-
-fn parse_lsof_pid_output(stdout: &[u8]) -> Option<i32> {
-    let current_pid = std::process::id() as i32;
-    String::from_utf8_lossy(stdout).lines().find_map(|line| {
-        let pid = line.trim().parse::<i32>().ok()?;
-        (pid > 0 && pid != current_pid).then_some(pid)
-    })
+    crate::host::file_users::observed_session_writer_pid(path)
 }
 
 fn watch_turn_completed_text(
@@ -4161,45 +4047,6 @@ mod tests {
         assert!(!display.contains("2026"));
         assert!(!display.contains('T'));
         assert!(!display.ends_with('Z'));
-    }
-
-    #[test]
-    fn agent_resource_aggregation_counts_process_group_and_descendants() {
-        let samples = vec![
-            ProcessSample {
-                pid: 10,
-                ppid: 1,
-                pgid: 10,
-                rss_bytes: 1024,
-                cpu_percent: 1.0,
-            },
-            ProcessSample {
-                pid: 11,
-                ppid: 10,
-                pgid: 10,
-                rss_bytes: 2048,
-                cpu_percent: 2.5,
-            },
-            ProcessSample {
-                pid: 12,
-                ppid: 1,
-                pgid: 10,
-                rss_bytes: 4096,
-                cpu_percent: 0.5,
-            },
-            ProcessSample {
-                pid: 20,
-                ppid: 1,
-                pgid: 20,
-                rss_bytes: 8192,
-                cpu_percent: 9.0,
-            },
-        ];
-        let aggregate = aggregate_process_group(10, &samples, &children_by_parent(&samples));
-
-        assert_eq!(aggregate.process_count, 3);
-        assert_eq!(aggregate.memory_bytes, 7168);
-        assert_eq!(aggregate.cpu_percent, 4.0);
     }
 
     #[tokio::test]
@@ -7417,12 +7264,27 @@ mod tests {
         fs::create_dir_all(&dir).expect("codex sessions dir");
         let path = dir.join(format!("rollout-2026-04-25T00-00-00-{session_id}.jsonl"));
         let lines = [
-            format!(
-                r#"{{"timestamp":"{timestamp}","type":"session_meta","payload":{{"session_id":"{session_id}","cwd":"{cwd}","originator":"codex-cli","model":"gpt-5.4"}}}}"#
-            ),
-            format!(
-                r#"{{"timestamp":"{timestamp}","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"{prompt}"}}]}}}}"#
-            ),
+            serde_json::json!({
+                "timestamp": timestamp,
+                "type": "session_meta",
+                "payload": {
+                    "session_id": session_id,
+                    "cwd": cwd,
+                    "originator": "codex-cli",
+                    "model": "gpt-5.4",
+                },
+            })
+            .to_string(),
+            serde_json::json!({
+                "timestamp": timestamp,
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": prompt}],
+                },
+            })
+            .to_string(),
         ];
         fs::write(&path, format!("{}\n", lines.join("\n"))).expect("write codex session");
         path

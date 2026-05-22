@@ -8,9 +8,9 @@ use crate::adapters::pi;
 #[cfg(feature = "codex")]
 use crate::adapters::{codex, codex_env_overrides};
 #[cfg(any(feature = "codex", feature = "gemini"))]
-use nix::sys::signal::{self, Signal};
+use crate::adapters::{merged_env_map, resolve_command_for_launch};
 #[cfg(any(feature = "codex", feature = "gemini"))]
-use nix::unistd::Pid;
+use crate::host::process::ManagedProcess;
 use once_cell::sync::Lazy;
 #[cfg(any(feature = "codex", feature = "gemini"))]
 use serde_json::json;
@@ -307,6 +307,17 @@ pub async fn preflight_live_provider_with_timeout(
     result
 }
 
+#[cfg(any(feature = "codex", feature = "gemini"))]
+fn resolve_live_binary(
+    binary: &str,
+    workdir: &Path,
+    extra_env: &BTreeMap<String, String>,
+) -> Result<String, String> {
+    let env = merged_env_map(extra_env);
+    resolve_command_for_launch(binary, &workdir.to_string_lossy(), &env)
+        .map_err(|err| err.to_string())
+}
+
 #[cfg(feature = "codex")]
 async fn preflight_codex_app_server_turn(
     provider: &LiveProvider,
@@ -315,7 +326,8 @@ async fn preflight_codex_app_server_turn(
     timeout: Duration,
 ) -> Result<(), String> {
     let extra_env = provider.extra_env(temp_root, workdir)?;
-    let mut command = Command::new(&provider.binary);
+    let binary = resolve_live_binary(&provider.binary, workdir, &extra_env)?;
+    let mut command = Command::new(&binary);
     command
         .arg("app-server")
         .arg("--listen")
@@ -324,26 +336,58 @@ async fn preflight_codex_app_server_turn(
         .envs(extra_env)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    {
-        use std::os::unix::process::CommandExt;
-        command.as_std_mut().process_group(0);
-    }
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    crate::host::process::configure_command(&mut command);
     let mut child = command
         .spawn()
         .map_err(|err| format!("codex preflight spawn({}): {err}", provider.binary))?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "codex preflight stdin unavailable".to_string())?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "codex preflight stdout unavailable".to_string())?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "codex preflight stderr unavailable".to_string())?;
+    let managed_child = match ManagedProcess::attach(&child) {
+        Ok(managed_child) => managed_child,
+        Err(err) => {
+            let stop_error = child
+                .kill()
+                .await
+                .err()
+                .map(|err| format!("kill preflight child after manage failure: {err}"));
+            return Err(append_stop_error(
+                format!("codex preflight manage({}): {err}", provider.binary),
+                stop_error,
+            ));
+        }
+    };
+    let mut stdin = match child.stdin.take() {
+        Some(stdin) => stdin,
+        None => {
+            let stop_error = stop_preflight_child(&mut child, &managed_child).await.err();
+            return Err(append_stop_error(
+                "codex preflight stdin unavailable".to_string(),
+                stop_error,
+            ));
+        }
+    };
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            drop(stdin);
+            let stop_error = stop_preflight_child(&mut child, &managed_child).await.err();
+            return Err(append_stop_error(
+                "codex preflight stdout unavailable".to_string(),
+                stop_error,
+            ));
+        }
+    };
+    let stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            drop(stdin);
+            let stop_error = stop_preflight_child(&mut child, &managed_child).await.err();
+            return Err(append_stop_error(
+                "codex preflight stderr unavailable".to_string(),
+                stop_error,
+            ));
+        }
+    };
     let mut stderr_task = tokio::spawn(async move {
         let mut reader = BufReader::new(stderr);
         let mut buf = String::new();
@@ -378,20 +422,20 @@ async fn preflight_codex_app_server_turn(
         }
     });
 
-    write_json_line(&mut stdin, &initialize)
-        .await
-        .map_err(|err| format!("codex preflight write initialize: {err}"))?;
-    write_json_line(&mut stdin, &initialized)
-        .await
-        .map_err(|err| format!("codex preflight write initialized: {err}"))?;
-    write_json_line(&mut stdin, &thread_start)
-        .await
-        .map_err(|err| format!("codex preflight write thread/start: {err}"))?;
-
     let mut stdout_lines = BufReader::new(stdout).lines();
     let mut seen_stdout = Vec::new();
     let result: Result<Result<(), String>, tokio::time::error::Elapsed> =
         tokio::time::timeout(timeout, async {
+            write_json_line(&mut stdin, &initialize)
+                .await
+                .map_err(|err| format!("codex preflight write initialize: {err}"))?;
+            write_json_line(&mut stdin, &initialized)
+                .await
+                .map_err(|err| format!("codex preflight write initialized: {err}"))?;
+            write_json_line(&mut stdin, &thread_start)
+                .await
+                .map_err(|err| format!("codex preflight write thread/start: {err}"))?;
+
             let mut turn_started = false;
             loop {
                 let Some(line) = stdout_lines
@@ -478,7 +522,7 @@ async fn preflight_codex_app_server_turn(
         .await;
 
     drop(stdin);
-    let stop_error = stop_preflight_child(&mut child).await.err();
+    let stop_error = stop_preflight_child(&mut child, &managed_child).await.err();
     let mut stderr_summary = summarize_snippet(drain_preflight_stderr(&mut stderr_task).await);
     if let Some(err) = stop_error {
         if stderr_summary.is_empty() || stderr_summary == "<none>" {
@@ -773,33 +817,66 @@ async fn preflight_gemini_acp_initialize(
     timeout: Duration,
 ) -> Result<(), String> {
     let extra_env = provider.extra_env(temp_root, workdir)?;
-    let mut command = Command::new(&provider.binary);
+    let binary = resolve_live_binary(&provider.binary, workdir, &extra_env)?;
+    let mut command = Command::new(&binary);
     command
         .arg("--acp")
         .current_dir(workdir)
         .envs(extra_env)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    {
-        use std::os::unix::process::CommandExt;
-        command.as_std_mut().process_group(0);
-    }
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    crate::host::process::configure_command(&mut command);
     let mut child = command
         .spawn()
         .map_err(|err| format!("gemini ACP preflight spawn({}): {err}", provider.binary))?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "gemini ACP preflight stdin unavailable".to_string())?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "gemini ACP preflight stdout unavailable".to_string())?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "gemini ACP preflight stderr unavailable".to_string())?;
+    let managed_child = match ManagedProcess::attach(&child) {
+        Ok(managed_child) => managed_child,
+        Err(err) => {
+            let stop_error = child
+                .kill()
+                .await
+                .err()
+                .map(|err| format!("kill preflight child after manage failure: {err}"));
+            return Err(append_stop_error(
+                format!("gemini ACP preflight manage({}): {err}", provider.binary),
+                stop_error,
+            ));
+        }
+    };
+    let mut stdin = match child.stdin.take() {
+        Some(stdin) => stdin,
+        None => {
+            let stop_error = stop_preflight_child(&mut child, &managed_child).await.err();
+            return Err(append_stop_error(
+                "gemini ACP preflight stdin unavailable".to_string(),
+                stop_error,
+            ));
+        }
+    };
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            drop(stdin);
+            let stop_error = stop_preflight_child(&mut child, &managed_child).await.err();
+            return Err(append_stop_error(
+                "gemini ACP preflight stdout unavailable".to_string(),
+                stop_error,
+            ));
+        }
+    };
+    let stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            drop(stdin);
+            let stop_error = stop_preflight_child(&mut child, &managed_child).await.err();
+            return Err(append_stop_error(
+                "gemini ACP preflight stderr unavailable".to_string(),
+                stop_error,
+            ));
+        }
+    };
     let mut stderr_task = tokio::spawn(async move {
         let mut reader = BufReader::new(stderr);
         let mut buf = String::new();
@@ -821,23 +898,23 @@ async fn preflight_gemini_acp_initialize(
             }
         }
     });
-    let mut payload =
-        serde_json::to_vec(&init).map_err(|err| format!("serialize initialize: {err}"))?;
-    payload.push(b'\n');
-    stdin
-        .write_all(&payload)
-        .await
-        .map_err(|err| format!("gemini ACP preflight write initialize: {err}"))?;
-    stdin
-        .flush()
-        .await
-        .map_err(|err| format!("gemini ACP preflight flush initialize: {err}"))?;
-    drop(stdin);
 
     let mut stdout_lines = BufReader::new(stdout).lines();
     let mut seen_stdout = Vec::new();
     let result: Result<Result<bool, String>, tokio::time::error::Elapsed> =
         tokio::time::timeout(timeout, async {
+            let mut payload =
+                serde_json::to_vec(&init).map_err(|err| format!("serialize initialize: {err}"))?;
+            payload.push(b'\n');
+            stdin
+                .write_all(&payload)
+                .await
+                .map_err(|err| format!("gemini ACP preflight write initialize: {err}"))?;
+            stdin
+                .flush()
+                .await
+                .map_err(|err| format!("gemini ACP preflight flush initialize: {err}"))?;
+
             loop {
                 let Some(line) = stdout_lines
                     .next_line()
@@ -854,7 +931,8 @@ async fn preflight_gemini_acp_initialize(
         })
         .await;
 
-    let stop_error = stop_preflight_child(&mut child).await.err();
+    drop(stdin);
+    let stop_error = stop_preflight_child(&mut child, &managed_child).await.err();
     let mut stderr_summary = summarize_snippet(drain_preflight_stderr(&mut stderr_task).await);
     if let Some(err) = stop_error {
         if stderr_summary.is_empty() || stderr_summary == "<none>" {
@@ -948,6 +1026,15 @@ fn format_stderr_suffix(stderr: &str) -> String {
 }
 
 #[cfg(any(feature = "codex", feature = "gemini"))]
+fn append_stop_error(mut message: String, stop_error: Option<String>) -> String {
+    if let Some(err) = stop_error {
+        message.push_str("; ");
+        message.push_str(&err);
+    }
+    message
+}
+
+#[cfg(any(feature = "codex", feature = "gemini"))]
 fn format_duration(duration: Duration) -> String {
     if duration.subsec_nanos() == 0 {
         format!("{}s", duration.as_secs())
@@ -959,23 +1046,25 @@ fn format_duration(duration: Duration) -> String {
 }
 
 #[cfg(any(feature = "codex", feature = "gemini"))]
-async fn stop_preflight_child(child: &mut tokio::process::Child) -> Result<(), String> {
+async fn stop_preflight_child(
+    child: &mut tokio::process::Child,
+    managed_child: &ManagedProcess,
+) -> Result<(), String> {
     let pid = child
         .id()
         .map(|pid| pid as i32)
         .ok_or_else(|| "missing preflight pid".to_string())?;
-    let pgid = Pid::from_raw(-pid);
-    let _ = signal::kill(pgid, Signal::SIGTERM);
-    if tokio::time::timeout(Duration::from_millis(250), child.wait())
-        .await
-        .is_ok()
-    {
-        return Ok(());
+    let _ = managed_child.terminate_graceful(pid);
+    match tokio::time::timeout(Duration::from_millis(250), child.wait()).await {
+        Ok(Ok(_)) => return Ok(()),
+        Ok(Err(err)) => return Err(format!("wait preflight child: {err}")),
+        Err(_) => {}
     }
-    let _ = signal::kill(pgid, Signal::SIGKILL);
+
+    let _ = managed_child.terminate_force(pid);
     tokio::time::timeout(Duration::from_millis(250), child.wait())
         .await
-        .map_err(|_| "timed out waiting for preflight process group to exit".to_string())?
+        .map_err(|_| "timed out waiting for preflight process tree to exit".to_string())?
         .map_err(|err| format!("wait preflight child: {err}"))?;
     Ok(())
 }

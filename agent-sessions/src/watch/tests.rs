@@ -1,7 +1,10 @@
 use super::*;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-#[cfg(any(feature = "codex", all(feature = "claude", target_os = "macos")))]
+#[cfg(any(
+    feature = "codex",
+    all(feature = "claude", any(target_os = "macos", windows))
+))]
 use std::time::SystemTime;
 
 fn watch_provider(id: &str) -> WatchProvider {
@@ -212,7 +215,10 @@ fn watch_discovery_filters_during_provider_iteration() {
     );
 }
 
-#[cfg(any(feature = "codex", all(feature = "claude", target_os = "macos")))]
+#[cfg(any(
+    feature = "codex",
+    all(feature = "claude", any(target_os = "macos", windows))
+))]
 fn set_modified(path: &Path, modified: SystemTime) {
     filetime::set_file_mtime(path, filetime::FileTime::from_system_time(modified)).unwrap();
 }
@@ -298,7 +304,7 @@ async fn discovery_filters_directory_roots_to_recent_session_files() {
     assert!(!watch_paths.contains(&stale_path));
 }
 
-#[cfg(all(feature = "codex", not(target_os = "macos")))]
+#[cfg(all(feature = "codex", not(any(target_os = "macos", windows))))]
 #[tokio::test]
 async fn initial_watch_paths_include_only_recent_codex_day_directories() {
     let temp = tempfile::tempdir().unwrap();
@@ -319,9 +325,9 @@ async fn initial_watch_paths_include_only_recent_codex_day_directories() {
     assert!(!watch_paths.contains(&fs::canonicalize(stale_day_dir).unwrap()));
 }
 
-#[cfg(all(feature = "codex", target_os = "macos"))]
+#[cfg(all(feature = "codex", any(target_os = "macos", windows)))]
 #[tokio::test]
-async fn macos_codex_root_uses_recursive_watch_and_recent_session_file_targets() {
+async fn recursive_codex_root_uses_recursive_watch_and_recent_session_file_targets() {
     let temp = tempfile::tempdir().unwrap();
     let root = codex_root(temp.path());
     let hot_path = codex_session_path(&root);
@@ -375,7 +381,7 @@ async fn macos_codex_root_uses_recursive_watch_and_recent_session_file_targets()
     );
 }
 
-#[cfg(all(feature = "claude", not(target_os = "macos")))]
+#[cfg(all(feature = "claude", not(any(target_os = "macos", windows))))]
 #[tokio::test]
 async fn initial_watch_paths_do_not_register_every_claude_project_dir() {
     let temp = tempfile::tempdir().unwrap();
@@ -399,9 +405,9 @@ async fn initial_watch_paths_do_not_register_every_claude_project_dir() {
     assert!(!watch_paths.contains(&fs::canonicalize(empty_project).unwrap()));
 }
 
-#[cfg(all(feature = "claude", target_os = "macos"))]
+#[cfg(all(feature = "claude", any(target_os = "macos", windows)))]
 #[tokio::test]
-async fn macos_claude_root_uses_recursive_watch_and_recent_session_file_targets() {
+async fn recursive_claude_root_uses_recursive_watch_and_recent_session_file_targets() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("projects");
     let hot_project = root.join("-tmp-hot");

@@ -44,7 +44,11 @@ pub fn fakeagent_bin() -> PathBuf {
                 p
             });
         target.push("debug");
-        target.push("lucarne-fakeagent");
+        target.push(if cfg!(windows) {
+            "lucarne-fakeagent.exe"
+        } else {
+            "lucarne-fakeagent"
+        });
         assert!(target.exists(), "fakeagent missing at {:?}", target);
         target
     })
@@ -67,14 +71,23 @@ pub fn fixture_path(subdir: &str, name: &str) -> PathBuf {
 
 pub fn write_cat_script(fixture: &std::path::Path) -> PathBuf {
     let dir = tempfile::tempdir().expect("tempdir");
+    #[cfg(unix)]
     let path = dir.path().join("agent.sh");
+    #[cfg(windows)]
+    let path = dir.path().join("agent.cmd");
+    #[cfg(unix)]
     let script = format!(
         "#!/bin/sh\nexec cat {}\n",
         shell_quote(&fixture.to_string_lossy())
     );
+    #[cfg(windows)]
+    let script = format!("@echo off\r\ntype \"{}\"\r\n", batch_quote(fixture));
     std::fs::write(&path, script).expect("write script");
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
     // Leak the tempdir — it only lives for the test process lifetime.
     std::mem::forget(dir);
     path
@@ -84,7 +97,11 @@ pub fn write_cat_script(fixture: &std::path::Path) -> PathBuf {
 
 pub fn write_pi_cat_script(fixture: &std::path::Path) -> PathBuf {
     let dir = tempfile::tempdir().expect("tempdir");
+    #[cfg(unix)]
     let path = dir.path().join("agent.sh");
+    #[cfg(windows)]
+    let path = dir.path().join("agent.cmd");
+    #[cfg(unix)]
     let script = format!(
         r#"#!/bin/sh
 if [ "$1" = "--list-models" ]; then
@@ -96,13 +113,22 @@ exec cat {}
 "#,
         shell_quote(&fixture.to_string_lossy())
     );
+    #[cfg(windows)]
+    let script = format!(
+        "@echo off\r\nif \"%~1\"==\"--list-models\" (\r\n  echo provider  model\r\n  echo xai  grok-4\r\n  exit /b 0\r\n)\r\ntype \"{}\"\r\n",
+        batch_quote(fixture)
+    );
     std::fs::write(&path, script).expect("write script");
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
     std::mem::forget(dir);
     path
 }
 
+#[cfg(unix)]
 fn shell_quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('\'');
@@ -115,6 +141,11 @@ fn shell_quote(s: &str) -> String {
     }
     out.push('\'');
     out
+}
+
+#[cfg(windows)]
+fn batch_quote(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('"', "\"\"")
 }
 
 pub struct ScenarioResult {

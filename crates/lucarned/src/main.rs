@@ -102,6 +102,25 @@ channels:
       interaction_prompt: "微信主动通知快到发送限制了，请回复任意消息以刷新会话。"
 "#;
 
+fn default_lucarned_config() -> std::borrow::Cow<'static, str> {
+    #[cfg(windows)]
+    {
+        std::borrow::Cow::Owned(
+            DEFAULT_LUCARNED_CONFIG
+                .replace("  db: ~/.lucarned/state.sqlite3", "  db: null")
+                .replace("  dir: ~/.lucarned/logs", "  dir: null")
+                .replace(
+                    "    credential_path: ~/.lucarned/wechat-credentials.json",
+                    "    credential_path: null",
+                ),
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        std::borrow::Cow::Borrowed(DEFAULT_LUCARNED_CONFIG)
+    }
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -663,7 +682,7 @@ fn ensure_default_config_file(path: &Path) -> Result<(), Box<dyn std::error::Err
         .create_new(true)
         .open(path)
     {
-        Ok(mut file) => file.write_all(DEFAULT_LUCARNED_CONFIG.as_bytes())?,
+        Ok(mut file) => file.write_all(default_lucarned_config().as_bytes())?,
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(err) => return Err(err.into()),
     }
@@ -676,16 +695,61 @@ fn default_config_path_in(home: &Path) -> PathBuf {
 
 fn expand_home_path(value: &str) -> PathBuf {
     if let Some(rest) = value.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
-            return PathBuf::from(home).join(rest);
+        if let Some(home) = user_home_dir() {
+            return home.join(rest);
         }
     }
     if value == "~" {
-        if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
-            return PathBuf::from(home);
+        if let Some(home) = user_home_dir() {
+            return home;
         }
     }
     PathBuf::from(value)
+}
+
+fn user_home_dir() -> Option<PathBuf> {
+    user_home_dir_from_env(EnvReader)
+}
+
+#[cfg(not(windows))]
+fn user_home_dir_from_env(env: impl Env) -> Option<PathBuf> {
+    env.var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+#[cfg(windows)]
+fn user_home_dir_from_env(env: impl Env) -> Option<PathBuf> {
+    env.var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            env.var_os("USERPROFILE")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
+        .or_else(|| {
+            let drive = env.var_os("HOMEDRIVE").filter(|value| !value.is_empty())?;
+            let path = env.var_os("HOMEPATH").filter(|value| !value.is_empty())?;
+            Some(PathBuf::from(format!(
+                "{}{}",
+                drive.to_string_lossy(),
+                path.to_string_lossy()
+            )))
+        })
+}
+
+trait Env: Copy {
+    fn var_os(self, name: &str) -> Option<std::ffi::OsString>;
+}
+
+#[derive(Clone, Copy)]
+struct EnvReader;
+
+impl Env for EnvReader {
+    fn var_os(self, name: &str) -> Option<std::ffi::OsString> {
+        std::env::var_os(name)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -768,6 +832,8 @@ fn ensure_yaml_child_mapping<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    use std::collections::BTreeMap;
     use std::{
         ffi::OsString,
         io::Write,
@@ -811,6 +877,34 @@ mod tests {
         let result = f();
         drop(restore);
         result
+    }
+
+    #[cfg(windows)]
+    #[derive(Clone, Copy)]
+    struct MapEnv<'a>(&'a BTreeMap<&'a str, &'a str>);
+
+    #[cfg(windows)]
+    impl Env for MapEnv<'_> {
+        fn var_os(self, name: &str) -> Option<OsString> {
+            self.0.get(name).map(OsString::from)
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn expand_home_path_uses_home_drive_and_home_path_on_windows() {
+        let env = BTreeMap::from([("HOMEDRIVE", r"C:"), ("HOMEPATH", r"\Users\alice")]);
+        assert_eq!(
+            user_home_dir_from_env(MapEnv(&env)),
+            Some(PathBuf::from(r"C:\Users\alice"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn expand_home_path_ignores_empty_home_drive_and_home_path_on_windows() {
+        let env = BTreeMap::from([("HOMEDRIVE", ""), ("HOMEPATH", r"\Users\alice")]);
+        assert_eq!(user_home_dir_from_env(MapEnv(&env)), None);
     }
 
     #[test]
@@ -934,9 +1028,37 @@ mod tests {
         assert!(raw.contains("  - pi"));
         assert!(raw.contains("telegram:"));
         assert!(raw.contains("wechat:"));
+        #[cfg(windows)]
+        {
+            assert!(raw.contains("  db: null"));
+            assert!(raw.contains("  dir: null"));
+            assert!(raw.contains("    credential_path: null"));
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(raw.contains("  db: ~/.lucarned/state.sqlite3"));
+            assert!(raw.contains("  dir: ~/.lucarned/logs"));
+            assert!(raw.contains("    credential_path: ~/.lucarned/wechat-credentials.json"));
+        }
 
         let daemon_config = LucarnedFileConfig::from_yaml_str(&raw).expect("parse daemon config");
         assert_eq!(daemon_config.health.enabled, Some(false));
+        #[cfg(windows)]
+        {
+            assert_eq!(daemon_config.state.db, None);
+            assert_eq!(daemon_config.logging.dir, None);
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(
+                daemon_config.state.db.as_deref(),
+                Some("~/.lucarned/state.sqlite3")
+            );
+            assert_eq!(
+                daemon_config.logging.dir.as_deref(),
+                Some("~/.lucarned/logs")
+            );
+        }
         assert_eq!(daemon_config.runtime_config.global.bypass, Some(false));
         assert_eq!(
             daemon_config.runtime_config.global.notifications,

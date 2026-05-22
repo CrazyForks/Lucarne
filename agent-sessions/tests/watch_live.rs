@@ -35,6 +35,18 @@ fn append_line(path: &Path, line: &str) {
     file.sync_all().unwrap();
 }
 
+#[cfg(feature = "codex")]
+fn rename_into_place(path: &Path, content: &str) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let tmp_path = path.with_extension("tmp");
+    {
+        let mut file = fs::File::create(&tmp_path).unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+        file.sync_all().unwrap();
+    }
+    fs::rename(tmp_path, path).unwrap();
+}
+
 async fn recv_timeout(
     watcher: &mut SessionWatcher,
     timeout: Duration,
@@ -110,6 +122,60 @@ async fn live_codex_watch_emits_appended_assistant_response() {
     );
 
     let update = wait_for_assistant_response(&mut watcher, "codex pong").await;
+    assert_eq!(update.provider, watch_provider("codex"));
+}
+
+#[cfg(feature = "codex")]
+#[tokio::test]
+async fn live_codex_watch_emits_renamed_assistant_response() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("codex-live-root");
+    fs::create_dir_all(&root).unwrap();
+    let path = root.join("rollout-renamed-live.jsonl");
+    let mut watcher = start_file_watcher(watch_provider("codex"), &root).await;
+
+    rename_into_place(
+        &path,
+        concat!(
+            r#"{"timestamp":"2026-05-03T00:00:00.000Z","type":"session_meta","payload":{"session_id":"sess-live-renamed","cwd":"/tmp/project","model":"gpt-5"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-03T00:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"ping"}]}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-03T00:00:02.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"codex renamed pong"}]}}"#,
+            "\n",
+        ),
+    );
+
+    let update = wait_for_assistant_response(&mut watcher, "codex renamed pong").await;
+    assert_eq!(update.provider, watch_provider("codex"));
+}
+
+#[cfg(all(feature = "codex", any(target_os = "macos", windows)))]
+#[tokio::test]
+async fn live_codex_watch_emits_nested_created_session_response() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("codex-home").join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    let path = root
+        .join("2026")
+        .join("05")
+        .join("03")
+        .join("rollout-nested-live.jsonl");
+    let mut watcher = start_file_watcher(watch_provider("codex"), &root).await;
+
+    rename_into_place(
+        &path,
+        concat!(
+            r#"{"timestamp":"2026-05-03T00:00:00.000Z","type":"session_meta","payload":{"session_id":"sess-live-nested","cwd":"/tmp/project","model":"gpt-5"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-03T00:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"ping"}]}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-03T00:00:02.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"codex nested pong"}]}}"#,
+            "\n",
+        ),
+    );
+
+    let update = wait_for_assistant_response(&mut watcher, "codex nested pong").await;
     assert_eq!(update.provider, watch_provider("codex"));
 }
 

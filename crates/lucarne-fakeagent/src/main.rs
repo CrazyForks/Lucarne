@@ -27,7 +27,9 @@
 // This is a faithful Rust port of lucarne/internal/fakeagent/main.go. Tests
 // rely on it consuming tests/data/**/*.fixture unchanged.
 
-use nix::sys::signal::{self, SigHandler, Signal};
+mod signals;
+
+use crate::signals::{install_signal_handlers, normalize_signal_name, signal_counter};
 use std::{
     collections::BTreeMap,
     env, fmt,
@@ -35,16 +37,12 @@ use std::{
     io::{self, BufRead, BufReader, Read, Write},
     process::exit,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::Ordering,
         Arc, Condvar, Mutex,
     },
     thread,
     time::{Duration, Instant},
 };
-
-static SIGINT_COUNT: AtomicUsize = AtomicUsize::new(0);
-static SIGTERM_COUNT: AtomicUsize = AtomicUsize::new(0);
-static SIGHUP_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 fn main() {
     install_signal_handlers();
@@ -271,48 +269,6 @@ struct StdinState {
     consumed: usize,
 }
 
-fn install_signal_handlers() {
-    for signal in [Signal::SIGINT, Signal::SIGTERM, Signal::SIGHUP] {
-        unsafe {
-            signal::signal(signal, SigHandler::Handler(handle_signal))
-                .unwrap_or_else(|err| panic!("install signal handler for {signal:?}: {err}"));
-        }
-    }
-}
-
-extern "C" fn handle_signal(sig: i32) {
-    match sig {
-        x if x == Signal::SIGINT as i32 => {
-            SIGINT_COUNT.fetch_add(1, Ordering::SeqCst);
-        }
-        x if x == Signal::SIGTERM as i32 => {
-            SIGTERM_COUNT.fetch_add(1, Ordering::SeqCst);
-        }
-        x if x == Signal::SIGHUP as i32 => {
-            SIGHUP_COUNT.fetch_add(1, Ordering::SeqCst);
-        }
-        _ => {}
-    }
-}
-
-fn normalize_signal_name(raw: &str) -> Option<&'static str> {
-    match raw.trim() {
-        "SIGINT" | "INT" => Some("SIGINT"),
-        "SIGTERM" | "TERM" => Some("SIGTERM"),
-        "SIGHUP" | "HUP" => Some("SIGHUP"),
-        _ => None,
-    }
-}
-
-fn signal_counter(name: &'static str) -> &'static AtomicUsize {
-    match name {
-        "SIGINT" => &SIGINT_COUNT,
-        "SIGTERM" => &SIGTERM_COUNT,
-        "SIGHUP" => &SIGHUP_COUNT,
-        other => panic!("missing counter for {other}"),
-    }
-}
-
 fn contains_bytes(hay: &[u8], needle: &[u8]) -> bool {
     if needle.is_empty() {
         return true;
@@ -416,7 +372,8 @@ fn go_unquote(s: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{contains_bytes, find_bytes, normalize_signal_name, version_output, StdinState};
+    use super::{contains_bytes, find_bytes, version_output, StdinState};
+    use crate::signals::normalize_signal_name;
 
     #[test]
     fn contains_bytes_matches_expected_substring() {
@@ -465,13 +422,24 @@ mod tests {
         assert_eq!(state.consumed, state.buf.len() - 1);
     }
 
+    #[cfg(unix)]
     #[test]
-    fn normalize_signal_name_accepts_short_and_long_forms() {
+    fn normalize_signal_name_accepts_unix_short_and_long_forms() {
         assert_eq!(normalize_signal_name("SIGINT"), Some("SIGINT"));
         assert_eq!(normalize_signal_name("INT"), Some("SIGINT"));
         assert_eq!(normalize_signal_name("SIGTERM"), Some("SIGTERM"));
         assert_eq!(normalize_signal_name("HUP"), Some("SIGHUP"));
         assert_eq!(normalize_signal_name("SIGKILL"), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn normalize_signal_name_maps_windows_term_to_console_break_counter() {
+        assert_eq!(normalize_signal_name("SIGINT"), Some("SIGINT"));
+        assert_eq!(normalize_signal_name("INT"), Some("SIGINT"));
+        assert_eq!(normalize_signal_name("SIGTERM"), Some("SIGINT"));
+        assert_eq!(normalize_signal_name("TERM"), Some("SIGINT"));
+        assert_eq!(normalize_signal_name("HUP"), None);
     }
 
     #[test]

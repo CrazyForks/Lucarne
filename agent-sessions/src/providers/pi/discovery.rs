@@ -8,8 +8,7 @@ use serde::Deserialize;
 use smol_str::SmolStr;
 
 fn pi_sessions_root() -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    let root = std::path::PathBuf::from(home)
+    let root = crate::paths::home_dir()?
         .join(".pi")
         .join("agent")
         .join("sessions");

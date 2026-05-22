@@ -38,12 +38,12 @@ impl Codex {
 
             let payload: SessionMetaPayload<'_> = serde_json::from_str(envelope.payload.get())?;
             return Ok(Some(SessionMeta {
-                session_id: opt_box_str(payload.id.or(payload.session_id)),
-                cwd: opt_box_str(payload.cwd),
-                originator: opt_box_str(payload.originator),
-                model: opt_box_str(payload.model),
-                cli_version: opt_box_str(payload.cli_version),
-                timestamp: opt_box_str(payload.timestamp),
+                session_id: opt_cow_box_str(payload.id.or(payload.session_id)),
+                cwd: opt_cow_box_str(payload.cwd),
+                originator: opt_cow_box_str(payload.originator),
+                model: opt_cow_box_str(payload.model),
+                cli_version: opt_cow_box_str(payload.cli_version),
+                timestamp: opt_cow_box_str(payload.timestamp),
             }));
         }
     }
@@ -87,15 +87,19 @@ impl Codex {
                 "session_meta" if session_meta.is_none() => {
                     let payload: SessionMetaPayload<'_> =
                         serde_json::from_str(envelope.payload.get())?;
-                    let timestamp = payload.timestamp.or(envelope.timestamp);
-                    session_started_at = timestamp.map(Into::into);
+                    let timestamp = payload
+                        .timestamp
+                        .or_else(|| envelope.timestamp.map(Cow::Borrowed));
+                    session_started_at = timestamp
+                        .as_ref()
+                        .map(|value| SmolStr::from(value.as_ref()));
                     session_meta = Some(SessionMeta {
-                        session_id: opt_box_str(payload.id.or(payload.session_id)),
-                        cwd: opt_box_str(payload.cwd),
-                        originator: opt_box_str(payload.originator),
-                        model: opt_box_str(payload.model),
-                        cli_version: opt_box_str(payload.cli_version),
-                        timestamp: opt_box_str(timestamp),
+                        session_id: opt_cow_box_str(payload.id.or(payload.session_id)),
+                        cwd: opt_cow_box_str(payload.cwd),
+                        originator: opt_cow_box_str(payload.originator),
+                        model: opt_cow_box_str(payload.model),
+                        cli_version: opt_cow_box_str(payload.cli_version),
+                        timestamp: opt_cow_box_str(timestamp),
                     });
                 }
                 "response_item" if session_meta.is_some() => {
@@ -264,12 +268,12 @@ where
                     let payload: SessionMetaPayload<'_> =
                         serde_json::from_str(envelope.payload.get())?;
                     entries.push(Entry::SessionMeta(SessionMeta {
-                        session_id: opt_box_str(payload.id.or(payload.session_id)),
-                        cwd: opt_box_str(payload.cwd),
-                        originator: opt_box_str(payload.originator),
-                        model: opt_box_str(payload.model),
-                        cli_version: opt_box_str(payload.cli_version),
-                        timestamp: opt_box_str(payload.timestamp),
+                        session_id: opt_cow_box_str(payload.id.or(payload.session_id)),
+                        cwd: opt_cow_box_str(payload.cwd),
+                        originator: opt_cow_box_str(payload.originator),
+                        model: opt_cow_box_str(payload.model),
+                        cli_version: opt_cow_box_str(payload.cli_version),
+                        timestamp: opt_cow_box_str(payload.timestamp),
                     }));
                 }
             }
@@ -278,11 +282,11 @@ where
                     let payload: TurnContextPayload<'_> =
                         serde_json::from_str(envelope.payload.get())?;
                     entries.push(Entry::TurnContext(TurnContext {
-                        turn_id: opt_box_str(payload.turn_id),
-                        cwd: opt_box_str(payload.cwd),
-                        current_date: opt_box_str(payload.current_date),
-                        timezone: opt_box_str(payload.timezone),
-                        model: opt_box_str(payload.model),
+                        turn_id: opt_cow_box_str(payload.turn_id),
+                        cwd: opt_cow_box_str(payload.cwd),
+                        current_date: opt_cow_box_str(payload.current_date),
+                        timezone: opt_cow_box_str(payload.timezone),
+                        model: opt_cow_box_str(payload.model),
                     }));
                 }
             }
@@ -837,33 +841,33 @@ fn string_or_json_to_box(raw: &RawValue) -> SmolStr {
 #[derive(Deserialize)]
 struct SessionMetaPayload<'a> {
     #[serde(default)]
-    id: Option<&'a str>,
+    id: Option<Cow<'a, str>>,
     #[serde(default)]
-    session_id: Option<&'a str>,
+    session_id: Option<Cow<'a, str>>,
     #[serde(default)]
-    cwd: Option<&'a str>,
+    cwd: Option<Cow<'a, str>>,
     #[serde(default)]
-    originator: Option<&'a str>,
+    originator: Option<Cow<'a, str>>,
     #[serde(default)]
-    model: Option<&'a str>,
+    model: Option<Cow<'a, str>>,
     #[serde(default)]
-    cli_version: Option<&'a str>,
+    cli_version: Option<Cow<'a, str>>,
     #[serde(default)]
-    timestamp: Option<&'a str>,
+    timestamp: Option<Cow<'a, str>>,
 }
 
 #[derive(Deserialize)]
 struct TurnContextPayload<'a> {
     #[serde(default)]
-    turn_id: Option<&'a str>,
+    turn_id: Option<Cow<'a, str>>,
     #[serde(default)]
-    cwd: Option<&'a str>,
+    cwd: Option<Cow<'a, str>>,
     #[serde(default)]
-    current_date: Option<&'a str>,
+    current_date: Option<Cow<'a, str>>,
     #[serde(default)]
-    timezone: Option<&'a str>,
+    timezone: Option<Cow<'a, str>>,
     #[serde(default)]
-    model: Option<&'a str>,
+    model: Option<Cow<'a, str>>,
 }
 
 #[derive(Deserialize)]
@@ -1212,6 +1216,19 @@ mod tests {
         };
         assert_eq!(meta.session_id.as_deref(), Some("sess-meta"));
         assert_eq!(meta.cwd.as_deref(), Some("/tmp/project"));
+    }
+
+    #[test]
+    fn probe_session_meta_accepts_escaped_windows_cwd() {
+        let bytes = r#"{"timestamp":"2026-04-16T00:00:00.000Z","type":"session_meta","payload":{"session_id":"sess-windows","cwd":"C:\\Users\\alice\\project","originator":"codex-cli","model":"gpt-5.4"}}
+"#;
+
+        let meta = super::Codex::probe_session_meta(Cursor::new(bytes))
+            .unwrap()
+            .expect("session meta");
+
+        assert_eq!(meta.session_id.as_deref(), Some("sess-windows"));
+        assert_eq!(meta.cwd.as_deref(), Some(r"C:\Users\alice\project"));
     }
 
     #[cfg(feature = "agent_session")]

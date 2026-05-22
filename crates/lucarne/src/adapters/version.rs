@@ -21,8 +21,11 @@
 //! Returns a populated [`ProbeResult`] with `available = false` when the
 //! binary can't be run or is below the minimum.
 
-use crate::adapter::ProbeResult;
-use std::process::Command;
+use crate::{
+    adapter::ProbeResult,
+    adapters::{merged_env_map, resolve_command_for_launch},
+};
+use std::{collections::BTreeMap, process::Command};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Semver {
@@ -153,7 +156,8 @@ pub fn probe_version(provider_id: &str, bin: &str, min_version: Option<&str>) ->
 }
 
 fn run_version_command(bin: &str) -> Result<String, String> {
-    let output = Command::new(bin)
+    let resolved = resolve_version_binary(bin)?;
+    let output = Command::new(&resolved)
         .arg("--version")
         .output()
         .map_err(|e| format!("{}", e))?;
@@ -164,6 +168,12 @@ fn run_version_command(bin: &str) -> Result<String, String> {
         return Err(combined.trim().to_string());
     }
     Ok(combined)
+}
+
+fn resolve_version_binary(bin: &str) -> Result<String, String> {
+    let env = merged_env_map(&BTreeMap::new());
+    let cwd = std::env::current_dir().map_err(|err| format!("cwd: {err}"))?;
+    resolve_command_for_launch(bin, &cwd.to_string_lossy(), &env).map_err(|err| err.to_string())
 }
 
 #[cfg(test)]
@@ -209,6 +219,26 @@ mod tests {
             parse_semver("2.0.0").unwrap(),
             parse_semver("2.0.0").unwrap()
         ));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn probe_version_prefers_pathext_script_over_extensionless_shim() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let extensionless = root.path().join("mycli");
+        std::fs::write(
+            &extensionless,
+            b"shell shim without executable extension\r\n",
+        )
+        .expect("write extensionless shim");
+        let cmd = root.path().join("mycli.cmd");
+        std::fs::write(&cmd, b"@echo off\r\necho mycli 1.2.3\r\n").expect("write cmd shim");
+        let stem = root.path().join("mycli");
+
+        let probe = probe_version("mycli", &stem.to_string_lossy(), Some("1.0.0"));
+
+        assert!(probe.available, "probe failed: {}", probe.error);
+        assert!(probe.version.contains("1.2.3"));
     }
 
     #[test]

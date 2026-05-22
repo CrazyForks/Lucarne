@@ -285,27 +285,33 @@ pub fn maybe_wrap_live_binary(
     {
         return Ok(real_binary.into());
     }
-    fs::create_dir_all(script_dir)
-        .map_err(|err| format!("mkdir script dir {}: {err}", script_dir.display()))?;
-    let capture_root =
-        Path::new(&std::env::var("LUCARNE_LIVE_CAPTURE_DIR").unwrap()).join(provider_name);
-    fs::create_dir_all(&capture_root)
-        .map_err(|err| format!("mkdir capture dir {}: {err}", capture_root.display()))?;
-    let script_path = script_dir.join(format!("{provider_name}-capture.sh"));
-    let script = format!(
-        "#!/usr/bin/env bash\nset -euo pipefail\nreal_binary={real_binary:?}\ncapture_root={capture_root:?}\nmkdir -p \"$capture_root\"\nstamp=\"$(date +%Y%m%dT%H%M%S)-$$\"\nstdin_log=\"$capture_root/${{stamp}}.stdin\"\nstdout_log=\"$capture_root/${{stamp}}.stdout\"\nstderr_log=\"$capture_root/${{stamp}}.stderr\"\nstdin_pipe=\"$capture_root/.${{stamp}}.stdin.fifo\"\ncleanup() {{\n  rm -f \"$stdin_pipe\"\n}}\ntrap cleanup EXIT\nmkfifo \"$stdin_pipe\"\ncat <&0 | tee \"$stdin_log\" > \"$stdin_pipe\" &\ncat_pid=$!\n\"$real_binary\" \"$@\" < \"$stdin_pipe\" > >(tee \"$stdout_log\") 2> >(tee \"$stderr_log\" >&2)\nstatus=$?\nwait \"$cat_pid\" || true\nexit \"$status\"\n",
-        real_binary = real_binary,
-        capture_root = capture_root.to_string_lossy()
-    );
-    fs::write(&script_path, script)
-        .map_err(|err| format!("write wrapper script {}: {err}", script_path.display()))?;
     #[cfg(unix)]
     {
+        fs::create_dir_all(script_dir)
+            .map_err(|err| format!("mkdir script dir {}: {err}", script_dir.display()))?;
+        let capture_root =
+            Path::new(&std::env::var("LUCARNE_LIVE_CAPTURE_DIR").unwrap()).join(provider_name);
+        fs::create_dir_all(&capture_root)
+            .map_err(|err| format!("mkdir capture dir {}: {err}", capture_root.display()))?;
+        let script_path = script_dir.join(format!("{provider_name}-capture.sh"));
+        let script = format!(
+            "#!/usr/bin/env bash\nset -euo pipefail\nreal_binary={real_binary:?}\ncapture_root={capture_root:?}\nmkdir -p \"$capture_root\"\nstamp=\"$(date +%Y%m%dT%H%M%S)-$$\"\nstdin_log=\"$capture_root/${{stamp}}.stdin\"\nstdout_log=\"$capture_root/${{stamp}}.stdout\"\nstderr_log=\"$capture_root/${{stamp}}.stderr\"\nstdin_pipe=\"$capture_root/.${{stamp}}.stdin.fifo\"\ncleanup() {{\n  rm -f \"$stdin_pipe\"\n}}\ntrap cleanup EXIT\nmkfifo \"$stdin_pipe\"\ncat <&0 | tee \"$stdin_log\" > \"$stdin_pipe\" &\ncat_pid=$!\n\"$real_binary\" \"$@\" < \"$stdin_pipe\" > >(tee \"$stdout_log\") 2> >(tee \"$stderr_log\" >&2)\nstatus=$?\nwait \"$cat_pid\" || true\nexit \"$status\"\n",
+            real_binary = real_binary,
+            capture_root = capture_root.to_string_lossy()
+        );
+        fs::write(&script_path, script)
+            .map_err(|err| format!("write wrapper script {}: {err}", script_path.display()))?;
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755))
             .map_err(|err| format!("chmod {}: {err}", script_path.display()))?;
+        Ok(script_path.to_string_lossy().into_owned())
     }
-    Ok(script_path.to_string_lossy().into_owned())
+    #[cfg(windows)]
+    {
+        let _ = script_dir;
+        let _ = provider_name;
+        Err("live capture wrappers are not supported on Windows".into())
+    }
 }
 
 pub fn live_permission_response(req: &PermissionRequest) -> PermissionResponse {

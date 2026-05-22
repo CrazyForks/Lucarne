@@ -24,7 +24,6 @@ uuid = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
-nix = { workspace = true }
 tempfile = { workspace = true }
 smol_str = { workspace = true }
 base64 = "0.22"
@@ -33,6 +32,22 @@ linkme = "0.3.35"
 once_cell = { workspace = true }
 agent-sessions = { path = "../../agent-sessions", features = ["discovery", "agent_session", "watch", "claude", "codex", "copilot", "gemini", "pi"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
+
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+rusqlite = { workspace = true, features = ["bundled"] }
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Console",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_JobObjects",
+  "Win32_System_ProcessStatus",
+  "Win32_System_RestartManager",
+  "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

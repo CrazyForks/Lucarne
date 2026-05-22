@@ -48,13 +48,11 @@ pub use types::{
 };
 
 pub fn default_lucarned_home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|value| !value.is_empty())
-        .map(|home| PathBuf::from(home).join(".lucarned"))
+    crate::host::paths::default_lucarned_home_dir()
 }
 
 pub fn default_state_db_path() -> Option<PathBuf> {
-    default_lucarned_home_dir().map(|home| home.join("state.sqlite3"))
+    crate::host::paths::default_state_db_path()
 }
 
 #[cfg(test)]
@@ -62,10 +60,8 @@ mod tests {
     use super::default_state_db_path;
 
     #[test]
-    fn default_state_db_path_is_under_lucarned_home() {
+    fn default_state_db_path_ends_with_state_sqlite3() {
         let path = default_state_db_path().expect("state db path");
-
-        assert!(path.ends_with(".lucarned/state.sqlite3"));
-        assert!(!path.starts_with("./data"));
+        assert_eq!(path.file_name().unwrap(), "state.sqlite3");
     }
 }

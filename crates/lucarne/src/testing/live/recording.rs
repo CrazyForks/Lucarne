@@ -699,13 +699,11 @@ fn fakeagent_bin() -> PathBuf {
         let root = repo_root();
         let status = Command::new("cargo")
             .args([
-                "+nightly",
                 "build",
                 "-p",
                 "lucarne-fakeagent",
                 "--bin",
                 "lucarne-fakeagent",
-                "-Zbuild-dir-new-layout",
                 "--quiet",
             ])
             .current_dir(&root)
@@ -717,7 +715,11 @@ fn fakeagent_bin() -> PathBuf {
             .map(PathBuf::from)
             .unwrap_or_else(|| root.join("target"));
         target.push("debug");
-        target.push("lucarne-fakeagent");
+        target.push(if cfg!(windows) {
+            "lucarne-fakeagent.exe"
+        } else {
+            "lucarne-fakeagent"
+        });
 
         for _ in 0..20 {
             if target.exists() {
@@ -731,6 +733,7 @@ fn fakeagent_bin() -> PathBuf {
     .clone()
 }
 
+#[cfg(unix)]
 fn write_replay_wrapper(
     script_dir: &Path,
     provider_name: &str,
@@ -751,6 +754,26 @@ fn write_replay_wrapper(
     Ok(script_path.to_string_lossy().into_owned())
 }
 
+#[cfg(windows)]
+fn write_replay_wrapper(
+    script_dir: &Path,
+    provider_name: &str,
+    bundle: &BundlePaths,
+) -> Result<String, String> {
+    fs::create_dir_all(script_dir)
+        .map_err(|err| format!("mkdir {}: {err}", script_dir.display()))?;
+    let script_path = script_dir.join("live-replay.cmd");
+    let script = format!(
+        "@echo off\r\nif \"%~1\"==\"--version\" (\r\n  echo {version}\r\n  exit /b 0\r\n)\r\nset \"LUCARNE_FIXTURE={fixture}\"\r\n\"{fakeagent}\" %*\r\n",
+        version = replay_version_output(provider_name),
+        fixture = bundle.fixture.display(),
+        fakeagent = fakeagent_bin().display(),
+    );
+    fs::write(&script_path, script)
+        .map_err(|err| format!("write {}: {err}", script_path.display()))?;
+    Ok(script_path.to_string_lossy().into_owned())
+}
+
 fn replay_version_output(provider_name: &str) -> &'static str {
     match provider_name {
         "claude" => "claude 2.1.119",
@@ -760,6 +783,7 @@ fn replay_version_output(provider_name: &str) -> &'static str {
     }
 }
 
+#[cfg(unix)]
 fn write_capture_wrapper(
     script_dir: &Path,
     provider: &LiveProvider,
@@ -777,6 +801,15 @@ fn write_capture_wrapper(
         .map_err(|err| format!("write {}: {err}", script_path.display()))?;
     chmod_executable(&script_path)?;
     Ok(script_path.to_string_lossy().into_owned())
+}
+
+#[cfg(windows)]
+fn write_capture_wrapper(
+    _script_dir: &Path,
+    _provider: &LiveProvider,
+    _bundle: &BundlePaths,
+) -> Result<String, String> {
+    Err("live recording capture wrappers are not supported on Windows".into())
 }
 
 fn read_wire_capture(path: &Path) -> Result<CapturedWire, String> {
@@ -830,13 +863,11 @@ fn load_side_effects(path: &Path) -> Result<Option<SideEffectManifest>, String> 
     Ok(Some(manifest))
 }
 
+#[cfg(unix)]
 fn chmod_executable(path: &Path) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755))
-            .map_err(|err| format!("chmod {}: {err}", path.display()))?;
-    }
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+        .map_err(|err| format!("chmod {}: {err}", path.display()))?;
     Ok(())
 }
 

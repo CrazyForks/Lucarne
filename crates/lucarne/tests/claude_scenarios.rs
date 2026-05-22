@@ -8,7 +8,9 @@ use common::{
 use lucarne::adapters::claude;
 use lucarne::event::{Decision, Kind, Payload, PermissionResponse, TimelineType};
 use serde_json::Value;
+#[cfg(unix)]
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,6 +31,7 @@ fn assistant_transcript(msgs: &[lucarne::event::TimelineItem]) -> String {
     out
 }
 
+#[cfg(unix)]
 fn argv_recording_claude_wrapper(log_path: &std::path::Path) -> std::path::PathBuf {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("claude-wrapper.sh");
@@ -45,6 +48,7 @@ fn argv_recording_claude_wrapper(log_path: &std::path::Path) -> std::path::PathB
     path
 }
 
+#[cfg(unix)]
 fn shell_quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('\'');
@@ -101,6 +105,7 @@ async fn basic() {
     assert!(completed);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn launches_claude_as_long_lived_stream_json_without_print() {
     let dir = tempfile::tempdir().expect("tempdir");

@@ -379,7 +379,21 @@ impl SessionWatcher {
         Ok(())
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    fn watch_recursive_path(&mut self, path: &Path) -> std::result::Result<(), WatchError> {
+        let Some(watcher) = self._watcher.as_mut() else {
+            return Err(WatchError::Notify(notify::Error::generic(
+                "recursive watcher is not initialized",
+            )));
+        };
+        if let Err(error) = watcher.watch(path, RecursiveMode::Recursive) {
+            self.watched_paths.remove(path);
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(windows)))]
     fn watch_recursive_path(&mut self, path: &Path) -> std::result::Result<(), WatchError> {
         self.watch_non_recursive_path(path)
     }
@@ -1493,12 +1507,12 @@ fn session_modified_within(modified: SystemTime, now: SystemTime, recent_window:
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn directory_root_watch_mode(_provider: WatchProvider) -> RecursiveMode {
     RecursiveMode::Recursive
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn directory_root_watch_mode(_provider: WatchProvider) -> RecursiveMode {
     RecursiveMode::NonRecursive
 }

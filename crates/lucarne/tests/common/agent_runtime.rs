@@ -193,9 +193,15 @@ fn versioned_fakeagent_bin(provider_id: &'static str) -> PathBuf {
 
 fn write_version_wrapper(provider_id: &'static str) -> PathBuf {
     let dir = tempfile::tempdir().expect("tempdir");
+    #[cfg(unix)]
     let path = dir.path().join(format!("{provider_id}-fakeagent"));
+    #[cfg(windows)]
+    let path = dir.path().join(format!("{provider_id}-fakeagent.exe"));
     let fakeagent = fakeagent_bin();
+    #[cfg(unix)]
     std::os::unix::fs::symlink(&fakeagent, &path).expect("symlink fakeagent");
+    #[cfg(windows)]
+    std::fs::copy(&fakeagent, &path).expect("copy fakeagent");
     std::mem::forget(dir);
     path
 }

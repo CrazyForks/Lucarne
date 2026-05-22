@@ -133,9 +133,48 @@ fn expand_home_path(value: &str) -> String {
 }
 
 fn home_dir() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME")
+    home_dir_from_env(EnvReader)
+}
+
+#[cfg(not(windows))]
+fn home_dir_from_env(env: impl Env) -> Option<std::path::PathBuf> {
+    env.var_os("HOME")
         .filter(|value| !value.is_empty())
         .map(std::path::PathBuf::from)
+}
+
+#[cfg(windows)]
+fn home_dir_from_env(env: impl Env) -> Option<std::path::PathBuf> {
+    env.var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            env.var_os("USERPROFILE")
+                .filter(|value| !value.is_empty())
+                .map(std::path::PathBuf::from)
+        })
+        .or_else(|| {
+            let drive = env.var_os("HOMEDRIVE").filter(|value| !value.is_empty())?;
+            let path = env.var_os("HOMEPATH").filter(|value| !value.is_empty())?;
+            Some(std::path::PathBuf::from(format!(
+                "{}{}",
+                drive.to_string_lossy(),
+                path.to_string_lossy()
+            )))
+        })
+}
+
+trait Env: Copy {
+    fn var_os(self, name: &str) -> Option<std::ffi::OsString>;
+}
+
+#[derive(Clone, Copy)]
+struct EnvReader;
+
+impl Env for EnvReader {
+    fn var_os(self, name: &str) -> Option<std::ffi::OsString> {
+        std::env::var_os(name)
+    }
 }
 
 impl AdapterConfig {
@@ -1028,11 +1067,41 @@ mod tests {
         agent_runtime::AgentRuntime, control_plane::ControlPlaneSqliteStore,
         core_service::HistoryWatchState,
     };
+    #[cfg(windows)]
+    use std::ffi::OsString;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Mutex,
     };
     use tokio::sync::Notify;
+
+    #[cfg(windows)]
+    #[derive(Clone, Copy)]
+    struct MapEnv<'a>(&'a BTreeMap<&'a str, &'a str>);
+
+    #[cfg(windows)]
+    impl Env for MapEnv<'_> {
+        fn var_os(self, name: &str) -> Option<OsString> {
+            self.0.get(name).map(OsString::from)
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn expand_home_path_uses_home_drive_and_home_path_on_windows() {
+        let env = BTreeMap::from([("HOMEDRIVE", r"C:"), ("HOMEPATH", r"\Users\alice")]);
+        assert_eq!(
+            home_dir_from_env(MapEnv(&env)),
+            Some(std::path::PathBuf::from(r"C:\Users\alice"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn expand_home_path_ignores_empty_home_drive_and_home_path_on_windows() {
+        let env = BTreeMap::from([("HOMEDRIVE", ""), ("HOMEPATH", r"\Users\alice")]);
+        assert_eq!(home_dir_from_env(MapEnv(&env)), None);
+    }
 
     #[test]
     fn adapter_status_reader_empty_has_no_statuses() {
@@ -1114,10 +1183,11 @@ channels:
             Some("12345")
         );
         assert_eq!(config.channel_enabled("wechat"), Some(true));
-        assert!(config
+        let credential_path = config
             .channel_value("LUCARNE_WECHAT_CRED_PATH", "wechat", "credential_path")
-            .expect("wechat credential path")
-            .ends_with(".lucarned/wechat-credentials.json"));
+            .expect("wechat credential path");
+        let expected_suffix = std::path::PathBuf::from(".lucarned").join("wechat-credentials.json");
+        assert!(std::path::Path::new(&credential_path).ends_with(expected_suffix));
         assert_eq!(
             config.channel_value("LUCARNE_WECHAT_FORCE_LOGIN", "wechat", "force_login"),
             Some("true")

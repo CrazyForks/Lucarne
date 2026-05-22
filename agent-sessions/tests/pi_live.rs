@@ -37,10 +37,18 @@ fn pi_session_files() -> Vec<PathBuf> {
 #[test]
 fn all_pi_sessions_parse_without_error() {
     let files = pi_session_files();
-    assert!(
-        !files.is_empty(),
-        "expected at least one Pi session file in ~/.pi/agent/sessions/"
-    );
+    if files.is_empty() {
+        #[cfg(windows)]
+        {
+            eprintln!("SKIP: no Pi session files in ~/.pi/agent/sessions/");
+            return;
+        }
+        #[cfg(not(windows))]
+        assert!(
+            !files.is_empty(),
+            "expected at least one Pi session file in ~/.pi/agent/sessions/"
+        );
+    }
 
     let selection = ParseSelection::full();
 

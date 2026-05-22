@@ -42,7 +42,7 @@ impl Default for Options {
 
 fn default_claude_binary() -> String {
     let override_bin = std::env::var("LUCARNE_CLAUDE_BIN").ok();
-    let home = std::env::var("HOME").ok();
+    let home = crate::host::paths::home_dir().map(|path| path.to_string_lossy().into_owned());
     default_claude_binary_from(override_bin.as_deref(), home.as_deref(), |path| {
         Path::new(path).exists()
     })
@@ -366,11 +366,14 @@ mod tests {
 
     #[test]
     fn default_binary_prefers_current_pnpm_install_before_path_lookup() {
-        let selected = default_claude_binary_from(None, Some("/Users/era"), |path| {
-            path == "/Users/era/Library/pnpm/claude"
-        });
+        let expected = std::path::Path::new("/Users/era")
+            .join("Library/pnpm/claude")
+            .to_string_lossy()
+            .into_owned();
+        let selected =
+            default_claude_binary_from(None, Some("/Users/era"), |path| path == expected);
 
-        assert_eq!(selected, "/Users/era/Library/pnpm/claude");
+        assert_eq!(selected, expected);
     }
 
     #[test]

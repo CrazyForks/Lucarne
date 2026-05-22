@@ -22,12 +22,13 @@ use crate::{
     adapter::SessionParams,
     error::{LucarneError, Result},
 };
+#[cfg(target_os = "macos")]
+use std::process::Command;
 use std::{
     collections::BTreeMap,
     ffi::OsString,
     fs,
     path::{Path, PathBuf},
-    process::Command,
 };
 use tracing::debug;
 
@@ -148,13 +149,21 @@ pub fn resolve_command_for_launch(
     }
     // Match Go's `strings.ContainsRune(command, filepath.Separator)` —
     // only the OS-native separator flags this as a path.
-    let has_sep = command.contains(std::path::MAIN_SEPARATOR);
-    if has_sep {
+    if command_has_path_separator(command) {
         let mut candidate = PathBuf::from(command);
         if !candidate.is_absolute() {
             candidate = PathBuf::from(cwd).join(&candidate);
         }
-        return ensure_executable(&candidate);
+        let mut first_error = None;
+        for candidate in command_candidates(candidate, env) {
+            match ensure_executable(&candidate) {
+                Ok(abs) => return Ok(abs),
+                Err(err) => first_error.get_or_insert(err),
+            };
+        }
+        return Err(first_error.unwrap_or_else(|| {
+            LucarneError::adapter(format!("resolve command path {:?}", command))
+        }));
     }
     let path = lookup_path_env(env);
     for dir in split_path(&path) {
@@ -165,14 +174,67 @@ pub fn resolve_command_for_launch(
             dir
         };
         let candidate = PathBuf::from(dir).join(command);
-        if let Ok(abs) = ensure_executable(&candidate) {
-            return Ok(abs);
+        for candidate in command_candidates(candidate, env) {
+            if let Ok(abs) = ensure_executable(&candidate) {
+                return Ok(abs);
+            }
         }
     }
     Err(LucarneError::adapter(format!(
         "resolve command {:?} in PATH",
         command
     )))
+}
+
+fn command_has_path_separator(command: &str) -> bool {
+    #[cfg(windows)]
+    {
+        command.contains('\\') || command.contains('/')
+    }
+    #[cfg(not(windows))]
+    {
+        command.contains(std::path::MAIN_SEPARATOR)
+    }
+}
+
+#[cfg(windows)]
+fn command_candidates(command: PathBuf, env: &BTreeMap<String, String>) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if command.extension().is_none() {
+        for extension in windows_path_extensions(env) {
+            let mut candidate = command.as_os_str().to_os_string();
+            candidate.push(extension);
+            candidates.push(PathBuf::from(candidate));
+        }
+    }
+    candidates.push(command);
+    candidates
+}
+
+#[cfg(not(windows))]
+fn command_candidates(command: PathBuf, _env: &BTreeMap<String, String>) -> Vec<PathBuf> {
+    vec![command]
+}
+
+#[cfg(windows)]
+fn windows_path_extensions(env: &BTreeMap<String, String>) -> Vec<String> {
+    env.get("PATHEXT")
+        .or_else(|| env.get("PathExt"))
+        .map(String::as_str)
+        .unwrap_or(".COM;.EXE;.BAT;.CMD")
+        .split(';')
+        .filter_map(|extension| {
+            let extension = extension.trim();
+            if extension.is_empty() {
+                return None;
+            }
+            if extension.starts_with('.') {
+                Some(extension.to_string())
+            } else {
+                Some(format!(".{extension}"))
+            }
+        })
+        .collect()
 }
 
 fn lookup_path_env(env: &BTreeMap<String, String>) -> String {
@@ -322,6 +384,7 @@ fn read_macos_proxy_env() -> BTreeMap<String, String> {
     BTreeMap::new()
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn parse_scutil_proxy_output(raw: &str) -> BTreeMap<String, String> {
     let mut scalars = BTreeMap::new();
     let mut exceptions = Vec::new();
@@ -372,6 +435,7 @@ fn parse_scutil_proxy_output(raw: &str) -> BTreeMap<String, String> {
     env
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn proxy_url(
     scalars: &BTreeMap<String, String>,
     enable_key: &str,
@@ -485,6 +549,87 @@ mod tests {
         let env = env_map(&[("PATH", &root.path().to_string_lossy())]);
         let got = resolve_command_for_launch("mycli", "/tmp", &env).unwrap();
         assert!(Path::new(&got).ends_with("mycli"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn resolve_path_lookup_uses_pathext() {
+        let root = tempdir().unwrap();
+        let extensionless_shim = root.path().join("mycli");
+        fs::write(
+            &extensionless_shim,
+            b"shell shim without executable extension\r\n",
+        )
+        .unwrap();
+        let bin = root.path().join("mycli.cmd");
+        fs::write(&bin, b"@echo off\r\n").unwrap();
+        let env = env_map(&[
+            ("PATH", &root.path().to_string_lossy()),
+            ("PATHEXT", ".COM;.EXE;.BAT;.CMD"),
+        ]);
+
+        let got = resolve_command_for_launch("mycli", r"C:\", &env).unwrap();
+
+        assert_eq!(
+            Path::new(&got)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_ascii_lowercase)
+                .as_deref(),
+            Some("mycli.cmd")
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn resolve_path_command_uses_pathext() {
+        let root = tempdir().unwrap();
+        let tools = root.path().join("tools");
+        fs::create_dir_all(&tools).unwrap();
+        let bin = tools.join("mycli.cmd");
+        fs::write(&bin, b"@echo off\r\n").unwrap();
+        let env = env_map(&[("PATHEXT", ".CMD")]);
+
+        let got = resolve_command_for_launch(r"tools\mycli", &root.path().to_string_lossy(), &env)
+            .unwrap();
+
+        assert_eq!(
+            Path::new(&got)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_ascii_lowercase)
+                .as_deref(),
+            Some("mycli.cmd")
+        );
+        assert!(Path::new(&got)
+            .parent()
+            .is_some_and(|path| path.ends_with("tools")));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn resolve_forward_slash_path_command_uses_pathext() {
+        let root = tempdir().unwrap();
+        let tools = root.path().join("tools");
+        fs::create_dir_all(&tools).unwrap();
+        let bin = tools.join("mycli.cmd");
+        fs::write(&bin, b"@echo off\r\n").unwrap();
+        let env = env_map(&[("PATHEXT", ".CMD")]);
+
+        let got = resolve_command_for_launch("tools/mycli", &root.path().to_string_lossy(), &env)
+            .unwrap();
+
+        assert_eq!(
+            Path::new(&got)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_ascii_lowercase)
+                .as_deref(),
+            Some("mycli.cmd")
+        );
+        assert!(Path::new(&got)
+            .parent()
+            .is_some_and(|path| path.ends_with("tools")));
     }
 
     #[test]

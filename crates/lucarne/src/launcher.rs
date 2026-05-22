@@ -14,8 +14,8 @@ use std::{
     path::PathBuf,
     process::Stdio,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, Mutex as StdMutex,
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
@@ -71,6 +71,7 @@ struct ProcessInner {
     stderr: StdMutex<Option<Box<dyn AsyncRead + Unpin + Send>>>,
     exit_rx: watch::Receiver<Option<ExitInfo>>,
     closed: AtomicBool,
+    host_process: crate::host::process::ManagedProcess,
     _cleanup: Vec<PathBuf>,
     grace: Duration,
 }
@@ -146,15 +147,7 @@ impl Process {
             signal = name,
             "sending signal to process group"
         );
-        let sig = match name {
-            "SIGINT" => nix::sys::signal::Signal::SIGINT,
-            "SIGTERM" => nix::sys::signal::Signal::SIGTERM,
-            "SIGKILL" => nix::sys::signal::Signal::SIGKILL,
-            "SIGHUP" => nix::sys::signal::Signal::SIGHUP,
-            other => return Err(LucarneError::runtime(format!("unknown signal {}", other))),
-        };
-        nix::sys::signal::kill(nix::unistd::Pid::from_raw(self.inner.pid), sig)
-            .map_err(|e| LucarneError::runtime(format!("kill: {}", e)))
+        self.inner.host_process.signal(self.inner.pid, name)
     }
 
     /// SIGTERM the process group, wait up to grace, then SIGKILL.
@@ -172,11 +165,7 @@ impl Process {
         // In that case just wait for the background task to finish via the
         // exit watch channel.
         if self.inner.pid > 0 {
-            let pgid = -self.inner.pid;
-            let _ = nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(pgid),
-                nix::sys::signal::Signal::SIGTERM,
-            );
+            let _ = self.inner.host_process.terminate_graceful(self.inner.pid);
         }
         let grace = self.inner.grace;
         let mut rx = self.inner.exit_rx.clone();
@@ -190,16 +179,12 @@ impl Process {
             _ = deadline => {}
         }
         if self.inner.pid > 0 {
-            let pgid = -self.inner.pid;
             warn!(
                 target: "lucarne::launcher",
                 pid = self.inner.pid,
                 "process did not exit during grace period; sending SIGKILL"
             );
-            let _ = nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(pgid),
-                nix::sys::signal::Signal::SIGKILL,
-            );
+            let _ = self.inner.host_process.terminate_force(self.inner.pid);
         }
         let _ = self.wait().await;
     }
@@ -254,13 +239,7 @@ impl Launcher for LocalLauncher {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        // Put the child in its own process group so we can signal the
-        // whole tree. `process_group(0)` is available on Linux/BSD via
-        // tokio::process::Command -> std::os::unix::process::CommandExt.
-        {
-            use std::os::unix::process::CommandExt;
-            cmd.as_std_mut().process_group(0);
-        }
+        crate::host::process::configure_command(&mut cmd);
 
         let mut child: Child = cmd.spawn().map_err(|e| {
             for p in &cleanup_paths {
@@ -276,6 +255,12 @@ impl Launcher for LocalLauncher {
             bin = spec.bin.as_str(),
             "local process spawned"
         );
+        let host_process = crate::host::process::ManagedProcess::attach(&child).map_err(|e| {
+            for p in &cleanup_paths {
+                let _ = std::fs::remove_file(p);
+            }
+            e
+        })?;
         let stdin = child.stdin.take();
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -318,6 +303,7 @@ impl Launcher for LocalLauncher {
                 ),
                 exit_rx: rx,
                 closed: AtomicBool::new(false),
+                host_process,
                 _cleanup: cleanup_paths,
                 grace: self.grace,
             }),

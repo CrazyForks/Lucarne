@@ -179,6 +179,7 @@ fn codex_live_provider_does_not_override_codex_home() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn gemini_live_preflight_accepts_initialize_response() {
     let temp = tempfile::tempdir().unwrap();
@@ -212,6 +213,7 @@ async fn gemini_live_preflight_accepts_initialize_response() {
     .expect("preflight should accept a valid initialize response");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn codex_live_preflight_accepts_minimal_turn() {
     let temp = tempfile::tempdir().unwrap();
@@ -271,6 +273,7 @@ async fn codex_live_preflight_accepts_minimal_turn() {
     .expect("preflight should accept a minimal codex turn");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn codex_live_preflight_reports_stream_disconnect() {
     let temp = tempfile::tempdir().unwrap();
@@ -308,6 +311,7 @@ async fn codex_live_preflight_reports_stream_disconnect() {
     assert!(err.contains("response stream"), "{err}");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn gemini_live_preflight_times_out_when_initialize_never_arrives() {
     let temp = tempfile::tempdir().unwrap();
