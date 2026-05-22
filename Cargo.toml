@@ -23,7 +23,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.3"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 rust-version = "1.75"
@@ -72,6 +72,7 @@ panic = "unwind"
 
 [workspace.metadata.dist]
 cargo-dist-version = "0.31.0"
+allow-dirty = ["ci"]
 ci = ["github"]
 installers = ["shell", "powershell"]
 targets = [

@@ -57,13 +57,13 @@ class UpdateHomebrewFormulaTest(unittest.TestCase):
             self.assertIn("depends_on :macos", output)
             self.assertIn("on_arm do", output)
             self.assertIn(
-                'url "https://github.com/tuchg/Lucarne/releases/download/v0.2.3/lucarned-v0.2.3-aarch64-apple-darwin.tar.gz"',
+                'url "https://github.com/tuchg/Lucarne/releases/download/v0.2.3/lucarned-v0.2.3-aarch64-apple-darwin.tar.xz"',
                 output,
             )
             self.assertIn(f'sha256 "{ARM_SHA}"', output)
             self.assertIn("on_intel do", output)
             self.assertIn(
-                'url "https://github.com/tuchg/Lucarne/releases/download/v0.2.3/lucarned-v0.2.3-x86_64-apple-darwin.tar.gz"',
+                'url "https://github.com/tuchg/Lucarne/releases/download/v0.2.3/lucarned-v0.2.3-x86_64-apple-darwin.tar.xz"',
                 output,
             )
             self.assertIn(f'sha256 "{X86_SHA}"', output)

@@ -129,6 +129,12 @@ jobs:
           fi
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
+      - name: Configure noninteractive apt
+        if: ${{ matrix.container }}
+        run: |
+          if command -v apt-get > /dev/null 2>&1; then
+            echo 'APT::Get::Assume-Yes "true";' > /etc/apt/apt.conf.d/90assumeyes
+          fi
       # Get the dist-manifest
       - name: Fetch local artifacts
         uses: actions/download-artifact@v7
@@ -137,8 +143,17 @@ jobs:
           path: target/distrib/
           merge-multiple: true
       - name: Install dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          APT_LISTCHANGES_FRONTEND: none
         run: |
           ${{ matrix.packages_install }}
+      - name: Prepare Windows ARM64 clang sysroot
+        if: ${{ contains(matrix.targets, 'aarch64-pc-windows-msvc') }}
+        run: |
+          echo "XWIN_CROSS_COMPILER=clang" >> "$GITHUB_ENV"
+          cargo xwin cache windows-msvc-sysroot
+          find "$HOME/.cache/cargo-xwin/windows-msvc-sysroot" -type f -name windows.h -exec sh -c 'for path do dir=$(dirname "$path"); ln -sf windows.h "$dir/Windows.h"; done' sh {} +
       - name: Build artifacts
         run: |
           # Actually do builds and make zips and whatnot
@@ -266,26 +281,143 @@ jobs:
         run: |
           # Remove the granular manifests
           rm -f artifacts/*-dist-manifest.json
+      - name: Version archive asset names
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          cd artifacts
+          targets=(
+            aarch64-apple-darwin
+            x86_64-apple-darwin
+            aarch64-pc-windows-msvc
+            x86_64-pc-windows-msvc
+            aarch64-unknown-linux-gnu
+            x86_64-unknown-linux-gnu
+          )
+          for target in "${targets[@]}"; do
+            old="lucarned-${target}.tar.xz"
+            new="lucarned-${TAG}-${target}.tar.xz"
+            if [[ ! -f "$old" ]]; then
+              echo "missing archive: $old" >&2
+              exit 1
+            fi
+            mv "$old" "$new"
+            sha256sum "$new" | sed 's/  / */' > "$new.sha256"
+            rm -f "$old.sha256"
+          done
+          sha256sum lucarned-"$TAG"-*.tar.xz source.tar.gz | sed 's/  / */' | sort -k2 > sha256.sum
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          tag = os.environ["TAG"]
+          targets = [
+              "aarch64-apple-darwin",
+              "x86_64-apple-darwin",
+              "aarch64-pc-windows-msvc",
+              "x86_64-pc-windows-msvc",
+              "aarch64-unknown-linux-gnu",
+              "x86_64-unknown-linux-gnu",
+          ]
+          for name in ["lucarned-installer.sh", "lucarned-installer.ps1", "dist-manifest.json"]:
+              path = Path(name)
+              if not path.exists():
+                  continue
+              text = path.read_text(encoding="utf-8")
+              for target in targets:
+                  text = text.replace(
+                      f"lucarned-{target}.tar.xz",
+                      f"lucarned-{tag}-{target}.tar.xz",
+                  )
+              path.write_text(text, encoding="utf-8")
+          PY
       - name: Create GitHub Release
         env:
           PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"
           ANNOUNCEMENT_TITLE: "${{ fromJson(steps.host.outputs.manifest).announcement_title }}"
           ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
           RELEASE_COMMIT: "${{ github.sha }}"
+          TAG: ${{ needs.plan.outputs.tag }}
         run: |
           # Write and read notes from a file to avoid quoting breaking things
           echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          path = Path(os.environ["RUNNER_TEMP"]) / "notes.txt"
+          tag = os.environ["TAG"]
+          targets = [
+              "aarch64-apple-darwin",
+              "x86_64-apple-darwin",
+              "aarch64-pc-windows-msvc",
+              "x86_64-pc-windows-msvc",
+              "aarch64-unknown-linux-gnu",
+              "x86_64-unknown-linux-gnu",
+          ]
+          text = path.read_text(encoding="utf-8")
+          for target in targets:
+              text = text.replace(
+                  f"lucarned-{target}.tar.xz",
+                  f"lucarned-{tag}-{target}.tar.xz",
+              )
+          path.write_text(text, encoding="utf-8")
+          PY
 
           gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
+
+  update-formula:
+    needs:
+      - plan
+      - host
+    if: ${{ always() && needs.host.result == 'success' && needs.plan.outputs.publishing == 'true' && !fromJson(needs.host.outputs.val).announcement_is_prerelease }}
+    runs-on: "ubuntu-22.04"
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+      - name: Fetch release checksums
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          gh release download "$TAG" --pattern "lucarned-${TAG}-aarch64-apple-darwin.tar.xz.sha256" --pattern "lucarned-${TAG}-x86_64-apple-darwin.tar.xz.sha256"
+      - name: Generate formula
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          version="${TAG#v}"
+          arm64_sha="$(awk '{ print $1; exit }' "lucarned-${TAG}-aarch64-apple-darwin.tar.xz.sha256")"
+          x86_64_sha="$(awk '{ print $1; exit }' "lucarned-${TAG}-x86_64-apple-darwin.tar.xz.sha256")"
+          python3 scripts/release/update-homebrew-formula.py Formula/lucarned.rb --version "$version" --arm64-sha "$arm64_sha" --x86-64-sha "$x86_64_sha"
+      - name: Validate formula syntax
+        run: ruby -c Formula/lucarned.rb
+      - name: Commit and push formula
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          if git diff --quiet -- Formula/lucarned.rb; then
+            echo "Formula already up to date"
+            exit 0
+          fi
+          version="${TAG#v}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/lucarned.rb
+          git commit -m "brew: update lucarned v$version"
+          git push origin HEAD:main
 
   announce:
     needs:
       - plan
       - host
+      - update-formula
     # use "always() && ..." to allow us to wait for all publish jobs while
     # still allowing individual publish jobs to skip themselves (for prereleases).
     # "host" however must run to completion, no skipping allowed!
-    if: ${{ always() && needs.host.result == 'success' }}
+    if: ${{ always() && needs.host.result == 'success' && (needs.update-formula.result == 'success' || needs.update-formula.result == 'skipped') }}
     runs-on: "ubuntu-22.04"
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

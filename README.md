@@ -22,14 +22,37 @@ English | [中文](README.cn.md)
 
 ---
 
-## Quick Start (Homebrew)
+## Quick Start
 
 ### 1. Install
+
+Recommended one-line installers:
+
+macOS / Linux:
+
+```bash
+curl -LsSf https://github.com/tuchg/Lucarne/releases/latest/download/lucarned-installer.sh | sh
+```
+
+Windows PowerShell:
+
+```powershell
+powershell -c "irm https://github.com/tuchg/Lucarne/releases/latest/download/lucarned-installer.ps1 | iex"
+```
+
+<details>
+<summary>Homebrew and release archives</summary>
+
+Homebrew:
 
 ```bash
 brew tap tuchg/Lucarne https://github.com/tuchg/Lucarne
 brew install lucarned
 ```
+
+Release archives are also available for macOS, Linux, and Windows on x86_64 and aarch64.
+
+</details>
 
 ### 2. Initialize
 
@@ -46,9 +69,35 @@ Initialization guides you through:
 
 ### 3. Start the background service
 
+Recommended one-command autostart:
+
+```bash
+lucarned autostart install --start
+```
+
+<details>
+<summary>Homebrew service alternative</summary>
+
 ```bash
 brew services start lucarned
+brew services restart lucarned
+brew services stop lucarned
 ```
+
+</details>
+
+<details>
+<summary>Platform notes</summary>
+
+`lucarned autostart` uses native user-level service managers:
+
+- macOS: LaunchAgent
+- Windows: Task Scheduler logon task
+- Linux: systemd user service
+
+Linux autostart requires systemd user services. Non-systemd Linux can run `lucarned` manually.
+
+</details>
 
 ### 4. Open the Telegram panel (optional)
 
@@ -61,14 +110,29 @@ After the Lucarne panel appears, you can create workspaces, bind agents, resume 
 ### Common commands
 
 ```bash
+lucarned doctor
+lucarned paths
+lucarned autostart status
+lucarned autostart start
+lucarned autostart stop
+lucarned update
+```
+
+<details>
+<summary>Homebrew service commands</summary>
+
+```bash
+brew services start lucarned
 brew services restart lucarned
 brew services stop lucarned
 ```
 
+</details>
+
 ```text
-Config: ~/.lucarned/lucarned.yaml
-State:  ~/.lucarned/state.sqlite3
-Logs:   ~/.lucarned/logs/lucarned.YYYY-MM-DD.log
+macOS/Linux config: ~/.lucarned/lucarned.yaml
+Windows config:     %LOCALAPPDATA%\lucarned\lucarned.yaml
+Logs:               lucarned paths
 ```
 
 ---
@@ -165,11 +229,12 @@ cargo +nightly test -Zbuild-dir-new-layout
 ---
 
 ## Roadmap
-- [ ] Linux support: installation docs, service management, release packages, and smoke tests
-- [ ] Windows support: installation docs, background execution, path / process compatibility, and release packages
+- [x] Linux support: installation docs, service management, release packages, and smoke tests
+- [x] Windows support: installation docs, background execution, path / process compatibility, and release packages
 - [ ] Message modes: steer / queue
 - [ ] Split `agent-sessions` into an independent crate
 - [ ] Support remote agent environments
+- [ ] More agent providers: Cursor, opencode, and more
 - [ ] More channels: Discord, Slack, Feishu, DingTalk, Matrix, QQ, and more
 - [ ] ....
 

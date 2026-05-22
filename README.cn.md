@@ -22,14 +22,37 @@
 
 ---
 
-## 快速启动（Homebrew）
+## 快速启动
 
 ### 1. 安装
+
+推荐一键脚本：
+
+macOS / Linux：
+
+```bash
+curl -LsSf https://github.com/tuchg/Lucarne/releases/latest/download/lucarned-installer.sh | sh
+```
+
+Windows PowerShell：
+
+```powershell
+powershell -c "irm https://github.com/tuchg/Lucarne/releases/latest/download/lucarned-installer.ps1 | iex"
+```
+
+<details>
+<summary>Homebrew 与发布包</summary>
+
+Homebrew：
 
 ```bash
 brew tap tuchg/Lucarne https://github.com/tuchg/Lucarne
 brew install lucarned
 ```
+
+也可以在 GitHub Releases 下载 macOS、Linux、Windows 的 x86_64 / aarch64 发布包。
+
+</details>
 
 ### 2. 初始化
 
@@ -46,9 +69,35 @@ lucarned init
 
 ### 3. 启动后台服务
 
+推荐一键 autostart：
+
+```bash
+lucarned autostart install --start
+```
+
+<details>
+<summary>Homebrew service 可选命令</summary>
+
 ```bash
 brew services start lucarned
+brew services restart lucarned
+brew services stop lucarned
 ```
+
+</details>
+
+<details>
+<summary>平台说明</summary>
+
+`lucarned autostart` 使用各系统的用户级服务管理器：
+
+- macOS：LaunchAgent
+- Windows：Task Scheduler 登录任务
+- Linux：systemd user service
+
+Linux autostart 需要 systemd user service。非 systemd Linux 可以手动运行 `lucarned`。
+
+</details>
 
 ### 4. 打开 Telegram 面板 （可选）
 
@@ -61,14 +110,29 @@ brew services start lucarned
 ### 常用命令
 
 ```bash
+lucarned doctor
+lucarned paths
+lucarned autostart status
+lucarned autostart start
+lucarned autostart stop
+lucarned update
+```
+
+<details>
+<summary>Homebrew service 命令</summary>
+
+```bash
+brew services start lucarned
 brew services restart lucarned
 brew services stop lucarned
 ```
 
+</details>
+
 ```text
-配置: ~/.lucarned/lucarned.yaml
-状态: ~/.lucarned/state.sqlite3
-日志: ~/.lucarned/logs/lucarned.YYYY-MM-DD.log
+macOS/Linux 配置: ~/.lucarned/lucarned.yaml
+Windows 配置:     %LOCALAPPDATA%\lucarned\lucarned.yaml
+日志:             lucarned paths
 ```
 
 ---
@@ -165,11 +229,12 @@ cargo +nightly test -Zbuild-dir-new-layout
 ---
 
 ## Roadmap
-- [ ] Linux 支持：补齐安装说明、服务管理、发布包与 smoke test
-- [ ] Windows 支持：补齐安装说明、后台运行、路径 / 进程兼容与发布包
+- [x] Linux 支持：补齐安装说明、服务管理、发布包与 smoke test
+- [x] Windows 支持：补齐安装说明、后台运行、路径 / 进程兼容与发布包
 - [ ] 消息模式 steer/queue
 - [ ] agent-sessions 整理为独立crate
 - [ ] 支持远程 agent 环境
+- [ ] 更多 Agent Provider：Cursor、opencode 等
 - [ ] More channels：Discord、Slack、飞书、钉钉、Matrix、QQ 等更多入口
 - [ ] ....
 

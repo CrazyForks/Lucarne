@@ -19,12 +19,12 @@ FORMULA_TEMPLATE = r'''class Lucarned < Formula
   stable do
     on_macos do
       on_arm do
-        url "https://github.com/tuchg/Lucarne/releases/download/v__VERSION__/lucarned-v__VERSION__-aarch64-apple-darwin.tar.gz"
+        url "https://github.com/tuchg/Lucarne/releases/download/v__VERSION__/lucarned-v__VERSION__-aarch64-apple-darwin.tar.xz"
         sha256 "__ARM64_SHA__"
       end
 
       on_intel do
-        url "https://github.com/tuchg/Lucarne/releases/download/v__VERSION__/lucarned-v__VERSION__-x86_64-apple-darwin.tar.gz"
+        url "https://github.com/tuchg/Lucarne/releases/download/v__VERSION__/lucarned-v__VERSION__-x86_64-apple-darwin.tar.xz"
         sha256 "__X86_64_SHA__"
       end
     end
