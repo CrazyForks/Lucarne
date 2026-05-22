@@ -26,6 +26,8 @@
 
 ### 1. 安装
 
+推荐一键脚本：
+
 macOS / Linux：
 
 ```bash
@@ -39,7 +41,9 @@ powershell -c "irm https://github.com/tuchg/Lucarne/releases/latest/download/luc
 ```
 
 <details>
-<summary>Homebrew</summary>
+<summary>Homebrew 与发布包</summary>
+
+Homebrew：
 
 ```bash
 brew tap tuchg/Lucarne https://github.com/tuchg/Lucarne
@@ -65,17 +69,22 @@ lucarned init
 
 ### 3. 启动后台服务
 
-Homebrew：
-
-```bash
-brew services start lucarned
-```
-
-其他安装方式：
+推荐一键 autostart：
 
 ```bash
 lucarned autostart install --start
 ```
+
+<details>
+<summary>Homebrew service 可选命令</summary>
+
+```bash
+brew services start lucarned
+brew services restart lucarned
+brew services stop lucarned
+```
+
+</details>
 
 <details>
 <summary>平台说明</summary>
@@ -87,16 +96,6 @@ lucarned autostart install --start
 - Linux：systemd user service
 
 Linux autostart 需要 systemd user service。非 systemd Linux 可以手动运行 `lucarned`。
-
-常用诊断命令：
-
-```bash
-lucarned doctor
-lucarned paths
-lucarned autostart status
-lucarned autostart start
-lucarned autostart stop
-```
 
 </details>
 
@@ -111,8 +110,11 @@ lucarned autostart stop
 ### 常用命令
 
 ```bash
-brew services restart lucarned
-brew services stop lucarned
+lucarned doctor
+lucarned paths
+lucarned autostart status
+lucarned autostart start
+lucarned autostart stop
 lucarned update
 ```
 
@@ -221,6 +223,7 @@ cargo +nightly test -Zbuild-dir-new-layout
 - [ ] 消息模式 steer/queue
 - [ ] agent-sessions 整理为独立crate
 - [ ] 支持远程 agent 环境
+- [ ] 更多 Agent Provider：Cursor、opencode 等
 - [ ] More channels：Discord、Slack、飞书、钉钉、Matrix、QQ 等更多入口
 - [ ] ....
 

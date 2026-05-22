@@ -26,6 +26,8 @@ English | [中文](README.cn.md)
 
 ### 1. Install
 
+Recommended one-line installers:
+
 macOS / Linux:
 
 ```bash
@@ -67,17 +69,22 @@ Initialization guides you through:
 
 ### 3. Start the background service
 
-Homebrew:
-
-```bash
-brew services start lucarned
-```
-
-Other installs:
+Recommended one-command autostart:
 
 ```bash
 lucarned autostart install --start
 ```
+
+<details>
+<summary>Homebrew service alternative</summary>
+
+```bash
+brew services start lucarned
+brew services restart lucarned
+brew services stop lucarned
+```
+
+</details>
 
 <details>
 <summary>Platform notes</summary>
@@ -89,16 +96,6 @@ lucarned autostart install --start
 - Linux: systemd user service
 
 Linux autostart requires systemd user services. Non-systemd Linux can run `lucarned` manually.
-
-Useful commands:
-
-```bash
-lucarned doctor
-lucarned paths
-lucarned autostart status
-lucarned autostart start
-lucarned autostart stop
-```
 
 </details>
 
@@ -113,8 +110,11 @@ After the Lucarne panel appears, you can create workspaces, bind agents, resume 
 ### Common commands
 
 ```bash
-brew services restart lucarned
-brew services stop lucarned
+lucarned doctor
+lucarned paths
+lucarned autostart status
+lucarned autostart start
+lucarned autostart stop
 lucarned update
 ```
 
@@ -223,6 +223,7 @@ cargo +nightly test -Zbuild-dir-new-layout
 - [ ] Message modes: steer / queue
 - [ ] Split `agent-sessions` into an independent crate
 - [ ] Support remote agent environments
+- [ ] More agent providers: Cursor, opencode, and more
 - [ ] More channels: Discord, Slack, Feishu, DingTalk, Matrix, QQ, and more
 - [ ] ....
 
