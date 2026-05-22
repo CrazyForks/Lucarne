@@ -61,7 +61,7 @@ lucarned init
 初始化会引导你：
 
 - 选择启用的 Agent：`claude`、`codex`、`copilot`、`gemini`、`pi`
-- 配置 Telegram Bot Token 和入口 chat（可选）
+- 配置 Telegram Bot Token 和已开启 Topics/Thread mode 的入口 chat（可选）
 - 扫码登录微信（可选）
 - 生成配置文件：`~/.lucarned/lucarned.yaml`
 
@@ -164,6 +164,8 @@ export LUCARNE_AUTHORIZED_USER_IDS="111111,222222"
 微信引用路由支持双策略：优先 `message_id`，失败后用引用文本哈希兜底。
 
 ### Telegram：移动端多 Agent 控制台
+
+Telegram 入口 chat 需要开启 Topics/Thread mode。可以直接使用 Bot 私聊里的 Bot 自带话题模式（Bot API 9.4+ 的 `getMe` 会返回 `has_topics_enabled`）；`entry_chat_id` 填这个私聊 ID。Forum supergroup 也可用，但不是必须。
 
 1. 在入口 chat 发送 `/panel`。
 2. 点 `New` 或发送 `/aN` 新建 Agent workspace。

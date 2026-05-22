@@ -61,7 +61,7 @@ lucarned init
 Initialization guides you through:
 
 - Selecting enabled agents: `claude`, `codex`, `copilot`, `gemini`, `pi`
-- Configuring a Telegram Bot Token and entry chat (optional)
+- Configuring a Telegram Bot Token and an entry chat with Topics/thread mode enabled (optional)
 - Logging in to WeChat by QR code (optional)
 - Generating the config file: `~/.lucarned/lucarned.yaml`
 
@@ -164,6 +164,8 @@ See the full command reference at [`docs/commands.md`](docs/commands.md). This R
 WeChat quote routing uses two strategies: it prefers `message_id`, then falls back to a quoted-text hash.
 
 ### Telegram: mobile multi-agent console
+
+Telegram needs Topics/thread mode for the entry chat. A private chat with the bot can use the bot's own topic mode (Bot API 9.4+ reports this as `has_topics_enabled` from `getMe`); use that private chat ID as `entry_chat_id`. A forum supergroup also works, but is not required.
 
 1. Send `/panel` in the entry chat.
 2. Tap `New` or send `/aN` to create an agent workspace.
