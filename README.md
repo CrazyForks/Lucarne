@@ -118,6 +118,14 @@ lucarned autostart stop
 lucarned update
 ```
 
+Homebrew service commands:
+
+```bash
+brew services start lucarned
+brew services restart lucarned
+brew services stop lucarned
+```
+
 ```text
 macOS/Linux config: ~/.lucarned/lucarned.yaml
 Windows config:     %LOCALAPPDATA%\lucarned\lucarned.yaml
