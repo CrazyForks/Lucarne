@@ -379,7 +379,7 @@ impl SessionWatcher {
         Ok(())
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     fn watch_recursive_path(&mut self, path: &Path) -> std::result::Result<(), WatchError> {
         let Some(watcher) = self._watcher.as_mut() else {
             return Err(WatchError::Notify(notify::Error::generic(
@@ -393,7 +393,7 @@ impl SessionWatcher {
         Ok(())
     }
 
-    #[cfg(all(not(target_os = "macos"), not(windows)))]
+    #[cfg(all(not(target_os = "macos"), not(windows), not(target_os = "linux")))]
     fn watch_recursive_path(&mut self, path: &Path) -> std::result::Result<(), WatchError> {
         self.watch_non_recursive_path(path)
     }
@@ -428,6 +428,14 @@ impl SessionWatcher {
 
     fn watch_existing_path(&mut self, path: &Path) {
         let watch_path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        if self.existing_directory_watch_covers_child_file(&watch_path) {
+            trace!(
+                target: "agent_sessions::watch",
+                watch_path = %watch_path.display(),
+                "skipping session file watch covered by parent directory"
+            );
+            return;
+        }
         let Some(watcher) = self._watcher.as_mut() else {
             return;
         };
@@ -449,6 +457,14 @@ impl SessionWatcher {
             watch_path = %watch_path.display(),
             "watching new session file"
         );
+    }
+
+    fn existing_directory_watch_covers_child_file(&self, path: &Path) -> bool {
+        directory_watch_covers_child_file_events()
+            && path.parent().is_some_and(|parent| {
+                let parent = fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+                self.watched_paths.contains(&parent)
+            })
     }
 
     fn process_existing_path(
@@ -1187,15 +1203,13 @@ impl SessionWatcher {
             }
         }
         for session_path in self.baselines.keys() {
-            if !self.has_recursive_root_for_path(session_path)
-                || self.should_watch_session_file_target(session_path)
-            {
-                push_watch_target(&mut paths, WatchTarget::non_recursive(session_path.clone()));
-            }
             if let Some(parent) = session_path.parent()
                 && !self.has_recursive_root_for_path(parent)
             {
                 push_watch_target(&mut paths, WatchTarget::non_recursive(parent.to_path_buf()));
+            }
+            if self.needs_session_file_watch_target(session_path, &paths) {
+                push_watch_target(&mut paths, WatchTarget::non_recursive(session_path.clone()));
             }
         }
         paths.sort_by(|left, right| left.path.cmp(&right.path));
@@ -1375,6 +1389,20 @@ impl SessionWatcher {
         self.is_recent_session_path(path) || self.is_hot_session_path(path)
     }
 
+    fn needs_session_file_watch_target(&self, path: &Path, targets: &[WatchTarget]) -> bool {
+        if self.has_recursive_root_for_path(path) {
+            return self.should_watch_session_file_target(path);
+        }
+        if directory_watch_covers_child_file_events()
+            && path
+                .parent()
+                .is_some_and(|parent| has_non_recursive_watch_target(targets, parent))
+        {
+            return false;
+        }
+        true
+    }
+
     fn is_recent_directory_path(&self, path: &Path) -> bool {
         let Ok(metadata) = fs::metadata(path) else {
             return false;
@@ -1528,6 +1556,22 @@ fn push_watch_target(targets: &mut Vec<WatchTarget>, target: WatchTarget) {
         return;
     }
     targets.push(target);
+}
+
+fn has_non_recursive_watch_target(targets: &[WatchTarget], path: &Path) -> bool {
+    targets.iter().any(|target| {
+        target.path == path && matches!(target.recursive_mode, RecursiveMode::NonRecursive)
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn directory_watch_covers_child_file_events() -> bool {
+    true
+}
+
+#[cfg(not(target_os = "linux"))]
+fn directory_watch_covers_child_file_events() -> bool {
+    false
 }
 
 fn initial_watch_directory_depth(provider: WatchProvider) -> Option<usize> {

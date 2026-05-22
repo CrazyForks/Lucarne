@@ -514,14 +514,8 @@ impl Gemini {
             } else {
                 (M_NEW, Map::new())
             };
-        params_map.insert(
-            "cwd".into(),
-            Value::String(if self.cfg.cwd.is_empty() {
-                ".".into()
-            } else {
-                self.cfg.cwd.clone()
-            }),
-        );
+        params_map.insert("cwd".into(), Value::String(session_cwd(&self.cfg)));
+        params_map.insert("mcpServers".into(), Value::Array(Vec::new()));
         if let Err(e) = self.queue_request(method, Value::Object(params_map)) {
             return vec![log_warn(format!("gemini: queue {}: {}", method, e))];
         }
@@ -652,11 +646,14 @@ impl Gemini {
                     if let Err(e) = self.queue_request(
                         M_NEW,
                         json!({
-                            "cwd": if self.cfg.cwd.is_empty() { ".".into() } else { self.cfg.cwd.clone() }
+                            "cwd": session_cwd(&self.cfg),
+                            "mcpServers": []
                         }),
                     ) {
-                        return self
-                            .session_init_failed(&format!("gemini: queue session/new fallback: {}", e));
+                        return self.session_init_failed(&format!(
+                            "gemini: queue session/new fallback: {}",
+                            e
+                        ));
                     }
                     return Vec::new();
                 }
@@ -1183,6 +1180,14 @@ fn choose_permission_option_id(
     None
 }
 
+fn session_cwd(cfg: &SessionParams) -> String {
+    if cfg.cwd.is_empty() {
+        ".".into()
+    } else {
+        cfg.cwd.clone()
+    }
+}
+
 fn matches_option(opt: &PermissionOption, needles: &[&str]) -> bool {
     let haystacks = [
         opt.option_id.to_ascii_lowercase(),
@@ -1203,8 +1208,15 @@ fn matches_option(opt: &PermissionOption, needles: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{desired_mode, prompt_params, Gemini};
-    use crate::dialect::{Dialect, ImageRef, Input, PermissionMode};
-    use serde_json::json;
+    use crate::dialect::{Dialect, ImageRef, Input, OutFrame, PermissionMode, SessionParams};
+    use serde_json::{json, Value};
+
+    fn stdin_json(frame: &OutFrame) -> Value {
+        let OutFrame::Stdin(bytes) = frame else {
+            panic!("expected stdin frame, got {frame:?}");
+        };
+        serde_json::from_slice(bytes).unwrap()
+    }
 
     #[test]
     fn desired_mode_maps_canonical_permission_modes() {
@@ -1246,6 +1258,37 @@ mod tests {
                 "injected /{name}"
             );
         }
+    }
+
+    #[test]
+    fn session_new_includes_empty_mcp_servers_for_acp_schema() {
+        let mut dialect = Gemini::new();
+        let frames = dialect.init(&SessionParams {
+            cwd: "/tmp/lucarne-gemini-test".into(),
+            ..Default::default()
+        });
+        assert_eq!(
+            stdin_json(&frames[0]).get("method").and_then(Value::as_str),
+            Some("initialize")
+        );
+
+        dialect.translate(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {"agentCapabilities": {"loadSession": true}}
+            })
+            .to_string()
+            .as_bytes(),
+        );
+
+        let frames = dialect.drain_out_frames();
+        let request = stdin_json(&frames[0]);
+        assert_eq!(
+            request.get("method").and_then(Value::as_str),
+            Some("session/new")
+        );
+        assert_eq!(request.pointer("/params/mcpServers"), Some(&json!([])));
     }
 
     #[test]

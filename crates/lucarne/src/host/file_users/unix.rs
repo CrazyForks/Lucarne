@@ -1,8 +1,11 @@
 use std::{path::Path, process::Command};
 use tracing::trace;
 
+#[cfg(target_os = "linux")]
+use crate::host::unix_tools::resolve_command;
+
 pub(crate) fn observed_session_writer_pid(path: &Path) -> Option<i32> {
-    let output = match Command::new("/usr/sbin/lsof")
+    let output = match Command::new(lsof_command())
         .args(["-t", "--"])
         .arg(path)
         .output()
@@ -18,6 +21,17 @@ pub(crate) fn observed_session_writer_pid(path: &Path) -> Option<i32> {
         return None;
     }
     parse_lsof_pid_output(&output.stdout)
+}
+
+fn lsof_command() -> std::path::PathBuf {
+    #[cfg(target_os = "linux")]
+    {
+        resolve_command("lsof", &["/usr/bin/lsof", "/usr/sbin/lsof"])
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::path::PathBuf::from("/usr/sbin/lsof")
+    }
 }
 
 fn parse_lsof_pid_output(stdout: &[u8]) -> Option<i32> {

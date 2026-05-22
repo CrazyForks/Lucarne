@@ -150,7 +150,7 @@ async fn live_codex_watch_emits_renamed_assistant_response() {
     assert_eq!(update.provider, watch_provider("codex"));
 }
 
-#[cfg(all(feature = "codex", any(target_os = "macos", windows)))]
+#[cfg(all(feature = "codex", any(target_os = "macos", windows, target_os = "linux")))]
 #[tokio::test]
 async fn live_codex_watch_emits_nested_created_session_response() {
     let temp = tempfile::tempdir().unwrap();

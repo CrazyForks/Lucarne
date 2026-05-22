@@ -2,10 +2,12 @@ use tokio::process::Command;
 use tracing::trace;
 
 use super::ProcessSample;
+#[cfg(target_os = "linux")]
+use crate::host::unix_tools::resolve_command;
 
 pub(super) async fn snapshot() -> Result<Vec<ProcessSample>, String> {
     trace!(target: "lucarne::host::process_table", "sampling unix process table");
-    let output = Command::new("/bin/ps")
+    let output = Command::new(ps_command())
         .args(["-axo", "pid=,ppid=,pgid=,rss=,%cpu="])
         .output()
         .await
@@ -18,6 +20,17 @@ pub(super) async fn snapshot() -> Result<Vec<ProcessSample>, String> {
     let samples = parse_process_table(&output.stdout);
     trace!(target: "lucarne::host::process_table", count = samples.len(), "sampled unix process table");
     Ok(samples)
+}
+
+fn ps_command() -> std::path::PathBuf {
+    #[cfg(target_os = "linux")]
+    {
+        resolve_command("ps", &["/usr/bin/ps", "/bin/ps"])
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::path::PathBuf::from("/bin/ps")
+    }
 }
 
 fn parse_process_table(stdout: &[u8]) -> Vec<ProcessSample> {
