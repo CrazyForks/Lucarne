@@ -118,13 +118,16 @@ lucarned autostart stop
 lucarned update
 ```
 
-Homebrew service 命令：
+<details>
+<summary>Homebrew service 命令</summary>
 
 ```bash
 brew services start lucarned
 brew services restart lucarned
 brew services stop lucarned
 ```
+
+</details>
 
 ```text
 macOS/Linux 配置: ~/.lucarned/lucarned.yaml
