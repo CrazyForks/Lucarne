@@ -4,6 +4,7 @@ default-members = [
     "crates/lucarne",
     "crates/lucarne-adapter",
     "crates/lucarne-channel",
+    "crates/lucarned-ctl",
     "crates/lucarne-telegram",
     "crates/lucarne-wechat",
     "crates/lucarned",
@@ -14,6 +15,7 @@ members = [
     "crates/lucarne-adapter",
     "crates/lucarne-channel",
     "crates/lucarne-fakeagent",
+    "crates/lucarned-ctl",
     "crates/lucarne-telegram",
     "crates/lucarne-wechat",
     "crates/lucarned",
@@ -25,6 +27,8 @@ version = "0.2.3"
 edition = "2021"
 license = "MIT"
 rust-version = "1.75"
+repository = "https://github.com/tuchg/Lucarne"
+homepage = "https://github.com/tuchg/Lucarne"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -36,7 +40,6 @@ uuid = { version = "1", features = ["v4", "serde"] }
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = "0.3"
-clap = { version = "4", features = ["derive"] }
 async-trait = "0.1"
 futures = "0.3"
 nix = { version = "0.29", features = ["signal", "process", "fs"] }
@@ -56,6 +59,9 @@ codegen-units = 1
 strip = true
 panic = "abort"
 
+[profile.dist]
+inherits = "release"
+
 [profile.dev]
 opt-level = 0
 codegen-units = 256
@@ -63,3 +69,28 @@ lto = false
 strip = false
 debug = "full"
 panic = "unwind"
+
+[workspace.metadata.dist]
+cargo-dist-version = "0.31.0"
+ci = ["github"]
+installers = ["shell", "powershell"]
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+packages = ["lucarned"]
+unix-archive = ".tar.xz"
+windows-archive = ".tar.xz"
+checksum = "sha256"
+install-path = "~/.lucarne/bin"
+precise-builds = true
+install-success-msg = "lucarned installed. Run: lucarned autostart install --start"
+
+[workspace.metadata.dist.dependencies.apt]
+pkg-config = "*"
+libssl-dev = { version = "*", stage = ["build", "run"] }
+libsqlite3-dev = { version = "*", stage = ["build", "run"] }
