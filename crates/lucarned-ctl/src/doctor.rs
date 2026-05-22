@@ -21,18 +21,45 @@ pub struct Check {
 
 pub fn run_doctor() -> Result<(), String> {
     let checks = collect_checks()?;
-    for check in &checks {
+    print_checks(&checks);
+    if checks.iter().any(|check| check.level == CheckLevel::Fail) {
+        Err("doctor found critical failures".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "updates")]
+pub async fn run_doctor_async(
+    client: &reqwest::Client,
+    update_config: crate::updates::UpdateConfig,
+    update_config_warning: Option<String>,
+) -> Result<(), String> {
+    let mut checks = collect_checks()?;
+    if let Some(message) = update_config_warning {
+        checks.push(Check {
+            level: CheckLevel::Warn,
+            name: "update-config",
+            message,
+        });
+    }
+    checks.push(update_check(client, update_config).await);
+    print_checks(&checks);
+    if checks.iter().any(|check| check.level == CheckLevel::Fail) {
+        Err("doctor found critical failures".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn print_checks(checks: &[Check]) {
+    for check in checks {
         let prefix = match check.level {
             CheckLevel::Ok => "ok",
             CheckLevel::Warn => "warn",
             CheckLevel::Fail => "fail",
         };
         println!("{prefix}: {}: {}", check.name, check.message);
-    }
-    if checks.iter().any(|check| check.level == CheckLevel::Fail) {
-        Err("doctor found critical failures".to_string())
-    } else {
-        Ok(())
     }
 }
 
@@ -62,6 +89,77 @@ fn collect_checks() -> Result<Vec<Check>, String> {
         checks.push(optional_cli(agent));
     }
     Ok(checks)
+}
+
+#[cfg(feature = "updates")]
+async fn update_check(
+    client: &reqwest::Client,
+    update_config: crate::updates::UpdateConfig,
+) -> Check {
+    if !update_config.enabled {
+        return Check {
+            level: CheckLevel::Ok,
+            name: "update",
+            message: "checks disabled by config".to_string(),
+        };
+    }
+
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        crate::updates::check_now(client, &update_config, env!("CARGO_PKG_VERSION")),
+    )
+    .await
+    {
+        Ok(Ok(status)) => {
+            let (level, message) = update_check_message(&status);
+            Check {
+                level,
+                name: "update",
+                message,
+            }
+        }
+        Ok(Err(err)) => Check {
+            level: CheckLevel::Warn,
+            name: "update",
+            message: format!("check failed: {err}"),
+        },
+        Err(_) => Check {
+            level: CheckLevel::Warn,
+            name: "update",
+            message: "check failed: timed out after 10s".to_string(),
+        },
+    }
+}
+
+#[cfg(feature = "updates")]
+fn update_check_message(status: &crate::updates::UpdateStatus) -> (CheckLevel, String) {
+    if !status.automatic_checks_enabled {
+        return (CheckLevel::Ok, "checks disabled by config".to_string());
+    }
+
+    if status.is_newer {
+        let latest = status.latest_version.as_deref().unwrap_or("unknown");
+        let url = status
+            .release_url
+            .as_deref()
+            .unwrap_or("release URL unavailable");
+        return (CheckLevel::Warn, format!("{latest} available: {url}"));
+    }
+
+    if let Some(latest) = &status.latest_version {
+        return (
+            CheckLevel::Ok,
+            format!(
+                "current version {} (latest {latest})",
+                status.current_version
+            ),
+        );
+    }
+
+    (
+        CheckLevel::Warn,
+        "no stable GitHub release found".to_string(),
+    )
 }
 
 fn check_lucarned_help(path: &Path) -> Check {
@@ -409,6 +507,42 @@ mod tests {
             parse_proc_self_limit_soft(raw, "Max open files"),
             Some(1_024)
         );
+    }
+
+    #[cfg(feature = "updates")]
+    #[tokio::test]
+    async fn disabled_update_check_is_ok() {
+        let client = reqwest::Client::new();
+        let check = update_check(
+            &client,
+            crate::updates::UpdateConfig {
+                enabled: false,
+                ..crate::updates::UpdateConfig::default()
+            },
+        )
+        .await;
+
+        assert_eq!(check.level, CheckLevel::Ok);
+        assert_eq!(check.name, "update");
+        assert_eq!(check.message, "checks disabled by config");
+    }
+
+    #[cfg(feature = "updates")]
+    #[tokio::test]
+    async fn failed_update_check_is_warning() {
+        let client = reqwest::Client::new();
+        let check = update_check(
+            &client,
+            crate::updates::UpdateConfig {
+                repository: "not-a-repository".to_string(),
+                ..crate::updates::UpdateConfig::default()
+            },
+        )
+        .await;
+
+        assert_eq!(check.level, CheckLevel::Warn);
+        assert_eq!(check.name, "update");
+        assert!(check.message.contains("check failed:"));
     }
 
     #[cfg(target_os = "linux")]

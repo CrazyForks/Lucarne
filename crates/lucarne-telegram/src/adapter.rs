@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use lucarne::LucarneCore;
 use lucarne_adapter::{
     AdapterConfig, AdapterContext, AdapterError, AdapterPlugin, AdapterResult, AdapterTask,
+    SystemNotificationBus, SystemNotificationReceiver,
 };
 use tracing::{debug, info};
 
@@ -48,6 +49,7 @@ impl AdapterPlugin for TelegramAdapterPlugin {
         let core = Arc::clone(&ctx.core);
         let http_client = ctx.http_client.clone();
         let global_config_persistence = ctx.global_config_persistence.clone();
+        let system_notifications = ctx.system_notifications.subscribe();
         info!(
             target: "lucarne_telegram::adapter",
             entry_chat_id = config.entry_chat_id,
@@ -56,11 +58,12 @@ impl AdapterPlugin for TelegramAdapterPlugin {
         );
         lucarne::memory_profile_snapshot!("lucarne_telegram.adapter.spawn.before_task_spawn");
         Ok(AdapterTask::spawn(self.id(), async move {
-            run_telegram_adapter_with_client_and_global_config_persistence(
+            run_telegram_adapter_with_client_and_global_config_persistence_and_system_notifications(
                 core,
                 config,
                 http_client,
                 global_config_persistence,
+                system_notifications,
             )
             .await
             .map_err(|err| AdapterError::message(err.to_string()))
@@ -117,6 +120,28 @@ pub async fn run_telegram_adapter_with_client_and_global_config_persistence(
     http_client: reqwest::Client,
     global_config_persistence: Option<Arc<dyn lucarne_adapter::GlobalConfigPersistence>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let noop_system_notifications = SystemNotificationBus::new(1);
+    let system_notifications = noop_system_notifications.subscribe();
+    let result =
+        run_telegram_adapter_with_client_and_global_config_persistence_and_system_notifications(
+            core,
+            config,
+            http_client,
+            global_config_persistence,
+            system_notifications,
+        )
+        .await;
+    drop(noop_system_notifications);
+    result
+}
+
+async fn run_telegram_adapter_with_client_and_global_config_persistence_and_system_notifications(
+    core: Arc<LucarneCore>,
+    config: TelegramConfig,
+    http_client: reqwest::Client,
+    global_config_persistence: Option<Arc<dyn lucarne_adapter::GlobalConfigPersistence>>,
+    system_notifications: SystemNotificationReceiver,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     lucarne::memory_profile_snapshot!("lucarne_telegram.adapter.run.start");
     info!(
         target: "lucarne_telegram::adapter",
@@ -140,7 +165,8 @@ pub async fn run_telegram_adapter_with_client_and_global_config_persistence(
     lucarne::memory_profile_snapshot!("lucarne_telegram.adapter.run.after_bot_new");
     info!(target: "lucarne_telegram::adapter", "telegram adapter started");
     lucarne::memory_profile_snapshot!("lucarne_telegram.adapter.run.before_bot_run");
-    bot.run().await;
+    bot.run_with_system_notifications(system_notifications)
+        .await;
     info!(target: "lucarne_telegram::adapter", "telegram adapter stopped");
     Ok(())
 }

@@ -237,6 +237,7 @@ struct ConfigYaml<'a> {
     state: StateYaml,
     logging: LoggingYaml,
     health: HealthYaml,
+    updates: UpdatesYaml,
     turn: TurnYaml,
     session: SessionYaml,
     config: RuntimeConfigYaml,
@@ -267,6 +268,13 @@ impl<'a> From<&'a InitConfigDraft> for ConfigYaml<'a> {
             health: HealthYaml {
                 enabled: false,
                 addr: DEFAULT_HEALTH_ADDR,
+            },
+            updates: UpdatesYaml {
+                enabled: true,
+                notify: true,
+                check_interval_hours: 24,
+                remind_interval_hours: 24,
+                repository: "tuchg/Lucarne",
             },
             turn: TurnYaml {
                 inactivity_secs: 1800,
@@ -308,6 +316,15 @@ struct LoggingYaml {
 struct HealthYaml {
     enabled: bool,
     addr: &'static str,
+}
+
+#[derive(Serialize)]
+struct UpdatesYaml {
+    enabled: bool,
+    notify: bool,
+    check_interval_hours: u8,
+    remind_interval_hours: u8,
+    repository: &'static str,
 }
 
 #[derive(Serialize)]
@@ -458,6 +475,9 @@ mod tests {
         assert!(yaml.contains("global:"));
         assert!(yaml.contains("bypass: false"));
         assert!(yaml.contains("notifications: true"));
+        assert!(yaml.contains("updates:"));
+        assert!(yaml.contains("check_interval_hours: 24"));
+        assert!(yaml.contains("repository: tuchg/Lucarne"));
         assert!(yaml.contains("telegram:"));
         assert!(yaml.contains("wechat:"));
         assert!(yaml.contains("enabled: false"));

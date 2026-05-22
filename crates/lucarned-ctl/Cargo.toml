@@ -8,4 +8,19 @@ repository.workspace = true
 homepage.workspace = true
 description = "Control helpers for lucarned installation diagnostics and autostart."
 
+[features]
+default = []
+updates = [
+    "dep:reqwest",
+    "dep:semver",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:tokio",
+]
+
 [dependencies]
+reqwest = { workspace = true, optional = true }
+semver = { version = "1", optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }

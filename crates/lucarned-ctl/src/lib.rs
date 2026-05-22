@@ -3,6 +3,8 @@ pub mod autostart;
 pub mod doctor;
 pub mod paths;
 pub mod process;
+#[cfg(feature = "updates")]
+pub mod updates;
 
 pub use args::{parse, usage, AutostartCommand, Command, ParseError};
 
@@ -24,7 +26,35 @@ pub fn run(command: Command) -> Result<(), String> {
             Ok(())
         }
         Command::Doctor => doctor::run_doctor(),
+        Command::Update => update_requires_async_or_feature(),
         Command::Autostart(command) => run_autostart(command),
+    }
+}
+
+#[cfg(feature = "updates")]
+pub async fn run_async(
+    command: Command,
+    client: &reqwest::Client,
+    update_config: updates::UpdateConfig,
+    update_config_warning: Option<String>,
+) -> Result<(), String> {
+    match command {
+        Command::Doctor => {
+            doctor::run_doctor_async(client, update_config, update_config_warning).await
+        }
+        Command::Update => updates::run_update_command(client, update_config).await,
+        other => run(other),
+    }
+}
+
+fn update_requires_async_or_feature() -> Result<(), String> {
+    #[cfg(feature = "updates")]
+    {
+        Err("update command requires async lucarned-ctl runner".to_string())
+    }
+    #[cfg(not(feature = "updates"))]
+    {
+        Err("update command requires lucarned-ctl updates feature".to_string())
     }
 }
 
