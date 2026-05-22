@@ -26,8 +26,6 @@
 
 ### 1. 安装
 
-推荐一键脚本：
-
 macOS / Linux：
 
 ```bash
@@ -41,7 +39,7 @@ powershell -c "irm https://github.com/tuchg/Lucarne/releases/latest/download/luc
 ```
 
 <details>
-<summary>Homebrew 与发布包</summary>
+<summary>Homebrew（推荐）与发布包</summary>
 
 Homebrew：
 
@@ -69,14 +67,12 @@ lucarned init
 
 ### 3. 启动后台服务
 
-推荐一键 autostart：
-
 ```bash
 lucarned autostart install --start
 ```
 
 <details>
-<summary>Homebrew service 可选命令</summary>
+<summary>Homebrew service 命令（推荐）</summary>
 
 ```bash
 brew services start lucarned
@@ -122,6 +118,8 @@ lucarned update
 <summary>Homebrew service 命令</summary>
 
 ```bash
+brew update
+brew upgrade lucarned
 brew services start lucarned
 brew services restart lucarned
 brew services stop lucarned

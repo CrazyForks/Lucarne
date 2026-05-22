@@ -26,8 +26,6 @@ English | [中文](README.cn.md)
 
 ### 1. Install
 
-Recommended one-line installers:
-
 macOS / Linux:
 
 ```bash
@@ -41,7 +39,7 @@ powershell -c "irm https://github.com/tuchg/Lucarne/releases/latest/download/luc
 ```
 
 <details>
-<summary>Homebrew and release archives</summary>
+<summary>Homebrew (recommended) and release archives</summary>
 
 Homebrew:
 
@@ -69,14 +67,12 @@ Initialization guides you through:
 
 ### 3. Start the background service
 
-Recommended one-command autostart:
-
 ```bash
 lucarned autostart install --start
 ```
 
 <details>
-<summary>Homebrew service alternative</summary>
+<summary>Homebrew service commands (recommended)</summary>
 
 ```bash
 brew services start lucarned
@@ -122,6 +118,8 @@ lucarned update
 <summary>Homebrew service commands</summary>
 
 ```bash
+brew update
+brew upgrade lucarned
 brew services start lucarned
 brew services restart lucarned
 brew services stop lucarned
