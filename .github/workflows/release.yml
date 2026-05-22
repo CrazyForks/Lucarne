@@ -148,9 +148,12 @@ jobs:
           APT_LISTCHANGES_FRONTEND: none
         run: |
           ${{ matrix.packages_install }}
-      - name: Use clang backend for Windows ARM64 cross build
+      - name: Prepare Windows ARM64 clang sysroot
         if: ${{ contains(matrix.targets, 'aarch64-pc-windows-msvc') }}
-        run: echo "XWIN_CROSS_COMPILER=clang" >> "$GITHUB_ENV"
+        run: |
+          echo "XWIN_CROSS_COMPILER=clang" >> "$GITHUB_ENV"
+          cargo xwin cache windows-msvc-sysroot
+          find "$HOME/.cache/cargo-xwin/windows-msvc-sysroot" -type f -name windows.h -exec sh -c 'for path do dir=$(dirname "$path"); ln -sf windows.h "$dir/Windows.h"; done' sh {} +
       - name: Build artifacts
         run: |
           # Actually do builds and make zips and whatnot
