@@ -56,7 +56,7 @@ fn unit_path() -> Result<PathBuf, String> {
 
 fn render_unit(paths: &AutostartPaths) -> String {
     format!(
-        "[Unit]\nDescription=Lucarne daemon\n\n[Service]\nType=simple\nExecStart={}\nRestart=no\n\n[Install]\nWantedBy=default.target\n",
+        "[Unit]\nDescription=Lucarne daemon\n\n[Service]\nType=simple\nExecStart={}\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n",
         systemd_quote(&paths.lucarned.display().to_string())
     )
 }
@@ -85,6 +85,8 @@ mod tests {
         };
         let unit = render_unit(&paths);
         assert!(unit.contains("ExecStart=\"/home/me/My Apps/lucarned\""));
+        assert!(unit.contains("Restart=on-failure"));
+        assert!(unit.contains("RestartSec=5"));
         assert!(unit.contains("WantedBy=default.target"));
     }
 }

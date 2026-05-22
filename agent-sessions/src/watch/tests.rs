@@ -300,7 +300,12 @@ async fn discovery_filters_directory_roots_to_recent_session_files() {
     let stale_path = fs::canonicalize(&stale_path).unwrap();
     assert!(discovered.contains(&recent_path));
     assert!(!discovered.contains(&stale_path));
-    assert!(watch_paths.contains(&recent_path));
+    if cfg!(target_os = "linux") {
+        assert!(!watch_paths.contains(&recent_path));
+        assert!(watch_paths.contains(&recent_path.parent().unwrap().to_path_buf()));
+    } else {
+        assert!(watch_paths.contains(&recent_path));
+    }
     assert!(!watch_paths.contains(&stale_path));
 }
 
@@ -323,6 +328,145 @@ async fn initial_watch_paths_include_only_recent_codex_day_directories() {
     assert!(watch_paths.contains(&fs::canonicalize(root.join("2026/05")).unwrap()));
     assert!(watch_paths.contains(&fs::canonicalize(day_dir).unwrap()));
     assert!(!watch_paths.contains(&fs::canonicalize(stale_day_dir).unwrap()));
+}
+
+#[cfg(all(feature = "codex", target_os = "linux"))]
+#[tokio::test]
+async fn linux_scale_session_watch_stays_bounded_with_real_inotify() {
+    if std::env::var("LUCARNE_WATCH_SCALE_E2E").ok().as_deref() != Some("1") {
+        return;
+    }
+
+    let stale_sessions = std::env::var("LUCARNE_WATCH_SCALE_STALE_SESSIONS")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .unwrap_or(20_000);
+    let stale_days = std::env::var("LUCARNE_WATCH_SCALE_STALE_DAYS")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .unwrap_or(500)
+        .max(1);
+    let max_watch_paths = std::env::var("LUCARNE_WATCH_SCALE_MAX_WATCH_PATHS")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .unwrap_or(128);
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = codex_root(temp.path());
+    let stale_modified = SystemTime::now() - Duration::from_secs(3 * 24 * 60 * 60);
+    let mut stale_dirs = HashSet::new();
+    for index in 0..stale_sessions {
+        let day_index = index % stale_days;
+        let year = 2020 + (day_index / 372);
+        let month = ((day_index / 31) % 12) + 1;
+        let day = (day_index % 31) + 1;
+        let dir = root
+            .join(format!("{year:04}"))
+            .join(format!("{month:02}"))
+            .join(format!("{day:02}"));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("rollout-stale-{index:05}.jsonl"));
+        fs::write(&path, "{}\n").unwrap();
+        set_modified(&path, stale_modified);
+        stale_dirs.insert(dir);
+    }
+    for dir in &stale_dirs {
+        set_modified(dir, stale_modified);
+    }
+
+    let hot_path = codex_session_path(&root);
+    write_initial_codex_session(&hot_path);
+    let hot_path = fs::canonicalize(&hot_path).unwrap();
+
+    let mut watcher = SessionWatcher::start(
+        WatchConfig::new()
+            .providers([watch_provider("codex")])
+            .provider_roots(watch_provider("codex"), [root.clone()])
+            .selection(crate::ParseSelection::empty().with_messages())
+            .debounce(Duration::from_millis(25)),
+    )
+    .unwrap();
+
+    let watched_paths = watcher.watched_paths.len();
+    eprintln!(
+        "LUCARNE_WATCH_SCALE stale_sessions={stale_sessions} stale_days={stale_days} watched_paths={watched_paths} baselines={}",
+        watcher.baselines.len()
+    );
+    assert!(
+        watched_paths <= max_watch_paths,
+        "watched {watched_paths} paths for {stale_sessions} stale sessions across {stale_days} days"
+    );
+    assert!(watcher.baselines.contains_key(&hot_path));
+    assert!(
+        !watcher.watched_paths.contains(&hot_path),
+        "Linux should rely on parent directory watch for hot session file"
+    );
+
+    append_line(
+        &hot_path,
+        r#"{"timestamp":"2026-05-03T00:00:02.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"scale-pong"}]}}"#,
+    );
+
+    let updates = recv_timeout(&mut watcher, Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert_single_assistant_response(&updates, "scale-pong");
+}
+
+#[cfg(all(feature = "codex", target_os = "linux"))]
+#[test]
+fn linux_existing_directory_watch_covers_child_session_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = codex_root(temp.path());
+    let session_path = codex_session_path(&root);
+    write_initial_codex_session(&session_path);
+
+    let (mut watcher, _tx) = test_watcher(&root, Duration::from_millis(50));
+    let parent = fs::canonicalize(session_path.parent().unwrap()).unwrap();
+    watcher.watched_paths.insert(parent);
+
+    assert!(
+        watcher
+            .existing_directory_watch_covers_child_file(&fs::canonicalize(session_path).unwrap())
+    );
+}
+
+#[cfg(all(feature = "codex", target_os = "linux"))]
+#[tokio::test]
+async fn linux_codex_root_uses_bounded_directory_targets_without_session_file_targets() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = codex_root(temp.path());
+    let hot_path = codex_session_path(&root);
+    let cold_recent_path = root
+        .join("2026")
+        .join("05")
+        .join("02")
+        .join("rollout-cold-recent.jsonl");
+    write_initial_codex_session(&hot_path);
+    write_initial_codex_session(&cold_recent_path);
+    let cold_recent_modified = SystemTime::now() - Duration::from_secs(2 * 60 * 60);
+    set_modified(&cold_recent_path, cold_recent_modified);
+
+    let (watcher, _tx) = test_watcher(&root, Duration::from_millis(50));
+    let targets = watcher.initial_watch_targets(&[fs::canonicalize(&root).unwrap()]);
+
+    let root = fs::canonicalize(&root).unwrap();
+    let hot_path = fs::canonicalize(&hot_path).unwrap();
+    let cold_recent_path = fs::canonicalize(&cold_recent_path).unwrap();
+    assert!(targets.contains(&WatchTarget {
+        path: root.clone(),
+        recursive_mode: RecursiveMode::NonRecursive,
+    }));
+    assert!(targets.contains(&WatchTarget {
+        path: hot_path.parent().unwrap().to_path_buf(),
+        recursive_mode: RecursiveMode::NonRecursive,
+    }));
+    assert!(targets.contains(&WatchTarget {
+        path: cold_recent_path.parent().unwrap().to_path_buf(),
+        recursive_mode: RecursiveMode::NonRecursive,
+    }));
+    assert!(!targets.iter().any(|target| target.path == hot_path));
+    assert!(!targets.iter().any(|target| target.path == cold_recent_path));
 }
 
 #[cfg(all(feature = "codex", any(target_os = "macos", windows)))]
@@ -401,7 +545,12 @@ async fn initial_watch_paths_do_not_register_every_claude_project_dir() {
     let watch_paths = watcher.initial_watch_paths(&[fs::canonicalize(&root).unwrap()]);
 
     assert!(watch_paths.contains(&fs::canonicalize(&root).unwrap()));
-    assert!(watch_paths.contains(&fs::canonicalize(recent_project).unwrap()));
+    assert!(watch_paths.contains(&fs::canonicalize(&recent_project).unwrap()));
+    if cfg!(target_os = "linux") {
+        assert!(
+            !watch_paths.contains(&fs::canonicalize(recent_project.join("recent.jsonl")).unwrap())
+        );
+    }
     assert!(!watch_paths.contains(&fs::canonicalize(empty_project).unwrap()));
 }
 
