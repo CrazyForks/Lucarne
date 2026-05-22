@@ -67,17 +67,17 @@ Initialization guides you through:
 
 ### 3. Start the background service
 
-Homebrew:
-
 ```bash
-brew services start lucarned
+lucarned autostart install --start
 ```
 
 <details>
-<summary>Other installs</summary>
+<summary>Homebrew service commands (recommended)</summary>
 
 ```bash
-lucarned autostart install --start
+brew services start lucarned
+brew services restart lucarned
+brew services stop lucarned
 ```
 
 </details>

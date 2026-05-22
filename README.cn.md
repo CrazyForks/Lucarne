@@ -67,17 +67,17 @@ lucarned init
 
 ### 3. 启动后台服务
 
-Homebrew：
-
 ```bash
-brew services start lucarned
+lucarned autostart install --start
 ```
 
 <details>
-<summary>其他安装方式</summary>
+<summary>Homebrew service 命令（推荐）</summary>
 
 ```bash
-lucarned autostart install --start
+brew services start lucarned
+brew services restart lucarned
+brew services stop lucarned
 ```
 
 </details>
