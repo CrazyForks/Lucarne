@@ -129,6 +129,12 @@ jobs:
           fi
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
+      - name: Configure noninteractive apt
+        if: ${{ matrix.container }}
+        run: |
+          if command -v apt-get > /dev/null 2>&1; then
+            echo 'APT::Get::Assume-Yes "true";' > /etc/apt/apt.conf.d/90assumeyes
+          fi
       # Get the dist-manifest
       - name: Fetch local artifacts
         uses: actions/download-artifact@v7
@@ -137,6 +143,9 @@ jobs:
           path: target/distrib/
           merge-multiple: true
       - name: Install dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          APT_LISTCHANGES_FRONTEND: none
         run: |
           ${{ matrix.packages_install }}
       - name: Build artifacts
