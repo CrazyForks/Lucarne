@@ -26,16 +26,6 @@ English | [中文](README.cn.md)
 
 ### 1. Install
 
-Recommended: Homebrew
-
-```bash
-brew tap tuchg/Lucarne https://github.com/tuchg/Lucarne
-brew install lucarned
-```
-
-<details>
-<summary>One-line installers and release archives</summary>
-
 macOS / Linux:
 
 ```bash
@@ -46,6 +36,16 @@ Windows PowerShell:
 
 ```powershell
 powershell -c "irm https://github.com/tuchg/Lucarne/releases/latest/download/lucarned-installer.ps1 | iex"
+```
+
+<details>
+<summary>Homebrew (recommended) and release archives</summary>
+
+Homebrew:
+
+```bash
+brew tap tuchg/Lucarne https://github.com/tuchg/Lucarne
+brew install lucarned
 ```
 
 Release archives are also available for macOS, Linux, and Windows on x86_64 and aarch64.
