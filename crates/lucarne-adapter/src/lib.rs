@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use lucarne::LucarneCore;
 use serde::Deserialize;
 use tokio::{
-    sync::{mpsc, watch},
+    sync::{broadcast, mpsc, watch},
     task::{AbortHandle, JoinHandle},
 };
 use tracing::{debug, info, warn};
@@ -276,6 +276,54 @@ pub struct GlobalConfigUpdate {
     pub notifications: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SystemNotification {
+    UpdateAvailable(SystemUpdateNotification),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemUpdateNotification {
+    pub current_version: String,
+    pub latest_version: String,
+    pub release_name: String,
+    pub release_url: String,
+    pub published_at: Option<String>,
+    pub body_markdown: String,
+    pub install_hint: String,
+}
+
+#[derive(Clone)]
+pub struct SystemNotificationBus {
+    tx: broadcast::Sender<SystemNotification>,
+}
+
+pub struct SystemNotificationReceiver {
+    rx: broadcast::Receiver<SystemNotification>,
+}
+
+impl SystemNotificationBus {
+    pub fn new(capacity: usize) -> Self {
+        let (tx, _rx) = broadcast::channel(capacity.max(1));
+        Self { tx }
+    }
+
+    pub fn subscribe(&self) -> SystemNotificationReceiver {
+        SystemNotificationReceiver {
+            rx: self.tx.subscribe(),
+        }
+    }
+
+    pub fn send(&self, notification: SystemNotification) -> usize {
+        self.tx.send(notification).unwrap_or(0)
+    }
+}
+
+impl SystemNotificationReceiver {
+    pub async fn recv(&mut self) -> Result<SystemNotification, broadcast::error::RecvError> {
+        self.rx.recv().await
+    }
+}
+
 pub trait GlobalConfigPersistence: Send + Sync {
     fn persist_global_config(&self, update: GlobalConfigUpdate) -> AdapterResult<()>;
 }
@@ -286,6 +334,7 @@ pub struct AdapterContext {
     pub config: Arc<AdapterConfig>,
     pub shutdown: watch::Receiver<bool>,
     pub http_client: reqwest::Client,
+    pub system_notifications: SystemNotificationBus,
     pub global_config_persistence: Option<Arc<dyn GlobalConfigPersistence>>,
 }
 
@@ -1118,6 +1167,51 @@ mod tests {
             source.contains("pub http_client: reqwest::Client"),
             "AdapterContext must carry one cloned reqwest::Client for all adapters"
         );
+        assert!(
+            source.contains("pub system_notifications: SystemNotificationBus"),
+            "AdapterContext must carry generic system notification bus"
+        );
+    }
+
+    #[tokio::test]
+    async fn system_notification_bus_fans_out_to_subscribers() {
+        let bus = SystemNotificationBus::new(16);
+        let mut first = bus.subscribe();
+        let mut second = bus.subscribe();
+        let notification = test_update_notification("0.2.0");
+
+        assert_eq!(bus.send(notification.clone()), 2);
+        assert_eq!(first.recv().await.unwrap(), notification);
+        assert_eq!(second.recv().await.unwrap(), notification);
+    }
+
+    #[test]
+    fn system_notification_bus_send_without_receivers_returns_zero() {
+        let bus = SystemNotificationBus::new(16);
+
+        assert_eq!(bus.send(test_update_notification("0.2.0")), 0);
+    }
+
+    #[tokio::test]
+    async fn system_notification_bus_clamps_zero_capacity() {
+        let bus = SystemNotificationBus::new(0);
+        let mut receiver = bus.subscribe();
+        let notification = test_update_notification("0.2.0");
+
+        assert_eq!(bus.send(notification.clone()), 1);
+        assert_eq!(receiver.recv().await.unwrap(), notification);
+    }
+
+    fn test_update_notification(latest_version: &str) -> SystemNotification {
+        SystemNotification::UpdateAvailable(SystemUpdateNotification {
+            current_version: "0.1.0".to_string(),
+            latest_version: latest_version.to_string(),
+            release_name: "Lucarne 0.2.0".to_string(),
+            release_url: "https://example.invalid/release".to_string(),
+            published_at: Some("2026-05-21T00:00:00Z".to_string()),
+            body_markdown: "Update available".to_string(),
+            install_hint: "Run installer".to_string(),
+        })
     }
 
     #[test]
@@ -1304,6 +1398,7 @@ channels:
                         config: Arc::new(AdapterConfig::default()),
                         shutdown: shutdown_rx,
                         http_client: reqwest::Client::new(),
+                        system_notifications: SystemNotificationBus::new(16),
                         global_config_persistence: None,
                     })
                     .await
@@ -1344,6 +1439,7 @@ channels:
                     config: Arc::new(AdapterConfig::default()),
                     shutdown: shutdown_rx,
                     http_client: reqwest::Client::new(),
+                    system_notifications: SystemNotificationBus::new(16),
                     global_config_persistence: None,
                 },
                 options,
@@ -1373,6 +1469,7 @@ channels:
                     config: Arc::new(AdapterConfig::default()),
                     shutdown: shutdown_rx,
                     http_client: reqwest::Client::new(),
+                    system_notifications: SystemNotificationBus::new(16),
                     global_config_persistence: None,
                 },
                 AdapterSupervisorOptions::for_tests(),
@@ -1416,6 +1513,7 @@ channels:
                     config: Arc::new(AdapterConfig::default()),
                     shutdown: shutdown_rx,
                     http_client: reqwest::Client::new(),
+                    system_notifications: SystemNotificationBus::new(16),
                     global_config_persistence: None,
                 },
                 AdapterSupervisorOptions::for_tests(),
@@ -1456,6 +1554,7 @@ channels:
                     config: Arc::new(AdapterConfig::default()),
                     shutdown: shutdown_rx,
                     http_client: reqwest::Client::new(),
+                    system_notifications: SystemNotificationBus::new(16),
                     global_config_persistence: None,
                 },
                 AdapterSupervisorOptions::for_tests(),
@@ -1492,6 +1591,7 @@ channels:
                     config: Arc::new(AdapterConfig::default()),
                     shutdown: shutdown_rx,
                     http_client: reqwest::Client::new(),
+                    system_notifications: SystemNotificationBus::new(16),
                     global_config_persistence: None,
                 },
                 AdapterSupervisorOptions::for_tests(),
@@ -1533,6 +1633,7 @@ channels:
                     config: Arc::new(AdapterConfig::default()),
                     shutdown: shutdown_rx,
                     http_client: reqwest::Client::new(),
+                    system_notifications: SystemNotificationBus::new(16),
                     global_config_persistence: None,
                 },
                 AdapterSupervisorOptions::for_tests(),

@@ -8,6 +8,7 @@ pub enum Command {
     Init,
     Paths,
     Doctor,
+    Update,
     Autostart(AutostartCommand),
 }
 
@@ -53,6 +54,7 @@ fn parse_first(first: OsString, rest: Vec<OsString>) -> Result<Command, ParseErr
         "init" => require_no_args(Command::Init, rest),
         "paths" => require_no_args(Command::Paths, rest),
         "doctor" => require_no_args(Command::Doctor, rest),
+        "update" => require_no_args(Command::Update, rest),
         "autostart" => parse_autostart(rest),
         other => Err(ParseError::new(format!("unknown command: {other}"))),
     }
@@ -137,6 +139,7 @@ Usage:\n\
   lucarned                         Run daemon\n\
   lucarned init                    Configure lucarned interactively\n\
   lucarned doctor                  Diagnose install and runtime state\n\
+  lucarned update                  Check latest Lucarne release status\n\
   lucarned paths                   Print resolved paths\n\
   lucarned autostart install [--start] [--bin PATH]\n\
   lucarned autostart uninstall [--stop]\n\
@@ -169,6 +172,10 @@ mod tests {
             Command::Doctor
         );
         assert_eq!(
+            parse_words(&["lucarned", "update"]).unwrap(),
+            Command::Update
+        );
+        assert_eq!(
             parse_words(&["lucarned", "--version"]).unwrap(),
             Command::Version
         );
@@ -199,6 +206,11 @@ mod tests {
             parse_words(&["lucarned", "autostart", "uninstall", "--stop"]).unwrap(),
             Command::Autostart(AutostartCommand::Uninstall { stop: true })
         );
+    }
+
+    #[test]
+    fn usage_lists_update_command() {
+        assert!(usage().contains("lucarned update"));
     }
 
     #[test]

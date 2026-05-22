@@ -38,7 +38,10 @@ use lucarne::{
         TurnPermit, TurnScheduler,
     },
 };
-use lucarne_adapter::{GlobalConfigPersistence, GlobalConfigUpdate};
+use lucarne_adapter::{
+    GlobalConfigPersistence, GlobalConfigUpdate, SystemNotification, SystemNotificationBus,
+    SystemNotificationReceiver,
+};
 use lucarne_channel::{
     agent_message::{render_agent_message_markdown, AgentMessageFooter},
     ingest,
@@ -504,6 +507,19 @@ impl Bot {
 
     /// Consume channel events forever.
     pub async fn run(self: Arc<Self>) {
+        let noop_system_notifications = SystemNotificationBus::new(1);
+        let system_notifications = noop_system_notifications.subscribe();
+        Arc::clone(&self)
+            .run_with_system_notifications(system_notifications)
+            .await;
+        drop(noop_system_notifications);
+    }
+
+    /// Consume channel events and daemon system notifications forever.
+    pub async fn run_with_system_notifications(
+        self: Arc<Self>,
+        mut system_notifications: SystemNotificationReceiver,
+    ) {
         lucarne::memory_profile_snapshot!("lucarne_telegram.bot.run.start");
         info!(target: "lucarne_telegram::bot", channel = self.channel.name(), "bot run loop starting");
         let core_watcher = {
@@ -550,21 +566,64 @@ impl Bot {
         }
 
         let mut stream = self.channel.subscribe();
+        let mut system_notifications_open = true;
         lucarne::memory_profile_snapshot!("lucarne_telegram.bot.run.after_channel_subscribe");
-        while let Some(ev) = stream.next().await {
-            let bot = self.clone();
-            tokio::spawn(async move {
-                if let Err(e) = bot.handle(ev).await {
-                    warn!(
-                        target: "lucarne_telegram::bot",
-                        error = %e,
-                        "handler error"
-                    );
+        loop {
+            tokio::select! {
+                event = stream.next() => {
+                    let Some(ev) = event else {
+                        break;
+                    };
+                    let bot = self.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = bot.handle(ev).await {
+                            warn!(
+                                target: "lucarne_telegram::bot",
+                                error = %e,
+                                "handler error"
+                            );
+                        }
+                    });
                 }
-            });
+                notification = system_notifications.recv(), if system_notifications_open => {
+                    match notification {
+                        Ok(notification) => {
+                            if let Err(e) = self.handle_system_notification(notification).await {
+                                warn!(
+                                    target: "lucarne_telegram::bot",
+                                    error = %e,
+                                    "system notification handler error"
+                                );
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            warn!(target: "lucarne_telegram::bot", skipped, "system notification watch lagged");
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            system_notifications_open = false;
+                            warn!(target: "lucarne_telegram::bot", "system notification watch closed");
+                        }
+                    }
+                }
+            }
         }
         core_watcher.abort();
         warn!(target: "lucarne_telegram::bot", "channel event stream ended — bot stopping");
+    }
+
+    async fn handle_system_notification(
+        &self,
+        notification: SystemNotification,
+    ) -> Result<(), String> {
+        match notification {
+            SystemNotification::UpdateAvailable(update) => {
+                let msg = OutgoingMessage::markdown(update.body_markdown);
+                send_with_fallback(&*self.channel, &self.entry, msg, "lucarned")
+                    .await
+                    .map(|_| ())
+                    .map_err(|err| err.to_string())
+            }
+        }
     }
 
     async fn handle(self: Arc<Self>, ev: ChannelEvent) -> Result<(), String> {
@@ -7130,6 +7189,41 @@ mod tests {
 
         assert!(channel.send_results.lock().unwrap().is_empty());
         assert!(channel.sent.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn system_update_notification_sends_markdown_to_entry_chat() {
+        let channel = Arc::new(RecordingChannel::default());
+        let bot = test_bot(Arc::clone(&channel));
+
+        bot.handle_system_notification(lucarne_adapter::SystemNotification::UpdateAvailable(
+            lucarne_adapter::SystemUpdateNotification {
+                current_version: "0.1.0".into(),
+                latest_version: "0.2.0".into(),
+                release_name: "Lucarne 0.2.0".into(),
+                release_url: "https://github.com/tuchg/Lucarne/releases/tag/v0.2.0".into(),
+                published_at: Some("2026-05-21T00:00:00Z".into()),
+                body_markdown: "## Lucarne update available\n\nInstall with `lucarned update`."
+                    .into(),
+                install_hint: "installer command".into(),
+            },
+        ))
+        .await
+        .expect("send system update notification");
+
+        let sent = channel.sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].format, lucarne_channel::TextFormat::Markdown);
+        assert!(sent[0].body.contains("Lucarne update available"));
+        assert!(sent[0].reply_to.is_none());
+        assert!(!sent[0].silent);
+        drop(sent);
+
+        assert_eq!(
+            channel.sent_targets.lock().unwrap().clone(),
+            vec![String::new()]
+        );
+        assert!(channel.created_workspaces.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

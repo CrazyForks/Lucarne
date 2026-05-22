@@ -26,7 +26,10 @@ use lucarne::{
         KillAgentRequest, KillAgentTarget, LucarneCore, ResumeWorkspaceRequest, SubmitTurnRequest,
     },
 };
-use lucarne_adapter::{GlobalConfigPersistence, GlobalConfigUpdate};
+use lucarne_adapter::{
+    GlobalConfigPersistence, GlobalConfigUpdate, SystemNotification, SystemNotificationBus,
+    SystemNotificationReceiver,
+};
 use lucarne_channel::{
     agent_message::{compact_path, format_cost_duration},
     robust::retry_attachment_delivery,
@@ -343,12 +346,27 @@ where
 
     pub async fn run_until_shutdown(
         &self,
+        shutdown: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<(), WechatError> {
+        let noop_system_notifications = SystemNotificationBus::new(1);
+        let system_notifications = noop_system_notifications.subscribe();
+        let result = self
+            .run_until_shutdown_with_system_notifications(shutdown, system_notifications)
+            .await;
+        drop(noop_system_notifications);
+        result
+    }
+
+    pub async fn run_until_shutdown_with_system_notifications(
+        &self,
         mut shutdown: tokio::sync::watch::Receiver<bool>,
+        mut system_notifications: SystemNotificationReceiver,
     ) -> Result<(), WechatError> {
         let mut core_events = self.core.watch_events();
         let mut incoming = self.transport.subscribe();
         let mut user_interactions = self.transport.subscribe_user_interactions();
         let mut pending_retry = tokio::time::interval(self.pending_reply_retry_interval);
+        let mut system_notifications_open = true;
         pending_retry.set_missed_tick_behavior(MissedTickBehavior::Skip);
         self.send_startup_help().await;
         loop {
@@ -365,6 +383,26 @@ where
                             warn!(target: "lucarne_wechat::service", skipped, "core event watch lagged");
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
+                    }
+                }
+                notification = system_notifications.recv(), if system_notifications_open => {
+                    match notification {
+                        Ok(notification) => {
+                            if let Err(err) = self.deliver_system_notification(notification).await {
+                                warn!(
+                                    target: "lucarne_wechat::service",
+                                    error = %err,
+                                    "wechat system notification ignored after delivery error"
+                                );
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            warn!(target: "lucarne_wechat::service", skipped, "system notification watch lagged");
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            system_notifications_open = false;
+                            warn!(target: "lucarne_wechat::service", "system notification watch closed");
+                        }
                     }
                 }
                 _ = pending_retry.tick() => {
@@ -398,6 +436,127 @@ where
                 }
             }
         }
+    }
+
+    async fn deliver_system_notification(
+        &self,
+        notification: SystemNotification,
+    ) -> Result<(), WechatError> {
+        match notification {
+            SystemNotification::UpdateAvailable(update) => {
+                self.deliver_update_notification(&update.body_markdown)
+                    .await
+            }
+        }
+    }
+
+    async fn deliver_update_notification(&self, body: &str) -> Result<(), WechatError> {
+        let users = self.notification_users();
+        if users.is_empty() {
+            warn!(
+                target: "lucarne_wechat::service",
+                "wechat update notification skipped because no notification users are configured or remembered"
+            );
+            return Ok(());
+        }
+
+        if let Some(remaining) = self.rate_limit_remaining() {
+            warn!(
+                target: "lucarne_wechat::service",
+                remaining_ms = remaining.as_millis() as u64,
+                "wechat update notification skipped by active rate limit"
+            );
+            return Ok(());
+        }
+
+        for user_id in users {
+            let context = match self.transport.context_for_user(&user_id).await {
+                Ok(Some(context)) => context,
+                Ok(None) => {
+                    warn!(
+                        target: "lucarne_wechat::service",
+                        user_id = %user_id,
+                        "wechat update notification skipped: no stored context for user"
+                    );
+                    continue;
+                }
+                Err(WechatError::RateLimited {
+                    retry_after,
+                    message,
+                }) => {
+                    self.record_rate_limit(retry_after, &message);
+                    warn!(
+                        target: "lucarne_wechat::service",
+                        user_id = %user_id,
+                        retry_after_secs = retry_after.as_secs(),
+                        error = %message,
+                        "wechat update notification context lookup rate limited"
+                    );
+                    return Ok(());
+                }
+                Err(WechatError::Transport(err)) => {
+                    warn!(
+                        target: "lucarne_wechat::service",
+                        user_id = %user_id,
+                        error = %err,
+                        "wechat update notification context lookup failed"
+                    );
+                    continue;
+                }
+                Err(err) => {
+                    warn!(
+                        target: "lucarne_wechat::service",
+                        user_id = %user_id,
+                        error = %err,
+                        "wechat update notification context lookup failed"
+                    );
+                    continue;
+                }
+            };
+
+            match self.transport.send(&context, body).await {
+                Ok(receipt) => {
+                    debug!(
+                        target: "lucarne_wechat::service",
+                        user_id = %user_id,
+                        message_ids = ?receipt.message_ids,
+                        bytes = body.len(),
+                        "wechat update notification sent"
+                    );
+                }
+                Err(WechatError::RateLimited {
+                    retry_after,
+                    message,
+                }) => {
+                    self.record_rate_limit(retry_after, &message);
+                    warn!(
+                        target: "lucarne_wechat::service",
+                        user_id = %user_id,
+                        retry_after_secs = retry_after.as_secs(),
+                        error = %message,
+                        "wechat update notification rate limited"
+                    );
+                    return Ok(());
+                }
+                Err(WechatError::Transport(err)) => {
+                    warn!(
+                        target: "lucarne_wechat::service",
+                        user_id = %user_id,
+                        error = %err,
+                        "wechat update notification send failed"
+                    );
+                }
+                Err(err) => {
+                    warn!(
+                        target: "lucarne_wechat::service",
+                        user_id = %user_id,
+                        error = %err,
+                        "wechat update notification send failed"
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     pub async fn handle_core_event(&self, event: CoreEvent) -> Result<(), WechatError> {
@@ -3084,6 +3243,80 @@ mod tests {
             "{}",
             replies[0].text
         );
+    }
+
+    #[tokio::test]
+    async fn system_update_notifications_send_to_configured_and_known_users_without_binding() {
+        let provider = Arc::new(FakeProvider::default());
+        let core = test_core(Arc::clone(&provider));
+        let transport = Arc::new(FakeTransport::default());
+        let service = Arc::new(WechatNotificationService::new(
+            Arc::clone(&core),
+            Arc::clone(&transport),
+            WechatServiceOptions {
+                initial_user_ids: vec!["user-1".into()],
+                ..WechatServiceOptions::default()
+            },
+        ));
+        service.remember_user("user-2");
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let system_notifications = lucarne_adapter::SystemNotificationBus::new(8);
+        let receiver = system_notifications.subscribe();
+        let run = tokio::spawn({
+            let service = Arc::clone(&service);
+            async move {
+                service
+                    .run_until_shutdown_with_system_notifications(shutdown_rx, receiver)
+                    .await
+            }
+        });
+
+        assert_eq!(
+            system_notifications.send(lucarne_adapter::SystemNotification::UpdateAvailable(
+                lucarne_adapter::SystemUpdateNotification {
+                    current_version: "0.1.0".into(),
+                    latest_version: "0.2.0".into(),
+                    release_name: "Lucarne 0.2.0".into(),
+                    release_url: "https://github.com/tuchg/Lucarne/releases/tag/v0.2.0".into(),
+                    published_at: Some("2026-05-21T00:00:00Z".into()),
+                    body_markdown: "## Lucarne update available\n\nInstall with `lucarned update`."
+                        .into(),
+                    install_hint: "installer command".into(),
+                },
+            )),
+            1
+        );
+
+        for _ in 0..20 {
+            if transport.sends().len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let sends = transport.sends();
+        assert_eq!(sends.len(), 2);
+        let sent_users = sends
+            .iter()
+            .map(|send| send.user_id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(sent_users, BTreeSet::from(["user-1", "user-2"]));
+        for send in &sends {
+            assert!(send.text.contains("Lucarne update available"));
+            assert!(
+                core.message_session_binding("wechat", &send.user_id, &send.message_id)
+                    .is_none(),
+                "system updates must not bind provider sessions"
+            );
+        }
+
+        shutdown_tx.send(true).expect("request shutdown");
+        tokio::time::timeout(Duration::from_secs(1), run)
+            .await
+            .expect("service exits after shutdown")
+            .expect("service task")
+            .expect("service result");
     }
 
     #[tokio::test]

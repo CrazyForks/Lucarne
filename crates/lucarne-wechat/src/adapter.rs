@@ -10,6 +10,7 @@ use futures::{stream::BoxStream, StreamExt};
 use lucarne::{default_lucarned_home_dir, LucarneCore};
 use lucarne_adapter::{
     AdapterConfig, AdapterContext, AdapterError, AdapterPlugin, AdapterResult, AdapterTask,
+    SystemNotificationBus, SystemNotificationReceiver,
 };
 use qrcode::{types::Color, EcLevel, QrCode};
 use tokio::sync::{mpsc, watch};
@@ -144,6 +145,7 @@ impl AdapterPlugin for WechatAdapterPlugin {
         let core = Arc::clone(&ctx.core);
         let shutdown = ctx.shutdown.clone();
         let global_config_persistence = ctx.global_config_persistence.clone();
+        let system_notifications = ctx.system_notifications.subscribe();
         lucarne::memory_profile_snapshot!("lucarne_wechat.adapter.spawn.before_transport_new");
         let transport = Arc::new(
             WechatIlinkTransport::new_with_client(
@@ -179,6 +181,7 @@ impl AdapterPlugin for WechatAdapterPlugin {
                 shutdown,
                 transport,
                 global_config_persistence,
+                system_notifications,
             )
             .await
             .map_err(|err| AdapterError::message(err.to_string()))
@@ -362,7 +365,19 @@ pub async fn run_wechat_adapter(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let transport = Arc::new(WechatIlinkTransport::new(&config, core.sqlite_connection()).await);
     transport.login(config.force_login).await?;
-    run_wechat_adapter_with_transport(core, config, shutdown, transport, None).await
+    let noop_system_notifications = SystemNotificationBus::new(1);
+    let system_notifications = noop_system_notifications.subscribe();
+    let result = run_wechat_adapter_with_transport(
+        core,
+        config,
+        shutdown,
+        transport,
+        None,
+        system_notifications,
+    )
+    .await;
+    drop(noop_system_notifications);
+    result
 }
 
 async fn run_wechat_adapter_with_transport(
@@ -371,6 +386,7 @@ async fn run_wechat_adapter_with_transport(
     shutdown: watch::Receiver<bool>,
     transport: Arc<WechatIlinkTransport>,
     global_config_persistence: Option<Arc<dyn lucarne_adapter::GlobalConfigPersistence>>,
+    system_notifications: SystemNotificationReceiver,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let poll_transport = Arc::clone(&transport);
     let poll_task = tokio::spawn(async move { poll_transport.run().await });
@@ -397,7 +413,9 @@ async fn run_wechat_adapter_with_transport(
     if let Some(reminder_config) = config.context_expiry_reminder.clone() {
         service = service.with_context_expiry_reminder(reminder_config);
     }
-    let result = service.run_until_shutdown(shutdown).await;
+    let result = service
+        .run_until_shutdown_with_system_notifications(shutdown, system_notifications)
+        .await;
     service.transport().stop().await?;
 
     match poll_task.await {

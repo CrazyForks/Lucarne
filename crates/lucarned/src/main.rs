@@ -9,10 +9,12 @@ use lucarne::{default_lucarned_home_dir, default_state_db_path, CoreOptions, Luc
 use lucarne_adapter::{
     default_http_client, AdapterConfig, AdapterContext, AdapterError, AdapterPlugin,
     AdapterRegistry, AdapterResult, AdapterStatusReader, AdapterSupervisorHandle,
-    AdapterSupervisorOptions, GlobalConfigPersistence, GlobalConfigUpdate,
+    AdapterSupervisorOptions, GlobalConfigPersistence, GlobalConfigUpdate, SystemNotification,
+    SystemNotificationBus, SystemUpdateNotification,
 };
 use lucarne_telegram::telegram_plugin;
 use lucarne_wechat::wechat_plugin;
+use lucarned_ctl::updates::{UpdateNotice, UpdateRuntime, UpdateStateStore};
 use serde::Deserialize;
 use tokio::sync::watch;
 use tracing::{info, warn};
@@ -53,6 +55,13 @@ logging:
 health:
   enabled: false
   addr: 127.0.0.1:7766
+
+updates:
+  enabled: true
+  notify: true
+  check_interval_hours: 24
+  remind_interval_hours: 24
+  repository: tuchg/Lucarne
 
 turn:
   inactivity_secs: 1800
@@ -120,9 +129,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match command {
         lucarned_ctl::Command::RunDaemon => run_daemon().await,
         lucarned_ctl::Command::Init => onboarding::run_interactive_init().await,
+        lucarned_ctl::Command::Doctor | lucarned_ctl::Command::Update => {
+            run_ctl_network_command(command).await
+        }
         command => lucarned_ctl::run(command)
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err).into()),
     }
+}
+
+async fn run_ctl_network_command(
+    command: lucarned_ctl::Command,
+) -> Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
+    let (file_config, update_config_warning) = load_ctl_update_config();
+    let update_config = update_config_from_file(&file_config);
+    let client = default_http_client()?;
+    lucarned_ctl::run_async(command, &client, update_config, update_config_warning)
+        .await
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err).into())
 }
 
 async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
@@ -167,9 +191,14 @@ async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
     let global_config_persistence = config_path.as_ref().map(|path| {
         Arc::new(YamlGlobalConfigPersistence::new(path.clone())) as Arc<dyn GlobalConfigPersistence>
     });
+    let http_client = default_http_client()?;
+    let system_notifications = SystemNotificationBus::new(32);
+    let update_config = update_config_from_file(&file_config);
+    let update_state_path = update_state_path();
+    let mut update_runtime =
+        UpdateRuntime::new(update_config, UpdateStateStore::new(update_state_path));
 
     let (mut adapter_supervisor, adapter_status_reader) = if enabled_adapter_count > 0 {
-        let http_client = default_http_client()?;
         lucarne::memory_profile_snapshot!("lucarned.main.before_supervise_enabled");
         let supervisor = registry
             .supervise_enabled(
@@ -177,7 +206,8 @@ async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
                     core: Arc::clone(&core),
                     config: Arc::clone(&config),
                     shutdown: shutdown_rx,
-                    http_client,
+                    http_client: http_client.clone(),
+                    system_notifications: system_notifications.clone(),
                     global_config_persistence: global_config_persistence.clone(),
                 },
                 AdapterSupervisorOptions::default(),
@@ -213,7 +243,13 @@ async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
     );
     lucarne::memory_profile_snapshot!("lucarned.main.before_wait");
 
-    let fatal_error = wait_for_shutdown_or_adapter_fatal(adapter_supervisor.as_mut()).await;
+    let fatal_error = wait_for_shutdown_or_adapter_fatal(
+        adapter_supervisor.as_mut(),
+        &mut update_runtime,
+        &http_client,
+        &system_notifications,
+    )
+    .await;
     if let Some(fatal) = fatal_error {
         let _ = shutdown_tx.send(true);
         return Err(format!("adapter {} fatal: {}", fatal.id, fatal.error).into());
@@ -272,23 +308,77 @@ fn init_tracing(file_config: &LucarnedFileConfig) -> Result<(), Box<dyn std::err
 }
 
 async fn wait_for_shutdown_or_adapter_fatal(
-    adapter_supervisor: Option<&mut AdapterSupervisorHandle>,
+    mut adapter_supervisor: Option<&mut AdapterSupervisorHandle>,
+    update_runtime: &mut UpdateRuntime,
+    http_client: &reqwest::Client,
+    system_notifications: &SystemNotificationBus,
 ) -> Option<lucarne_adapter::AdapterFatal> {
-    if let Some(adapter_supervisor) = adapter_supervisor {
-        tokio::select! {
-            fatal = adapter_supervisor.next_fatal() => fatal,
-            signal = tokio::signal::ctrl_c() => {
-                if let Err(err) = signal {
-                    warn!(error = %err, "failed to wait for ctrl-c signal; shutting down");
+    loop {
+        if let Some(adapter_supervisor) = adapter_supervisor.as_deref_mut() {
+            tokio::select! {
+                fatal = adapter_supervisor.next_fatal() => return fatal,
+                signal = tokio::signal::ctrl_c() => {
+                    if let Err(err) = signal {
+                        warn!(error = %err, "failed to wait for ctrl-c signal; shutting down");
+                    }
+                    return None;
                 }
-                None
+                tick = update_runtime.next_tick(http_client, env!("CARGO_PKG_VERSION")), if update_runtime.enabled() => {
+                    handle_update_runtime_tick(system_notifications, update_runtime, tick);
+                }
+            }
+        } else {
+            tokio::select! {
+                signal = tokio::signal::ctrl_c() => {
+                    if let Err(err) = signal {
+                        warn!(error = %err, "failed to wait for ctrl-c signal; shutting down");
+                    }
+                    return None;
+                }
+                tick = update_runtime.next_tick(http_client, env!("CARGO_PKG_VERSION")), if update_runtime.enabled() => {
+                    handle_update_runtime_tick(system_notifications, update_runtime, tick);
+                }
             }
         }
-    } else {
-        if let Err(err) = tokio::signal::ctrl_c().await {
-            warn!(error = %err, "failed to wait for ctrl-c signal; shutting down");
+    }
+}
+
+fn handle_update_runtime_tick(
+    system_notifications: &SystemNotificationBus,
+    update_runtime: &UpdateRuntime,
+    tick: lucarned_ctl::updates::UpdateRuntimeTick,
+) {
+    for warning in tick.warnings {
+        warn!(message = %warning, "update check warning");
+    }
+    send_update_system_notification(system_notifications, update_runtime, tick.notice);
+}
+
+fn send_update_system_notification(
+    system_notifications: &SystemNotificationBus,
+    update_runtime: &UpdateRuntime,
+    notice: Option<UpdateNotice>,
+) {
+    if let Some(notice) = notice {
+        let notification = SystemNotification::UpdateAvailable(SystemUpdateNotification {
+            current_version: notice.current_version.clone(),
+            latest_version: notice.latest_version.clone(),
+            release_name: notice.release_name.clone(),
+            release_url: notice.release_url.clone(),
+            published_at: notice.published_at.clone(),
+            body_markdown: notice.body_markdown.clone(),
+            install_hint: notice.install_hint.clone(),
+        });
+        let receivers = system_notifications.send(notification);
+        if receivers > 0 {
+            update_runtime.record_notice_delivered(&notice);
+            info!(receivers, "sent update system notification");
+        } else {
+            warn!(
+                latest_version = %notice.latest_version,
+                "update notification skipped because no adapters were subscribed"
+            );
         }
-        None
     }
 }
 
@@ -322,6 +412,8 @@ struct LucarnedFileConfig {
     #[serde(default)]
     health: HealthFileConfig,
     #[serde(default)]
+    updates: UpdateFileConfig,
+    #[serde(default)]
     turn: TurnFileConfig,
     #[serde(default)]
     session: SessionFileConfig,
@@ -348,6 +440,15 @@ struct LoggingFileConfig {
 struct HealthFileConfig {
     enabled: Option<bool>,
     addr: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct UpdateFileConfig {
+    enabled: Option<bool>,
+    notify: Option<bool>,
+    check_interval_hours: Option<u64>,
+    remind_interval_hours: Option<u64>,
+    repository: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -455,6 +556,64 @@ fn core_options_from_config(
 
 fn env_secs(name: &str) -> Option<u64> {
     std::env::var(name).ok()?.parse().ok()
+}
+
+fn update_config_from_file(config: &LucarnedFileConfig) -> lucarned_ctl::updates::UpdateConfig {
+    update_config_from_file_with_env(config, |name| std::env::var(name).ok())
+}
+
+fn update_state_path() -> PathBuf {
+    default_lucarned_home_dir()
+        .map(|home| home.join("update-state.json"))
+        .unwrap_or_else(|| PathBuf::from("update-state.json"))
+}
+
+fn update_config_from_file_with_env<F>(
+    config: &LucarnedFileConfig,
+    env: F,
+) -> lucarned_ctl::updates::UpdateConfig
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let defaults = lucarned_ctl::updates::UpdateConfig::default();
+    lucarned_ctl::updates::UpdateConfig {
+        enabled: env_bool(&env, "LUCARNED_UPDATES_ENABLED")
+            .or(config.updates.enabled)
+            .unwrap_or(defaults.enabled),
+        notify: env_bool(&env, "LUCARNED_UPDATES_NOTIFY")
+            .or(config.updates.notify)
+            .unwrap_or(defaults.notify),
+        check_interval: env_hours(&env, "LUCARNED_UPDATES_CHECK_INTERVAL_HOURS")
+            .or(config.updates.check_interval_hours)
+            .map(hours_to_duration)
+            .unwrap_or(defaults.check_interval),
+        remind_interval: env_hours(&env, "LUCARNED_UPDATES_REMIND_INTERVAL_HOURS")
+            .or(config.updates.remind_interval_hours)
+            .map(hours_to_duration)
+            .unwrap_or(defaults.remind_interval),
+        repository: env("LUCARNED_UPDATES_REPOSITORY")
+            .or_else(|| config.updates.repository.clone())
+            .unwrap_or(defaults.repository),
+        startup_delay: defaults.startup_delay,
+    }
+}
+
+fn env_bool<F>(env: &F, name: &str) -> Option<bool>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    env(name).as_deref().and_then(parse_bool)
+}
+
+fn env_hours<F>(env: &F, name: &str) -> Option<u64>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    env(name)?.parse().ok()
+}
+
+fn hours_to_duration(hours: u64) -> Duration {
+    Duration::from_secs(hours.max(1).saturating_mul(60 * 60))
 }
 
 fn validate_core_options(options: &CoreOptions) -> Result<(), Box<dyn std::error::Error>> {
@@ -654,6 +813,30 @@ fn resolve_config_path() -> Result<Option<PathBuf>, Box<dyn std::error::Error>> 
     let path = default_config_path_in(&home);
     ensure_default_config_file(&path)?;
     Ok(Some(path))
+}
+
+fn load_ctl_update_config() -> (LucarnedFileConfig, Option<String>) {
+    let Some(path) = existing_config_path_for_ctl_command() else {
+        return (LucarnedFileConfig::default(), None);
+    };
+    match LucarnedFileConfig::from_path_opt(Some(&path)) {
+        Ok(config) => (config, None),
+        Err(err) => (
+            LucarnedFileConfig::default(),
+            Some(format!(
+                "{} could not be read as lucarned config: {err}",
+                path.display()
+            )),
+        ),
+    }
+}
+
+fn existing_config_path_for_ctl_command() -> Option<PathBuf> {
+    explicit_config_path().or_else(|| {
+        default_lucarned_home_dir()
+            .map(|home| default_config_path_in(&home))
+            .filter(|path| path.exists())
+    })
 }
 
 fn explicit_config_path() -> Option<PathBuf> {
@@ -1023,6 +1206,9 @@ mod tests {
         assert!(raw.contains("global:"));
         assert!(raw.contains("bypass: false"));
         assert!(raw.contains("notifications: true"));
+        assert!(raw.contains("updates:"));
+        assert!(raw.contains("check_interval_hours: 24"));
+        assert!(raw.contains("repository: tuchg/Lucarne"));
         assert!(raw.contains("agents:"));
         assert!(raw.contains("  - claude"));
         assert!(raw.contains("  - codex"));
@@ -1066,6 +1252,14 @@ mod tests {
         assert_eq!(
             daemon_config.runtime_config.global.notifications,
             Some(true)
+        );
+        assert_eq!(daemon_config.updates.enabled, Some(true));
+        assert_eq!(daemon_config.updates.notify, Some(true));
+        assert_eq!(daemon_config.updates.check_interval_hours, Some(24));
+        assert_eq!(daemon_config.updates.remind_interval_hours, Some(24));
+        assert_eq!(
+            daemon_config.updates.repository.as_deref(),
+            Some("tuchg/Lucarne")
         );
 
         let adapter_config =
@@ -1128,6 +1322,60 @@ health:
         assert_eq!(config.logging.buffered_lines, Some(64));
         assert_eq!(config.health.enabled, Some(true));
         assert_eq!(config.health.addr.as_deref(), Some("127.0.0.1:7766"));
+    }
+
+    #[test]
+    fn lucarned_file_config_parses_update_settings() {
+        let config = LucarnedFileConfig::from_yaml_str(
+            r#"
+updates:
+  enabled: false
+  notify: false
+  check_interval_hours: 6
+  remind_interval_hours: 12
+  repository: owner/project
+"#,
+        )
+        .expect("parse lucarned update config");
+
+        assert_eq!(config.updates.enabled, Some(false));
+        assert_eq!(config.updates.notify, Some(false));
+        assert_eq!(config.updates.check_interval_hours, Some(6));
+        assert_eq!(config.updates.remind_interval_hours, Some(12));
+        assert_eq!(config.updates.repository.as_deref(), Some("owner/project"));
+    }
+
+    #[test]
+    fn update_config_defaults_clamps_hours_and_honors_env_overrides() {
+        let defaults = update_config_from_file_with_env(&LucarnedFileConfig::default(), |_| None);
+        assert!(defaults.enabled);
+        assert!(defaults.notify);
+        assert_eq!(defaults.check_interval, Duration::from_secs(24 * 60 * 60));
+        assert_eq!(defaults.remind_interval, Duration::from_secs(24 * 60 * 60));
+        assert_eq!(defaults.repository, "tuchg/Lucarne");
+
+        let config = LucarnedFileConfig::from_yaml_str(
+            r#"
+updates:
+  enabled: false
+  notify: false
+  check_interval_hours: 0
+  remind_interval_hours: 2
+  repository: file/repo
+"#,
+        )
+        .expect("parse update config");
+        let resolved = update_config_from_file_with_env(&config, |name| match name {
+            "LUCARNED_UPDATES_ENABLED" => Some("true".to_string()),
+            "LUCARNED_UPDATES_REPOSITORY" => Some("env/repo".to_string()),
+            _ => None,
+        });
+
+        assert!(resolved.enabled);
+        assert!(!resolved.notify);
+        assert_eq!(resolved.check_interval, Duration::from_secs(60 * 60));
+        assert_eq!(resolved.remind_interval, Duration::from_secs(2 * 60 * 60));
+        assert_eq!(resolved.repository, "env/repo");
     }
 
     #[tokio::test]
@@ -1498,19 +1746,51 @@ logging:
     fn daemon_exits_idle_before_opening_core_or_http_client() {
         let source = include_str!("main.rs");
         let production_source = source.split("#[cfg(test)]").next().unwrap_or(source);
-        let idle_exit = production_source
+        let run_daemon_source = production_source
+            .split("async fn run_daemon()")
+            .nth(1)
+            .and_then(|rest| rest.split("fn init_tracing").next())
+            .expect("run_daemon body");
+        let idle_exit = run_daemon_source
             .find("no adapters enabled; edit lucarned config to enable a channel")
             .expect("idle exit guidance log");
-        let open_sqlite = production_source
-            .find("LucarneCore::open_sqlite")
+        let open_core = run_daemon_source
+            .find("open_core_from_config")
             .expect("core open");
-        let http_client = production_source
+        let http_client = run_daemon_source
             .find("default_http_client()")
             .expect("http client creation");
 
-        assert!(production_source.contains("enabled_adapter_count == 0 && health_addr.is_none()"));
-        assert!(idle_exit < open_sqlite);
+        assert!(run_daemon_source.contains("enabled_adapter_count == 0 && health_addr.is_none()"));
+        assert!(idle_exit < open_core);
         assert!(idle_exit < http_client);
+    }
+
+    #[test]
+    fn daemon_creates_system_notification_bus_and_drives_update_runtime() {
+        let source = include_str!("main.rs");
+        let production_source = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let run_daemon_source = production_source
+            .split("async fn run_daemon()")
+            .nth(1)
+            .and_then(|rest| rest.split("fn init_tracing").next())
+            .expect("run_daemon body");
+        let wait_source = production_source
+            .split("async fn wait_for_shutdown_or_adapter_fatal")
+            .nth(1)
+            .and_then(|rest| rest.split("fn register_if_enabled").next())
+            .expect("wait loop body");
+
+        assert!(run_daemon_source.contains("SystemNotificationBus::new(32)"));
+        assert!(run_daemon_source.contains("system_notifications.clone()"));
+        assert!(run_daemon_source.contains("UpdateRuntime::new"));
+        assert!(run_daemon_source.contains("UpdateStateStore::new(update_state_path)"));
+        assert!(run_daemon_source.contains("http_client.clone()"));
+        assert!(wait_source.contains("update_runtime.next_tick"));
+        assert!(wait_source.contains("SystemNotification::UpdateAvailable"));
+        assert!(wait_source.contains("system_notifications.send"));
+        assert!(wait_source.contains("sent update system notification"));
+        assert!(!wait_source.contains("tokio::spawn"));
     }
 
     #[test]
