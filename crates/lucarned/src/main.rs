@@ -5,7 +5,6 @@ use std::{
     time::Duration,
 };
 
-use clap::{Parser, Subcommand};
 use lucarne::{default_lucarned_home_dir, default_state_db_path, CoreOptions, LucarneCore};
 use lucarne_adapter::{
     default_http_client, AdapterConfig, AdapterContext, AdapterError, AdapterPlugin,
@@ -32,19 +31,6 @@ mod onboarding;
 const DEFAULT_LOG_BUFFERED_LINES: usize = 1024;
 const DEFAULT_LOG_MAX_FILES: usize = 16;
 const DEFAULT_HEALTH_ADDR: &str = "127.0.0.1:7766";
-
-#[derive(Debug, Parser)]
-#[command(name = "lucarned", about = "lucarne daemon")]
-struct Cli {
-    #[command(subcommand)]
-    command: Option<LucarnedCommand>,
-}
-
-#[derive(Debug, Subcommand)]
-enum LucarnedCommand {
-    /// Configure lucarned interactively in a terminal.
-    Init,
-}
 
 const DEFAULT_LUCARNED_CONFIG: &str = r#"agents:
   - claude
@@ -123,10 +109,19 @@ fn default_lucarned_config() -> std::borrow::Cow<'static, str> {
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
-    match cli.command {
-        Some(LucarnedCommand::Init) => onboarding::run_interactive_init().await,
-        None => run_daemon().await,
+    let command = match lucarned_ctl::parse(std::env::args_os()) {
+        Ok(command) => command,
+        Err(err) => {
+            eprintln!("error: {}\n", err.message);
+            eprintln!("{}", lucarned_ctl::usage());
+            std::process::exit(2);
+        }
+    };
+    match command {
+        lucarned_ctl::Command::RunDaemon => run_daemon().await,
+        lucarned_ctl::Command::Init => onboarding::run_interactive_init().await,
+        command => lucarned_ctl::run(command)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err).into()),
     }
 }
 
@@ -909,21 +904,29 @@ mod tests {
 
     #[test]
     fn cli_parses_init_subcommand() {
-        let cli = Cli::try_parse_from(["lucarned", "init"]).expect("parse init cli");
-        assert!(matches!(cli.command, Some(LucarnedCommand::Init)));
+        let command = lucarned_ctl::parse([
+            std::ffi::OsString::from("lucarned"),
+            std::ffi::OsString::from("init"),
+        ])
+        .expect("parse init cli");
+        assert!(matches!(command, lucarned_ctl::Command::Init));
     }
 
     #[test]
     fn cli_defaults_to_daemon_without_subcommand() {
-        let cli = Cli::try_parse_from(["lucarned"]).expect("parse daemon cli");
-        assert!(cli.command.is_none());
+        let command =
+            lucarned_ctl::parse([std::ffi::OsString::from("lucarned")]).expect("parse daemon cli");
+        assert!(matches!(command, lucarned_ctl::Command::RunDaemon));
     }
 
     #[test]
     fn cli_rejects_unknown_subcommand() {
-        let err =
-            Cli::try_parse_from(["lucarned", "configure"]).expect_err("unknown command fails");
-        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
+        let err = lucarned_ctl::parse([
+            std::ffi::OsString::from("lucarned"),
+            std::ffi::OsString::from("configure"),
+        ])
+        .expect_err("unknown command fails");
+        assert_eq!(err.message, "unknown command: configure");
     }
 
     #[test]

@@ -8,6 +8,9 @@ license.workspace = true
 name = "lucarne-fakeagent"
 path = "src/main.rs"
 
+[package.metadata.dist]
+dist = false
+
 [dependencies]
 
 [target.'cfg(unix)'.dependencies]

@@ -182,6 +182,8 @@ mod tests {
 
     struct EnvGuard {
         home: Option<std::ffi::OsString>,
+        #[cfg(windows)]
+        local_app_data: Option<std::ffi::OsString>,
         lucarne_config: Option<std::ffi::OsString>,
         lucarned_config: Option<std::ffi::OsString>,
     }
@@ -190,10 +192,14 @@ mod tests {
         fn set_home_without_config(home: &std::path::Path) -> Self {
             let guard = Self {
                 home: std::env::var_os("HOME"),
+                #[cfg(windows)]
+                local_app_data: std::env::var_os("LOCALAPPDATA"),
                 lucarne_config: std::env::var_os("LUCARNE_CONFIG"),
                 lucarned_config: std::env::var_os("LUCARNED_CONFIG"),
             };
             std::env::set_var("HOME", home);
+            #[cfg(windows)]
+            std::env::set_var("LOCALAPPDATA", home);
             std::env::remove_var("LUCARNE_CONFIG");
             std::env::remove_var("LUCARNED_CONFIG");
             guard
@@ -203,6 +209,8 @@ mod tests {
     impl Drop for EnvGuard {
         fn drop(&mut self) {
             restore_env_var("HOME", self.home.take());
+            #[cfg(windows)]
+            restore_env_var("LOCALAPPDATA", self.local_app_data.take());
             restore_env_var("LUCARNE_CONFIG", self.lucarne_config.take());
             restore_env_var("LUCARNED_CONFIG", self.lucarned_config.take());
         }
@@ -229,6 +237,9 @@ mod tests {
         let _lock = env_lock().lock().expect("env lock");
         let temp = tempfile::tempdir().expect("temp home");
         let _env_guard = EnvGuard::set_home_without_config(temp.path());
+        #[cfg(windows)]
+        let expected_home = temp.path().join("lucarned");
+        #[cfg(not(windows))]
         let expected_home = temp.path().join(".lucarned");
         let expected_path = expected_home.join("lucarned.yaml");
 
