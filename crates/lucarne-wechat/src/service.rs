@@ -2610,9 +2610,9 @@ fn render_agent_message(
     if let Some(cost) = cost.as_deref().or(extracted_cost) {
         footer_lines.push(format!("耗时：{cost}"));
     }
-    footer_lines.push(format!("会话：`{session_ref}`"));
+    footer_lines.push(format!("会话：{session_ref}"));
     footer_lines.push(format!(
-        "目录：`{}`",
+        "目录：{}",
         compact_path(&workspace.project_path.display().to_string(), 58)
     ));
     let text = text.trim();
@@ -2850,11 +2850,11 @@ fn render_wechat_agent_resource_snapshot(snapshot: &AgentResourceSnapshot) -> St
 }
 
 fn begin_wechat_markdown_table(body: &mut String) {
-    body.push_str("```\n");
+    body.push_str("");
 }
 
 fn end_wechat_markdown_table(body: &mut String) {
-    body.push_str("```\n");
+    body.push_str("");
 }
 
 fn push_wechat_markdown_table_line(body: &mut String, line: &str) {
@@ -2968,8 +2968,7 @@ fn trim_number(value: f64, suffix: &str) -> String {
 }
 
 fn sent_quote_binding_id(text: &str) -> String {
-    let visible_text = wechat_ilink::filter_markdown(text);
-    quote_binding_id(&visible_text)
+    quote_binding_id(text)
 }
 
 fn visible_quote_binding_id(text: &str) -> String {
@@ -3110,15 +3109,18 @@ fn render_wechat_startup_help() -> String {
 
 fn render_wechat_help() -> &'static str {
     "📖 命令\n\
-/help — 显示帮助\n\
-/config — 查看全局配置\n\
-/config global bypass on|off — 开关全局权限绕过（参数保持使用 on/off）\n\
-/config global notifications on|off — 开关全局通知（参数保持使用 on/off）\n\
-/status — 查看全局状态；引用通知时查看该工作区状态\n\
-/new — 引用通知后开启该工作区的新会话\n\
-/kill all|<session_id:pid> — 终止 agent 进程\n\
-\n⚠️ 微信说明\n\
-微信主动通知有频率和会话时效限制。如果长时间没收到 agent 消息，可以随便发一条消息刷新会话。\n"
+\n\
+| 命令 | 说明 |\n\
+|---|---|\n\
+| `/help` | 显示帮助 |\n\
+| `/config` | 查看全局配置 |\n\
+| `/config global bypass on/off` | 开关全局权限绕过 |\n\
+| `/config global notifications on/off` | 开关全局通知 |\n\
+| `/status` | 查看全局状态；引用通知时查看该会话状态 |\n\
+| `/new` | 引用通知后开启该工作区的新会话 |\n\
+| `/kill all / <session_id:pid>` | 终止 agent 进程 |\n\
+\n⚠️\n\
+微信主动通知有频率和会话时效限制（可在配置文件配置）。如果长时间没收到 agent 消息，可以随便发一条消息刷新维持会话。\n"
 }
 
 #[cfg(test)]
@@ -3154,7 +3156,7 @@ mod tests {
 
         let body = render_agent_message("done", &workspace, "thread-1", None);
 
-        assert!(body.contains("目录：`…/opensource/conductor/lucarnex`"));
+        assert!(body.contains("目录：…/opensource/conductor/lucarnex"));
         assert!(!body.contains("/Volumes/Data"));
     }
 
@@ -3190,18 +3192,14 @@ mod tests {
         assert!(body.contains("thread-1"));
         assert!(body.contains("meme-strategy-me"));
 
-        assert!(body.contains("```\n| 指标 | 值 |"));
-        assert!(body.contains("```\n| 标题 | 提供方 | 会话 | 最近活跃 | 目录 |"));
-
-        let filtered = wechat_ilink::filter_markdown(&body);
-        assert!(!filtered.contains("```"));
-        assert!(filtered.contains("| 指标 | 值 |"));
-        assert!(filtered.contains("| 标题 | 提供方 | 会话 | 最近活跃 | 目录 |"));
-        assert!(filtered.contains("| real user title | codex | thread-1 |"));
+        assert!(!body.contains("```"));
+        assert!(body.contains("| 指标 | 值 |"));
+        assert!(body.contains("| 标题 | 提供方 | 会话 | 最近活跃 | 目录 |"));
+        assert!(body.contains("| real user title | codex | thread-1 |"));
     }
 
     fn compact_cwd_footer(path: &Path) -> String {
-        format!("目录：`{}`", compact_path(&path.display().to_string(), 58))
+        format!("目录：{}", compact_path(&path.display().to_string(), 58))
     }
 
     #[tokio::test]
@@ -3238,8 +3236,8 @@ mod tests {
         assert_eq!(sends.len(), 1);
         assert_eq!(sends[0].user_id, "user-1");
         assert!(sends[0].text.contains("background complete"));
-        assert!(sends[0].text.contains("会话：`thread-1`"));
-        assert!(sends[0].text.contains("目录：`/tmp/workspace-a`"));
+        assert!(sends[0].text.contains("会话：thread-1"));
+        assert!(sends[0].text.contains("目录：/tmp/workspace-a"));
         assert!(
             core.message_session_binding("wechat", "user-1", &sends[0].message_id)
                 .is_some(),
@@ -3274,7 +3272,7 @@ mod tests {
         assert!(
             replies[0]
                 .text
-                .contains(" ---\n\n耗时：0s\n会话：`thread-1`\n目录：`/tmp/workspace-a`"),
+                .contains(" ---\n\n耗时：0s\n会话：thread-1\n目录：/tmp/workspace-a"),
             "assistant reply footer must keep cost/session/cwd in one shared block: {}",
             replies[0].text
         );
@@ -3914,7 +3912,7 @@ mod tests {
         assert_eq!(replies.len(), 2);
         assert_eq!(replies[1].reply_to_message_id, "user-reply-new");
         assert!(replies[1].text.contains("reply: hello new session"));
-        assert!(replies[1].text.contains("会话：`thread-2`"));
+        assert!(replies[1].text.contains("会话：thread-2"));
     }
 
     #[tokio::test]
@@ -4046,9 +4044,11 @@ mod tests {
         let replies = transport.replies();
         assert_eq!(replies.len(), 1);
         assert!(replies[0].text.contains("📖 命令"));
-        assert!(replies[0].text.contains("/config global bypass on|off"));
-        assert!(replies[0].text.contains("/status"));
-        assert!(replies[0].text.contains("/new"));
+        assert!(replies[0].text.contains("| 命令 | 说明 |"));
+        assert!(replies[0].text.contains("`/config global bypass on/off`"));
+        assert!(replies[0].text.contains("`/status`"));
+        assert!(replies[0].text.contains("`/new`"));
+        assert!(replies[0].text.contains("微信主动通知有频率和会话时效限制"));
         assert!(!replies[0].text.contains(WECHAT_REPLY_REQUIRED));
     }
 
@@ -4238,7 +4238,7 @@ mod tests {
         assert!(!replies[0].text.contains("working first"));
         assert!(
             replies[0].text.contains(
-                " ---\n\n耗时：0s\n会话：`thread-1`\n目录：`/tmp/workspace-turn-complete`"
+                " ---\n\n耗时：0s\n会话：thread-1\n目录：/tmp/workspace-turn-complete"
             ),
             "completed reply should keep cost/session/cwd in one shared block: {}",
             replies[0].text
@@ -4411,7 +4411,7 @@ mod tests {
                 user_id: "user-1".into(),
                 text: "please continue".into(),
                 quoted_message_id: None,
-                quoted_text: Some(wechat_ilink::filter_markdown(&sends[0].text)),
+                quoted_text: Some(sends[0].text.clone()),
                 sdk_message: None,
             })
             .await
@@ -4493,7 +4493,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn notification_reply_routes_by_quoted_text_after_wechat_strips_inline_code_markers() {
+    async fn notification_reply_routes_by_raw_quoted_text_with_inline_code_markers() {
         let provider = Arc::new(FakeProvider::default());
         let core = test_core(Arc::clone(&provider));
         core.open_workspace_with_events(OpenWorkspaceRequest {
@@ -4528,7 +4528,7 @@ mod tests {
                 user_id: "user-1".into(),
                 text: "please continue".into(),
                 quoted_message_id: None,
-                quoted_text: Some(wechat_ilink::filter_markdown(&sends[0].text)),
+                quoted_text: Some(sends[0].text.clone()),
                 sdk_message: None,
             })
             .await
@@ -4542,7 +4542,7 @@ mod tests {
     }
 
     #[test]
-    fn quote_binding_matches_real_wechat_quote_after_markdown_filtering() {
+    fn quote_binding_matches_raw_wechat_quote_with_markdown_filter_disabled() {
         let sent_body = r#"有 FSEvents，但 periodic scan 还不能删。
 
 原因是现在是“双层保障”：
@@ -4557,20 +4557,7 @@ mod tests {
 cost: 13s
 session: `019e027d-a5c5-78d0-baab-e6c70dc5d693`
 cwd: `/Volumes/Data/opensource/conductor/lucarnex`"#;
-        let quoted_text = r#"有 FSEvents，但 periodic scan 还不能删。
-
-原因是现在是“双层保障”：
-
-- FSEvents：负责 macOS 递归目录事件，能发现新目录/新文件，解决之前 kqueue 递归 fd 爆炸的问题。
-- periodic scan：兜底发现 FSEvents/notify 漏掉或启动竞态期间没覆盖到的 session 文件，也处理非 macOS、测试、根目录刚创建、provider 特殊布局这类情况。
-
-所以你看到的 discovering sessions in explicit roots 不是因为没有 FSEvents，而是 SessionWatcher::recv() 每 scan_interval=10s 超时后仍然跑一次 reconcile_startup_changes()。这在逻辑上是“watch 事件之外的兜底扫描”。
-
-现在真正不合理的是日志级别：每 10 秒、每 provider 打 DEBUG 太吵。应该把 Session::discover_in() 这条通用日志降到 trace，保留 scan summary 或出错日志在 debug/warn。这样不影响 FSEvents，也不丢兜底。
-
-cost: 13s
-session: 019e027d-a5c5-78d0-baab-e6c70dc5d693
-cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
+        let quoted_text = sent_body;
 
         let sent_id = sent_quote_binding_id(sent_body);
         assert_eq!(visible_quote_binding_id(quoted_text), sent_id);
@@ -4910,7 +4897,7 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
             transport.sends().iter().any(|send| {
                 send.user_id == "user-1"
                     && send.text.contains("👋 lucarned 已启动。")
-                    && send.text.contains("/help — 显示帮助")
+                    && send.text.contains("| `/help` | 显示帮助 |")
             })
         })
         .await;
@@ -4950,7 +4937,7 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
             transport.sends().iter().any(|send| {
                 send.user_id == "user-1"
                     && send.text.contains("👋 lucarned 已启动。")
-                    && send.text.contains("/help — 显示帮助")
+                    && send.text.contains("| `/help` | 显示帮助 |")
             })
         })
         .await;
@@ -5162,10 +5149,10 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
         assert_eq!(replies.len(), 2);
         assert_eq!(replies[0].reply_to_message_id, "user-reply-second");
         assert!(replies[0].text.contains("reply: reply to second"));
-        assert!(replies[0].text.contains("会话：`thread-2`"));
+        assert!(replies[0].text.contains("会话：thread-2"));
         assert_eq!(replies[1].reply_to_message_id, "user-reply-first");
         assert!(replies[1].text.contains("reply: reply to first"));
-        assert!(replies[1].text.contains("会话：`thread-1`"));
+        assert!(replies[1].text.contains("会话：thread-1"));
     }
 
     #[tokio::test]
@@ -6070,7 +6057,7 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
             transport.sends().iter().any(|send| {
                 send.user_id == "user-1"
                     && send.text.contains("wechat live watch complete")
-                    && send.text.contains("会话：`watch-thread-wechat`")
+                    && send.text.contains("会话：watch-thread-wechat")
                     && send.text.contains(compact_cwd_footer(&project).as_str())
             })
         })
@@ -6117,8 +6104,8 @@ cwd: /Volumes/Data/opensource/conductor/lucarnex"#;
         assert!(replies[0]
             .text
             .starts_with("💬 请引用一条 agent 通知后再回复，以继续对应会话。\n\n📖 命令"));
-        assert!(replies[0].text.contains("/help — 显示帮助"));
-        assert!(replies[0].text.contains("/config — 查看全局配置"));
+        assert!(replies[0].text.contains("| `/help` | 显示帮助 |"));
+        assert!(replies[0].text.contains("| `/config` | 查看全局配置 |"));
 
         provider.emit_assistant("thread-1", "later notification");
         service

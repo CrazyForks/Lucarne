@@ -90,7 +90,7 @@ impl Default for WechatConfig {
             bot_agent: None,
             ilink_app_id: None,
             route_tag: None,
-            markdown_filter: true,
+            markdown_filter: false,
             context_expiry_reminder: None,
             rate_limit: WechatRateLimitConfig {
                 interaction_prompt: None,
@@ -209,7 +209,7 @@ fn wechat_config_from_adapter_config(config: &AdapterConfig) -> WechatConfig {
         markdown_filter: config
             .get("LUCARNE_WECHAT_MARKDOWN_FILTER")
             .and_then(parse_bool)
-            .unwrap_or(true),
+            .unwrap_or(false),
         context_expiry_reminder: wechat_context_expiry_reminder_from_adapter_config(config),
         rate_limit: wechat_rate_limit_from_adapter_config(config),
         force_login: config
@@ -1076,6 +1076,7 @@ mod tests {
     fn wechat_config_default_keeps_rate_limit_prompt_disabled() {
         let config = WechatConfig::default();
 
+        assert!(!config.markdown_filter);
         assert_eq!(config.rate_limit.retry_after, Duration::from_secs(90));
         assert_eq!(config.rate_limit.max_retries, WECHAT_RATE_LIMIT_MAX_RETRIES);
         assert_eq!(
@@ -1151,7 +1152,7 @@ mod tests {
     fn config_parses_protocol_builder_options() {
         let config = AdapterConfig::from_env([
             ("LUCARNE_WECHAT_ILINK_APP_ID", "custom-app"),
-            ("LUCARNE_WECHAT_MARKDOWN_FILTER", "false"),
+            ("LUCARNE_WECHAT_MARKDOWN_FILTER", "true"),
             (
                 "LUCARNE_WECHAT_RATE_LIMIT_INTERACTION_PROMPT",
                 "请回复任意消息刷新微信窗口。",
@@ -1160,7 +1161,7 @@ mod tests {
 
         let config = wechat_config_from_adapter_config(&config);
         assert_eq!(config.ilink_app_id.as_deref(), Some("custom-app"));
-        assert!(!config.markdown_filter);
+        assert!(config.markdown_filter);
         assert_eq!(
             config.rate_limit.interaction_prompt.as_deref(),
             Some("请回复任意消息刷新微信窗口。")
