@@ -24,8 +24,8 @@ pub mod codex_prep;
 pub mod version;
 
 pub use codex_prep::{
-    codex_env_overrides, ensure_launch_cwd, merged_env_map, prepare_codex_start,
-    prepare_local_cli_start, resolve_command_for_launch,
+    ensure_launch_cwd, merged_env_map, prepare_codex_start, prepare_local_cli_start,
+    resolve_command_for_launch,
 };
 pub use version::probe_version;
 

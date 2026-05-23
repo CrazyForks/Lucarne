@@ -1,12 +1,12 @@
 use crate::adapter::ProtocolAdapter;
 #[cfg(feature = "claude")]
 use crate::adapters::claude;
+#[cfg(feature = "codex")]
+use crate::adapters::codex;
 #[cfg(feature = "gemini")]
 use crate::adapters::gemini;
 #[cfg(feature = "pi")]
 use crate::adapters::pi;
-#[cfg(feature = "codex")]
-use crate::adapters::{codex, codex_env_overrides};
 #[cfg(any(feature = "codex", feature = "gemini"))]
 use crate::adapters::{merged_env_map, resolve_command_for_launch};
 #[cfg(any(feature = "codex", feature = "gemini"))]
@@ -199,7 +199,7 @@ impl LiveProvider {
     ) -> Result<BTreeMap<String, String>, String> {
         match self.kind {
             #[cfg(feature = "codex")]
-            ProviderKind::Codex => Ok(codex_env_overrides(&BTreeMap::new())),
+            ProviderKind::Codex => Ok(BTreeMap::new()),
             #[cfg(feature = "claude")]
             ProviderKind::Claude => Ok(BTreeMap::new()),
             #[cfg(feature = "gemini")]
