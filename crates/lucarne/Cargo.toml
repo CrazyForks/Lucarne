@@ -36,8 +36,15 @@ chrono = { version = "0.4", default-features = false, features = ["std", "serde"
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true }
 
+# Keep child-process proxy discovery on the same OS proxy stack as
+# hyper-util/reqwest `system-proxy`. These are direct deps because Rust
+# crates cannot import transitive deps.
+[target.'cfg(target_os = "macos")'.dependencies]
+system-configuration = "0.7"
+
 [target.'cfg(windows)'.dependencies]
 rusqlite = { workspace = true, features = ["bundled"] }
+windows-registry = "0.6"
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Security",

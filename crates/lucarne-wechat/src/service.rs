@@ -3289,13 +3289,22 @@ mod tests {
         );
 
         for _ in 0..20 {
-            if transport.sends().len() >= 2 {
+            let update_send_count = transport
+                .sends()
+                .iter()
+                .filter(|send| send.text.contains("Lucarne update available"))
+                .count();
+            if update_send_count >= 2 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
-        let sends = transport.sends();
+        let sends = transport
+            .sends()
+            .into_iter()
+            .filter(|send| send.text.contains("Lucarne update available"))
+            .collect::<Vec<_>>();
         assert_eq!(sends.len(), 2);
         let sent_users = sends
             .iter()

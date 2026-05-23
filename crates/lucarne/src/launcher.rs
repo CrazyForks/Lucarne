@@ -14,8 +14,8 @@ use std::{
     path::PathBuf,
     process::Stdio,
     sync::{
-        Arc, Mutex as StdMutex,
         atomic::{AtomicBool, Ordering},
+        Arc, Mutex as StdMutex,
     },
     time::Duration,
 };
@@ -326,6 +326,8 @@ fn apply_env(cmd: &mut Command, extra: &BTreeMap<String, String>) {
             base.push((k.clone(), v.clone()));
         }
     }
+    crate::host::proxy_env::apply_missing_proxy_env(&mut base);
+
     // Default LANG
     if !base.iter().any(|(k, _)| k == "LANG") {
         base.push(("LANG".into(), "en_US.UTF-8".into()));
