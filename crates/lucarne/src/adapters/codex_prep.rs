@@ -22,8 +22,6 @@ use crate::{
     adapter::SessionParams,
     error::{LucarneError, Result},
 };
-#[cfg(target_os = "macos")]
-use std::process::Command;
 use std::{
     collections::BTreeMap,
     ffi::OsString,
@@ -67,15 +65,6 @@ pub fn prepare_codex_start(req: &SessionParams, binary: &str) -> Result<(Session
         "codex launch prepared"
     );
     Ok((req, resolved))
-}
-
-/// Return only the Codex-specific env overrides that should be layered
-/// onto the child process in addition to normal inheritance. Today that
-/// means filling in missing proxy env vars from macOS system proxy
-/// settings when the shell env omitted them.
-pub fn codex_env_overrides(extra: &BTreeMap<String, String>) -> BTreeMap<String, String> {
-    let merged = merged_env_map(extra);
-    codex_proxy_env_overrides_for_env(&merged)
 }
 
 // ——— CWD ————————————————————————————————————————————————————————————
@@ -328,7 +317,7 @@ pub fn normalize_path(p: &Path) -> PathBuf {
 // ——— Codex-specific managed CODEX_HOME ———————————————————————————————
 
 fn prepare_codex_env(
-    mut env: BTreeMap<String, String>,
+    env: BTreeMap<String, String>,
     explicit: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>> {
     if explicit_codex_home(explicit) {
@@ -336,122 +325,7 @@ fn prepare_codex_env(
             prepare_explicit_codex_home(h)?;
         }
     }
-    env.extend(codex_proxy_env_overrides_for_env(&env));
     Ok(env)
-}
-
-fn codex_proxy_env_overrides_for_env(env: &BTreeMap<String, String>) -> BTreeMap<String, String> {
-    let discovered = read_macos_proxy_env();
-    missing_proxy_overrides(env, &discovered)
-}
-
-fn missing_proxy_overrides(
-    env: &BTreeMap<String, String>,
-    discovered: &BTreeMap<String, String>,
-) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    for (upper, lower) in [
-        ("HTTP_PROXY", "http_proxy"),
-        ("HTTPS_PROXY", "https_proxy"),
-        ("ALL_PROXY", "all_proxy"),
-        ("NO_PROXY", "no_proxy"),
-    ] {
-        if env.contains_key(upper) || env.contains_key(lower) {
-            continue;
-        }
-        let Some(value) = discovered.get(upper) else {
-            continue;
-        };
-        out.insert(upper.to_string(), value.clone());
-        out.insert(lower.to_string(), value.clone());
-    }
-    out
-}
-
-#[cfg(target_os = "macos")]
-fn read_macos_proxy_env() -> BTreeMap<String, String> {
-    let Ok(output) = Command::new("scutil").arg("--proxy").output() else {
-        return BTreeMap::new();
-    };
-    if !output.status.success() {
-        return BTreeMap::new();
-    }
-    parse_scutil_proxy_output(&String::from_utf8_lossy(&output.stdout))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn read_macos_proxy_env() -> BTreeMap<String, String> {
-    BTreeMap::new()
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn parse_scutil_proxy_output(raw: &str) -> BTreeMap<String, String> {
-    let mut scalars = BTreeMap::new();
-    let mut exceptions = Vec::new();
-    let mut in_exceptions = false;
-    for line in raw.lines() {
-        let line = line.trim();
-        if line.is_empty() || line == "<dictionary> {" {
-            continue;
-        }
-        if line.starts_with("ExceptionsList : <array>") {
-            in_exceptions = true;
-            continue;
-        }
-        if in_exceptions {
-            if line == "}" {
-                in_exceptions = false;
-                continue;
-            }
-            if let Some((_, value)) = line.split_once(" : ") {
-                let value = value.trim();
-                if !value.is_empty() {
-                    exceptions.push(value.to_string());
-                }
-            }
-            continue;
-        }
-        if line == "}" {
-            continue;
-        }
-        if let Some((key, value)) = line.split_once(" : ") {
-            scalars.insert(key.trim().to_string(), value.trim().to_string());
-        }
-    }
-
-    let mut env = BTreeMap::new();
-    if let Some(proxy) = proxy_url(&scalars, "HTTPEnable", "HTTPProxy", "HTTPPort", "http") {
-        env.insert("HTTP_PROXY".into(), proxy);
-    }
-    if let Some(proxy) = proxy_url(&scalars, "HTTPSEnable", "HTTPSProxy", "HTTPSPort", "http") {
-        env.insert("HTTPS_PROXY".into(), proxy);
-    }
-    if let Some(proxy) = proxy_url(&scalars, "SOCKSEnable", "SOCKSProxy", "SOCKSPort", "socks5") {
-        env.insert("ALL_PROXY".into(), proxy);
-    }
-    if !exceptions.is_empty() {
-        env.insert("NO_PROXY".into(), exceptions.join(","));
-    }
-    env
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn proxy_url(
-    scalars: &BTreeMap<String, String>,
-    enable_key: &str,
-    host_key: &str,
-    port_key: &str,
-    scheme: &str,
-) -> Option<String> {
-    if scalars.get(enable_key).map(String::as_str) != Some("1") {
-        return None;
-    }
-    let host = scalars.get(host_key)?.trim();
-    let port = scalars.get(port_key)?.trim();
-    if host.is_empty() || port.is_empty() {
-        return None;
-    }
-    Some(format!("{scheme}://{host}:{port}"))
 }
 
 fn explicit_codex_home(extra: &BTreeMap<String, String>) -> bool {
@@ -677,77 +551,6 @@ mod tests {
         assert_eq!(
             normalize_path(Path::new("/a/./b/c/..")),
             PathBuf::from("/a/b")
-        );
-    }
-
-    #[test]
-    fn parse_scutil_proxy_output_extracts_proxy_env() {
-        let parsed = parse_scutil_proxy_output(
-            r#"
-<dictionary> {
-  ExceptionsList : <array> {
-    0 : localhost
-    1 : *.local
-  }
-  HTTPEnable : 1
-  HTTPPort : 6152
-  HTTPProxy : 127.0.0.1
-  HTTPSEnable : 1
-  HTTPSPort : 6152
-  HTTPSProxy : 127.0.0.1
-  SOCKSEnable : 1
-  SOCKSPort : 6153
-  SOCKSProxy : 127.0.0.1
-}
-"#,
-        );
-        assert_eq!(
-            parsed.get("HTTP_PROXY").map(String::as_str),
-            Some("http://127.0.0.1:6152")
-        );
-        assert_eq!(
-            parsed.get("HTTPS_PROXY").map(String::as_str),
-            Some("http://127.0.0.1:6152")
-        );
-        assert_eq!(
-            parsed.get("ALL_PROXY").map(String::as_str),
-            Some("socks5://127.0.0.1:6153")
-        );
-        assert_eq!(
-            parsed.get("NO_PROXY").map(String::as_str),
-            Some("localhost,*.local")
-        );
-    }
-
-    #[test]
-    fn missing_proxy_overrides_only_fills_absent_groups() {
-        let env = env_map(&[("HTTPS_PROXY", "http://custom:9443")]);
-        let discovered = env_map(&[
-            ("HTTP_PROXY", "http://127.0.0.1:6152"),
-            ("HTTPS_PROXY", "http://127.0.0.1:6152"),
-            ("ALL_PROXY", "socks5://127.0.0.1:6153"),
-            ("NO_PROXY", "localhost"),
-        ]);
-        let overrides = missing_proxy_overrides(&env, &discovered);
-        assert_eq!(
-            overrides.get("HTTP_PROXY").map(String::as_str),
-            Some("http://127.0.0.1:6152")
-        );
-        assert_eq!(
-            overrides.get("http_proxy").map(String::as_str),
-            Some("http://127.0.0.1:6152")
-        );
-        assert!(
-            !overrides.contains_key("HTTPS_PROXY"),
-            "explicit HTTPS proxy must win"
-        );
-        assert_eq!(
-            overrides.get("ALL_PROXY").map(String::as_str),
-            Some("socks5://127.0.0.1:6153")
-        );
-        assert_eq!(
-            overrides.get("NO_PROXY").map(String::as_str),
-            Some("localhost")
         );
     }
 }

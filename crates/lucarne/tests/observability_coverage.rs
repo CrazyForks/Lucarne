@@ -154,6 +154,7 @@ fn runtime_modules_have_structured_tracing_or_are_declared_pure() {
         "crates/lucarne/src/host/process/mod.rs",
         "crates/lucarne/src/host/process_table/mod.rs",
         "crates/lucarne/src/host/file_users/mod.rs",
+        "crates/lucarne/src/host/unix_tools.rs",
         "crates/lucarne/src/event/mod.rs",
         "crates/lucarne/src/event/command.rs",
         "crates/lucarne/src/event/core.rs",

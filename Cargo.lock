@@ -15,7 +15,7 @@ dependencies = [
 
 [[package]]
 name = "agent-sessions"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bytes",
  "criterion",
@@ -326,6 +326,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
  "windows-sys 0.48.0",
+]
+
+[[package]]
+name = "core-foundation"
+version = "0.9.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91e195e091a93c46f7102ec7818a2aa394e1e1771c3ab4825963fa03e45afb8f"
+dependencies = [
+ "core-foundation-sys",
+ "libc",
 ]
 
 [[package]]
@@ -967,9 +977,11 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "socket2",
+ "system-configuration",
  "tokio",
  "tower-service",
  "tracing",
+ "windows-registry",
 ]
 
 [[package]]
@@ -1337,7 +1349,7 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
 name = "lucarne"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "agent-sessions",
  "async-trait",
@@ -1362,7 +1374,7 @@ dependencies = [
 
 [[package]]
 name = "lucarne-adapter"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "lucarne",
@@ -1376,7 +1388,7 @@ dependencies = [
 
 [[package]]
 name = "lucarne-channel"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1389,7 +1401,7 @@ dependencies = [
 
 [[package]]
 name = "lucarne-fakeagent"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "nix",
  "windows-sys 0.61.2",
@@ -1397,7 +1409,7 @@ dependencies = [
 
 [[package]]
 name = "lucarne-telegram"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "agent-sessions",
  "async-trait",
@@ -1421,7 +1433,7 @@ dependencies = [
 
 [[package]]
 name = "lucarne-wechat"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "agent-sessions",
  "async-trait",
@@ -1445,7 +1457,7 @@ dependencies = [
 
 [[package]]
 name = "lucarned"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "dotenvy",
@@ -1467,7 +1479,7 @@ dependencies = [
 
 [[package]]
 name = "lucarned-ctl"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "reqwest",
  "semver",
@@ -2098,7 +2110,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7f4bc775c73d9a02cde8bf7b2ec4c9d12743edf609006c7facc23998404cd1d"
 dependencies = [
  "bitflags 2.11.1",
- "core-foundation",
+ "core-foundation 0.10.1",
  "core-foundation-sys",
  "libc",
  "security-framework-sys",
@@ -2347,6 +2359,27 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "system-configuration"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a13f3d0daba03132c0aa9767f98351b3488edc2c100cda2d2ec2b04f3d8d3c8b"
+dependencies = [
+ "bitflags 2.11.1",
+ "core-foundation 0.9.4",
+ "system-configuration-sys",
+]
+
+[[package]]
+name = "system-configuration-sys"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e1d1b10ced5ca923a1fcb8d03e96b8d3268065d724548c0211415ff6ac6bac4"
+dependencies = [
+ "core-foundation-sys",
+ "libc",
 ]
 
 [[package]]
@@ -3027,6 +3060,17 @@ name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+
+[[package]]
+name = "windows-registry"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "02752bf7fbdcce7f2a27a742f798510f3e5ad88dbe84871e5168e2120c3d5720"
+dependencies = [
+ "windows-link",
+ "windows-result",
+ "windows-strings",
+]
 
 [[package]]
 name = "windows-result"
