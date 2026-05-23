@@ -4,7 +4,7 @@ use std::path::Path;
 
 #[cfg(feature = "copilot")]
 use crate::InputMetadata;
-use crate::{ParseSelection, Result};
+use crate::{ParseSelection, Result, agent_session::SessionMeta};
 
 #[cfg(any(
     feature = "claude",
@@ -20,6 +20,7 @@ use super::{WatchEvent, WatchProvider, state::ProviderWatchState};
 pub(crate) struct ParsedWatchSession {
     pub(crate) session_id: Option<SmolStr>,
     pub(crate) cwd: Option<SmolStr>,
+    pub(crate) title: Option<SmolStr>,
     pub(crate) events: Box<[WatchEvent]>,
 }
 
@@ -37,9 +38,17 @@ pub(crate) trait ProviderWatchEvents: Sized {
     where
         R: BufRead;
 
-    fn parse_watch_metadata_reader<R>(path: &Path, reader: R) -> Result<ParsedWatchSession>
+    fn probe_watch_session_meta<R>(path: &Path, reader: R) -> Result<SessionMeta>
     where
         R: BufRead;
+
+    fn parse_watch_metadata_reader<R>(path: &Path, reader: R) -> Result<ParsedWatchSession>
+    where
+        R: BufRead,
+    {
+        let meta = Self::probe_watch_session_meta(path, reader)?;
+        Ok(parsed_watch_metadata(meta.session_id, meta.cwd, meta.title))
+    }
 
     fn supports_incremental_watch_events() -> bool {
         true
@@ -187,10 +196,12 @@ pub(super) fn parse_provider_metadata_reader(
 pub(crate) fn parsed_watch_metadata(
     session_id: Option<SmolStr>,
     cwd: Option<SmolStr>,
+    title: Option<SmolStr>,
 ) -> ParsedWatchSession {
     ParsedWatchSession {
         session_id,
         cwd,
+        title,
         events: Vec::new().into_boxed_slice(),
     }
 }

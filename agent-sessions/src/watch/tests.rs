@@ -56,8 +56,7 @@ fn write_large_codex_session_meta(path: &Path) {
         }
     })
     .to_string();
-    assert!(line.len() > 2 * 1024);
-    assert!(line.len() < (MAX_WATCH_METADATA_READ_BYTES * MAX_WATCH_METADATA_READ_CHUNKS) as usize);
+    assert!(line.len() > MAX_WATCH_METADATA_READ_BYTES as usize);
     fs::write(path, format!("{line}\n")).unwrap();
 }
 
@@ -146,7 +145,6 @@ fn watch_config_scan_interval_available_for_backward_compat() {
 #[test]
 fn watch_read_chunks_are_capped_at_two_kib() {
     assert_eq!(MAX_WATCH_METADATA_READ_BYTES, 2 * 1024);
-    assert_eq!(MAX_WATCH_METADATA_READ_CHUNKS, 16);
     assert_eq!(MAX_WATCH_READ_BYTES, MAX_WATCH_METADATA_READ_BYTES);
 }
 
@@ -172,7 +170,17 @@ fn watch_source_avoids_full_file_reads() {
     assert!(watch_source.contains("MAX_WATCH_METADATA_READ_BYTES"));
     assert!(
         watch_source.contains("fn metadata_reader"),
-        "watch metadata reads must stay bounded"
+        "watch metadata reads must stay chunked"
+    );
+    assert!(
+        watch_source.contains(
+            "BufReader::with_capacity(\n            MAX_WATCH_METADATA_READ_BYTES as usize"
+        ),
+        "watch metadata reader must use the same 2KiB chunk size as delta reads"
+    );
+    assert!(
+        !watch_source.contains("file.take(MAX_WATCH_METADATA_READ_BYTES"),
+        "watch metadata must stream chunks through provider parser, not truncate session metadata"
     );
     assert!(
         watch_source.contains("fn read_bounded_lookback"),
@@ -664,6 +672,7 @@ async fn emits_appended_codex_assistant_response_after_debounce() {
     assert_eq!(updates[0].session_id.as_deref(), Some("sess-watch"));
     assert_eq!(updates[0].cwd.as_deref(), Some("/tmp/project"));
     assert_eq!(updates[0].change, WatchChange::Updated);
+    assert_eq!(updates[0].title.as_deref(), Some("ping"));
     assert_eq!(updates[0].events.len(), 1);
     let event = &updates[0].events[0];
     assert!(matches!(
@@ -802,6 +811,7 @@ async fn created_codex_jsonl_emits_latest_complete_record_without_replaying_hist
     assert_eq!(updates[0].change, WatchChange::Created);
     assert_eq!(updates[0].session_id.as_deref(), Some("sess-watch"));
     assert_eq!(updates[0].cwd.as_deref(), Some("/tmp/project"));
+    assert_eq!(updates[0].title.as_deref(), Some("ping"));
     assert!(
         updates[0].events.iter().any(|event| {
             matches!(
@@ -836,7 +846,7 @@ async fn created_codex_jsonl_emits_latest_complete_record_without_replaying_hist
 
 #[cfg(feature = "codex")]
 #[tokio::test]
-async fn created_codex_jsonl_reads_large_session_meta() {
+async fn created_codex_jsonl_reads_large_session_meta_with_chunked_reader() {
     let temp = tempfile::tempdir().unwrap();
     let root = codex_root(temp.path());
     fs::create_dir_all(&root).unwrap();
@@ -856,6 +866,7 @@ async fn created_codex_jsonl_reads_large_session_meta() {
     assert_eq!(updates[0].change, WatchChange::Created);
     assert_eq!(updates[0].session_id.as_deref(), Some("sess-large-meta"));
     assert_eq!(updates[0].cwd.as_deref(), Some("/tmp/project"));
+    assert!(updates[0].title.is_none());
     assert!(updates[0].events.is_empty());
 }
 

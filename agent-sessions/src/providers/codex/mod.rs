@@ -149,6 +149,34 @@ impl Codex {
         }
     }
 
+    #[cfg(feature = "agent_session")]
+    pub(crate) fn probe_agent_session_meta_with_title<R>(
+        reader: R,
+    ) -> Result<Option<crate::agent_session::SessionMeta>>
+    where
+        R: BufRead,
+    {
+        let Some((meta, title)) = Self::probe_session_meta_with_title(reader)? else {
+            return Ok(None);
+        };
+        let models = meta
+            .model
+            .as_deref()
+            .map(crate::agent_session::SessionModelMeta::zero)
+            .into_iter()
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Ok(Some(crate::agent_session::SessionMeta {
+            session_id: crate::agent_session::smol_opt(meta.session_id),
+            cwd: meta.cwd,
+            title,
+            models,
+            created_at: crate::agent_session::smol_opt(meta.timestamp),
+            source_kind: Some("v1".into()),
+            ..crate::agent_session::SessionMeta::default()
+        }))
+    }
+
     pub fn probe_date_range_overlap<R>(
         mut reader: R,
         start_date: &str,

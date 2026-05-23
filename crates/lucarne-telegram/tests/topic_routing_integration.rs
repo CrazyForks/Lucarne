@@ -752,7 +752,7 @@ async fn journey_07_send_prompt_renders_reasoning_tool_calls_without_footer() {
     })
     .await;
     assert_eq!(final_answer.format, TextFormat::Markdown);
-    assert!(!final_answer.body.contains("\n\n=========="));
+    assert!(!final_answer.body.contains("\n\n---\n\n"));
     assert!(!final_answer.body.contains("session: `thread-1`"));
     assert!(!final_answer.body.contains("cwd: `/tmp/project-a`"));
     channel.close_events();
@@ -1206,14 +1206,14 @@ async fn watch_notification_topic_receives_agent_message_and_reply_routes_to_ses
     .await;
     let reply = eventually_topic_message(&channel, &notification.topic, |message| {
         message.body.contains("ok")
-            && message.body.contains("\n\n==========\ncost: ")
+            && message.body.contains("\n\n---\n\ncost: ")
             && message.format == TextFormat::Markdown
     })
     .await;
     assert_eq!(reply.format, TextFormat::Markdown);
     let footer = reply
         .body
-        .split_once("\n\n==========\ncost: ")
+        .split_once("\n\n---\n\ncost: ")
         .map(|(_, footer)| footer)
         .unwrap_or_else(|| {
             panic!(

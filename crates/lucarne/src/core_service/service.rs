@@ -1815,6 +1815,7 @@ impl LucarneCore {
 
         let provider_session_id = provider_session_id(entry.provider_id, resume_ref);
         let prompt_title = observed_prompt_title(&update.events);
+        let metadata_title = update.title.as_deref().and_then(compact_observed_title);
         let (last_active_unix, last_active_display) = observed_activity_time(&update.events);
         let fallback_title = workspace_title_from_history_entry(entry);
         let cwd = entry.cwd.as_deref().map(PathBuf::from);
@@ -1824,6 +1825,7 @@ impl LucarneCore {
             .write()
             .expect("observed session registry lock");
         let title = prompt_title
+            .or(metadata_title)
             .or_else(|| {
                 observed
                     .get(&provider_session_id)
@@ -3805,7 +3807,7 @@ fn history_entry_from_watch_update(
         session_id: session_id.to_string(),
         session_path: update.path.clone(),
         cwd: Some(cwd.to_string()),
-        summary: String::new(),
+        summary: update.title.as_deref().unwrap_or_default().to_string(),
         last_active_unix: 0,
         last_active_display: String::new(),
     })
@@ -4464,6 +4466,7 @@ mod tests {
             path: session_path,
             session_id: Some("phase-thread".into()),
             cwd: Some(project_path.to_str().expect("utf8 project").into()),
+            title: None,
             change: WatchChange::Updated,
             events: vec![WatchEvent::AssistantMessage(WatchAssistantMessage {
                 meta: WatchEventMeta {
@@ -4623,6 +4626,7 @@ mod tests {
             path: session_path,
             session_id: Some("attachment-thread".into()),
             cwd: Some(project_path.to_str().expect("utf8 project").into()),
+            title: None,
             change: WatchChange::Updated,
             events: vec![WatchEvent::Attachment(WatchAttachment {
                 meta: WatchEventMeta {
@@ -4798,6 +4802,48 @@ mod tests {
         let observed = core.observed_recent_sessions();
         assert_eq!(observed.len(), 1);
         assert_eq!(observed[0].title.as_str(), "codex - project");
+    }
+
+    #[tokio::test]
+    async fn history_watch_without_prompt_event_uses_watch_metadata_title() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let codex_home = temp.path().join("codex");
+        let project_path = temp.path().join("project");
+        fs::create_dir_all(&project_path).expect("project dir");
+        let unrelated_codex_home = temp.path().join("unrelated-codex");
+        let _env = EnvGuard::set(&[(
+            "CODEX_HOME",
+            unrelated_codex_home.as_os_str().to_os_string(),
+        )]);
+        let session_path = write_codex_history_session(
+            &codex_home,
+            "observed-title-thread",
+            project_path.to_str().expect("utf8 project"),
+            "2026-04-25T00:01:00.000Z",
+            "first request",
+        );
+        let runtime = Arc::new(AgentRuntime::new());
+        runtime.register_defaults();
+        let core = LucarneCore::from_runtime_and_store(
+            runtime,
+            ControlPlaneSqliteStore::open_in_memory().expect("store"),
+        )
+        .expect("core");
+
+        let mut update = codex_watch_update(
+            &session_path,
+            "observed-title-thread",
+            project_path.to_str().expect("utf8 project"),
+            "assistant received",
+        );
+        update.title = Some("first request".into());
+        core.handle_history_watch_update(update)
+            .expect("ingest completion watch update");
+
+        let observed = core.observed_recent_sessions();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].title.as_str(), "first request");
     }
 
     #[tokio::test]
@@ -5430,6 +5476,7 @@ mod tests {
             path: session_path,
             session_id: Some("live-thread".into()),
             cwd: Some(project_path.to_str().expect("utf8 project").into()),
+            title: None,
             change: WatchChange::Updated,
             events: vec![WatchEvent::AssistantMessage(WatchAssistantMessage {
                 meta: WatchEventMeta {
@@ -7358,6 +7405,7 @@ mod tests {
             path: path.to_path_buf(),
             session_id: Some(session_id.into()),
             cwd: Some(cwd.into()),
+            title: None,
             change: WatchChange::Updated,
             events: vec![WatchEvent::TurnCompleted(WatchTurnCompleted {
                 meta: WatchEventMeta {
@@ -7386,6 +7434,7 @@ mod tests {
             path: path.to_path_buf(),
             session_id: Some(session_id.into()),
             cwd: Some(cwd.into()),
+            title: None,
             change: WatchChange::Updated,
             events: vec![WatchEvent::UserMessage(WatchMessage {
                 meta: WatchEventMeta {
@@ -7410,6 +7459,7 @@ mod tests {
             path: path.to_path_buf(),
             session_id: Some(session_id.into()),
             cwd: Some(cwd.into()),
+            title: None,
             change: WatchChange::Updated,
             events: vec![WatchEvent::TurnFailed(WatchTurnFailed {
                 meta: WatchEventMeta {

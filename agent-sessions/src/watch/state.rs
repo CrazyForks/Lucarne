@@ -12,6 +12,7 @@ pub(super) struct FileSnapshot {
     pub(super) has_subscriber: bool,
     pub(super) session_id: Option<SmolStr>,
     pub(super) cwd: Option<SmolStr>,
+    pub(super) title: Option<SmolStr>,
     pub(super) watch_state: ProviderWatchState,
     pub(super) pending_partial: Vec<u8>,
 }

@@ -44,6 +44,7 @@ pub struct WatchUpdate {
     pub path: PathBuf,
     pub session_id: Option<SmolStr>,
     pub cwd: Option<SmolStr>,
+    pub title: Option<SmolStr>,
     pub change: WatchChange,
     pub events: Box<[WatchEvent]>,
     pub error: Option<SmolStr>,

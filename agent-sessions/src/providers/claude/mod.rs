@@ -44,6 +44,20 @@ impl Claude {
         Self::probe_session_meta_inner(reader, true)
     }
 
+    pub fn probe_agent_session_meta_with_title<R>(
+        reader: R,
+    ) -> Result<Option<crate::agent_session::SessionMeta>>
+    where
+        R: BufRead,
+    {
+        Ok(
+            Self::probe_session_meta_with_title(reader)?.map(|(mut meta, title)| {
+                meta.title = title;
+                meta
+            }),
+        )
+    }
+
     fn probe_session_meta_inner<R>(
         mut reader: R,
         want_title: bool,

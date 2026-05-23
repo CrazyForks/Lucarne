@@ -126,17 +126,15 @@ impl DiscoverableProvider for Claude {
         entries: &[AgentProviderSourceEntry],
     ) -> Result<SessionMeta> {
         let entry = entries.first().ok_or(Error::EmptyInput)?;
-        let probed = match entry.inline_data.as_ref() {
-            Some(data) => Claude::probe_session_meta_with_title(Cursor::new(data.as_ref()))?,
-            None => {
-                Claude::probe_session_meta_with_title(BufReader::new(File::open(&entry.path)?))?
-            }
-        };
-        let (mut meta, title) = probed.ok_or(Error::Detection {
+        match entry.inline_data.as_ref() {
+            Some(data) => Claude::probe_agent_session_meta_with_title(Cursor::new(data.as_ref())),
+            None => Claude::probe_agent_session_meta_with_title(BufReader::new(File::open(
+                &entry.path,
+            )?)),
+        }?
+        .ok_or(Error::Detection {
             agent: Claude::name(),
-        })?;
-        meta.title = title;
-        Ok(meta)
+        })
     }
 
     #[cfg(feature = "agent_session")]

@@ -126,7 +126,7 @@ impl DiscoverableProvider for super::Pi {
                 Error::Message(format!("failed to open {}: {}", entry.path.display(), err).into())
             })?;
             let reader = std::io::BufReader::new(file);
-            if let Some(meta) = Self::probe_session_meta(reader)? {
+            if let Some(meta) = Self::probe_agent_session_meta_with_title(reader)? {
                 return Ok(meta);
             }
         }

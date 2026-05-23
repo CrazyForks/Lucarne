@@ -7,7 +7,7 @@ use std::{
 
 use crate::agent::{AgentProviderSourceEntry, DiscoverableProvider};
 #[cfg(feature = "agent_session")]
-use crate::agent_session::{SessionMeta, SessionModelMeta};
+use crate::agent_session::SessionMeta;
 use crate::providers::AgentProviderSource;
 use crate::{Error, Result, codex::Codex};
 use tracing::trace;
@@ -100,29 +100,14 @@ impl DiscoverableProvider for Codex {
         entries: &[AgentProviderSourceEntry],
     ) -> Result<SessionMeta> {
         let entry = entries.first().ok_or(Error::EmptyInput)?;
-        let probed = match entry.inline_data.as_ref() {
-            Some(data) => Codex::probe_session_meta_with_title(Cursor::new(data.as_ref()))?,
-            None => Codex::probe_session_meta_with_title(BufReader::new(File::open(&entry.path)?))?,
-        }
+        match entry.inline_data.as_ref() {
+            Some(data) => Codex::probe_agent_session_meta_with_title(Cursor::new(data.as_ref())),
+            None => {
+                Codex::probe_agent_session_meta_with_title(BufReader::new(File::open(&entry.path)?))
+            }
+        }?
         .ok_or(Error::Detection {
             agent: Codex::name(),
-        })?;
-        let (meta, title) = probed;
-        let models = meta
-            .model
-            .as_deref()
-            .map(SessionModelMeta::zero)
-            .into_iter()
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        Ok(SessionMeta {
-            session_id: crate::agent_session::smol_opt(meta.session_id),
-            cwd: meta.cwd,
-            title,
-            models,
-            created_at: crate::agent_session::smol_opt(meta.timestamp),
-            source_kind: Some("v1".into()),
-            ..SessionMeta::default()
         })
     }
 

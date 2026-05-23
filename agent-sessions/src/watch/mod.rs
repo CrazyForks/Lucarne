@@ -62,7 +62,6 @@ use raw::RawWatchEvent;
 use state::{FileSnapshot, ProviderWatchState, drop_leading_partial_line, split_complete_lines};
 
 const MAX_WATCH_METADATA_READ_BYTES: u64 = 2 * 1024;
-const MAX_WATCH_METADATA_READ_CHUNKS: u64 = 16;
 const MAX_WATCH_READ_BYTES: u64 = MAX_WATCH_METADATA_READ_BYTES;
 
 pub struct SessionWatcher {
@@ -319,6 +318,7 @@ impl SessionWatcher {
                     path,
                     session_id: old.session_id,
                     cwd: old.cwd,
+                    title: old.title,
                     change: WatchChange::Deleted,
                     events: Vec::new().into_boxed_slice(),
                     error: None,
@@ -487,6 +487,7 @@ impl SessionWatcher {
                     path,
                     session_id: None,
                     cwd: None,
+                    title: None,
                     change: WatchChange::ParseError,
                     events: Vec::new().into_boxed_slice(),
                     error: Some(error.to_string().into()),
@@ -508,6 +509,7 @@ impl SessionWatcher {
                     has_subscriber: old.has_subscriber,
                     session_id: old.session_id,
                     cwd: old.cwd,
+                    title: old.title,
                     watch_state: old.watch_state,
                     pending_partial: Vec::new(),
                 },
@@ -530,6 +532,7 @@ impl SessionWatcher {
                     has_subscriber: old.has_subscriber,
                     session_id: old.session_id.clone(),
                     cwd: old.cwd.clone(),
+                    title: old.title.clone(),
                     watch_state: ProviderWatchState::default(),
                     pending_partial: Vec::new(),
                 },
@@ -547,6 +550,7 @@ impl SessionWatcher {
                 path,
                 session_id: old.session_id,
                 cwd: old.cwd,
+                title: old.title,
                 change: WatchChange::Truncated,
                 events: Vec::new().into_boxed_slice(),
                 error: None,
@@ -561,6 +565,7 @@ impl SessionWatcher {
                     has_subscriber: old.has_subscriber,
                     session_id: old.session_id,
                     cwd: old.cwd,
+                    title: old.title,
                     watch_state: old.watch_state,
                     pending_partial: old.pending_partial,
                 },
@@ -593,6 +598,7 @@ impl SessionWatcher {
                     has_subscriber,
                     session_id: None,
                     cwd: None,
+                    title: None,
                     watch_state: ProviderWatchState::default(),
                     pending_partial: Vec::new(),
                 },
@@ -609,6 +615,7 @@ impl SessionWatcher {
         if incremental {
             return match self.read_metadata(provider, &path) {
                 Ok(metadata) => {
+                    let metadata_title = metadata.title.clone();
                     let tail = match self.read_latest_jsonl_tail(&path, len) {
                         Ok(tail) => tail,
                         Err(error) => {
@@ -624,6 +631,7 @@ impl SessionWatcher {
                                 path,
                                 session_id: metadata.session_id,
                                 cwd: metadata.cwd,
+                                title: metadata.title,
                                 change: WatchChange::ParseError,
                                 events: Vec::new().into_boxed_slice(),
                                 error: Some(error.to_string().into()),
@@ -631,10 +639,11 @@ impl SessionWatcher {
                         }
                     };
                     let mut watch_state = ProviderWatchState::default();
-                    let (session_id, cwd, events) = if tail.complete.is_empty() {
+                    let (session_id, cwd, title, events) = if tail.complete.is_empty() {
                         (
                             metadata.session_id.clone(),
                             metadata.cwd.clone(),
+                            metadata_title.clone(),
                             Vec::new().into_boxed_slice(),
                         )
                     } else {
@@ -654,6 +663,7 @@ impl SessionWatcher {
                                 (
                                     metadata.session_id.clone().or(parsed.session_id),
                                     metadata.cwd.clone().or(parsed.cwd),
+                                    metadata_title.clone().or(parsed.title),
                                     events,
                                 )
                             }
@@ -670,6 +680,7 @@ impl SessionWatcher {
                                     path,
                                     session_id: metadata.session_id,
                                     cwd: metadata.cwd,
+                                    title: metadata.title,
                                     change: WatchChange::ParseError,
                                     events: Vec::new().into_boxed_slice(),
                                     error: Some(error.to_string().into()),
@@ -684,6 +695,7 @@ impl SessionWatcher {
                             has_subscriber,
                             session_id: session_id.clone(),
                             cwd: cwd.clone(),
+                            title: title.clone(),
                             watch_state,
                             pending_partial: tail.pending_partial,
                         },
@@ -700,6 +712,7 @@ impl SessionWatcher {
                         path,
                         session_id,
                         cwd,
+                        title,
                         change: WatchChange::Created,
                         events,
                         error: None,
@@ -718,6 +731,7 @@ impl SessionWatcher {
                         path,
                         session_id: None,
                         cwd: None,
+                        title: None,
                         change: WatchChange::ParseError,
                         events: Vec::new().into_boxed_slice(),
                         error: Some(error.to_string().into()),
@@ -732,6 +746,7 @@ impl SessionWatcher {
                 has_subscriber,
                 session_id: None,
                 cwd: None,
+                title: None,
                 watch_state: ProviderWatchState::default(),
                 pending_partial: Vec::new(),
             },
@@ -747,6 +762,7 @@ impl SessionWatcher {
             path,
             session_id: None,
             cwd: None,
+            title: None,
             change: WatchChange::Created,
             events: Vec::new().into_boxed_slice(),
             error: None,
@@ -768,6 +784,7 @@ impl SessionWatcher {
                     has_subscriber: false,
                     session_id: old.session_id,
                     cwd: old.cwd,
+                    title: old.title,
                     watch_state: old.watch_state,
                     pending_partial: Vec::new(),
                 },
@@ -794,6 +811,7 @@ impl SessionWatcher {
                             has_subscriber: old.has_subscriber,
                             session_id: old.session_id.clone(),
                             cwd: old.cwd.clone(),
+                            title: old.title.clone(),
                             watch_state: old.watch_state,
                             pending_partial,
                         },
@@ -815,20 +833,23 @@ impl SessionWatcher {
                             dedupe_provider_watch_events(provider, parsed.events, &mut watch_state);
                         let events =
                             normalize_provider_watch_events(provider, events, &mut watch_state);
-                        let (session_id, cwd) = match (old.session_id, old.cwd) {
-                            (Some(session_id), Some(cwd)) => (Some(session_id), Some(cwd)),
-                            (old_session_id, old_cwd) => {
-                                let metadata = self.read_metadata(provider, &path).ok();
-                                (
-                                    old_session_id.or(parsed.session_id).or_else(|| {
-                                        metadata.as_ref().and_then(|meta| meta.session_id.clone())
-                                    }),
-                                    old_cwd
-                                        .or(parsed.cwd)
-                                        .or_else(|| metadata.and_then(|meta| meta.cwd)),
-                                )
-                            }
+                        let metadata = if old.session_id.is_none() || old.cwd.is_none() {
+                            self.read_metadata(provider, &path).ok()
+                        } else {
+                            None
                         };
+                        let session_id = old
+                            .session_id
+                            .or(parsed.session_id)
+                            .or_else(|| metadata.as_ref().and_then(|meta| meta.session_id.clone()));
+                        let cwd = old
+                            .cwd
+                            .or(parsed.cwd)
+                            .or_else(|| metadata.as_ref().and_then(|meta| meta.cwd.clone()));
+                        let title = old
+                            .title
+                            .or(parsed.title)
+                            .or_else(|| metadata.as_ref().and_then(|meta| meta.title.clone()));
                         self.baselines.insert(
                             path.clone(),
                             FileSnapshot {
@@ -836,6 +857,7 @@ impl SessionWatcher {
                                 has_subscriber: old.has_subscriber,
                                 session_id: session_id.clone(),
                                 cwd: cwd.clone(),
+                                title: title.clone(),
                                 watch_state,
                                 pending_partial,
                             },
@@ -856,6 +878,7 @@ impl SessionWatcher {
                                 path,
                                 session_id,
                                 cwd,
+                                title,
                                 change: WatchChange::Updated,
                                 events,
                                 error: None,
@@ -875,6 +898,7 @@ impl SessionWatcher {
                             path,
                             session_id: old.session_id,
                             cwd: old.cwd,
+                            title: old.title,
                             change: WatchChange::ParseError,
                             events: Vec::new().into_boxed_slice(),
                             error: Some(error.to_string().into()),
@@ -895,6 +919,7 @@ impl SessionWatcher {
                     path,
                     session_id: old.session_id,
                     cwd: old.cwd,
+                    title: old.title,
                     change: WatchChange::ParseError,
                     events: Vec::new().into_boxed_slice(),
                     error: Some(error.to_string().into()),
@@ -1090,13 +1115,11 @@ impl SessionWatcher {
         Ok(bytes)
     }
 
-    fn metadata_reader(&self, path: &Path) -> std::io::Result<BufReader<std::io::Take<fs::File>>> {
-        let len = fs::metadata(path)?.len();
-        let max_len = len.min(MAX_WATCH_METADATA_READ_BYTES * MAX_WATCH_METADATA_READ_CHUNKS);
+    fn metadata_reader(&self, path: &Path) -> std::io::Result<BufReader<fs::File>> {
         let file = fs::File::open(path)?;
         Ok(BufReader::with_capacity(
             MAX_WATCH_METADATA_READ_BYTES as usize,
-            file.take(max_len),
+            file,
         ))
     }
 
@@ -1136,9 +1159,11 @@ impl SessionWatcher {
                     target: "agent_sessions::watch",
                     path = %path.display(),
                     len = metadata.len(),
-                    has_meta = initial
-                        .as_ref()
-                        .is_some_and(|snapshot| snapshot.session_id.is_some() || snapshot.cwd.is_some()),
+                    has_meta = initial.as_ref().is_some_and(|snapshot| {
+                            snapshot.session_id.is_some()
+                                || snapshot.cwd.is_some()
+                                || snapshot.title.is_some()
+                        }),
                     "baselined session file"
                 );
                 self.baselines.insert(
@@ -1148,6 +1173,7 @@ impl SessionWatcher {
                         has_subscriber: self.config.has_subscriber_for_path(&path),
                         session_id: None,
                         cwd: None,
+                        title: None,
                         watch_state: ProviderWatchState::default(),
                         pending_partial: Vec::new(),
                     }),
@@ -1312,6 +1338,7 @@ impl SessionWatcher {
                     has_subscriber,
                     session_id: None,
                     cwd: None,
+                    title: None,
                     watch_state: ProviderWatchState::default(),
                     pending_partial: Vec::new(),
                 });
@@ -1322,6 +1349,7 @@ impl SessionWatcher {
                 has_subscriber,
                 session_id: parsed.session_id,
                 cwd: parsed.cwd,
+                title: parsed.title,
                 watch_state: self.baseline_watch_state(provider, path),
                 pending_partial: self
                     .read_trailing_partial_jsonl(path, metadata.len())
@@ -1333,6 +1361,7 @@ impl SessionWatcher {
             has_subscriber,
             session_id: None,
             cwd: None,
+            title: None,
             watch_state: ProviderWatchState::default(),
             pending_partial: Vec::new(),
         })

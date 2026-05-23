@@ -903,25 +903,20 @@ impl crate::watch::provider::ProviderWatchEvents for crate::Claude {
         Ok(crate::watch::provider::ParsedWatchSession {
             session_id,
             cwd,
+            title: None,
             events: watch_events_from_claude_entries(&body.entries),
         })
     }
 
-    fn parse_watch_metadata_reader<R>(
+    fn probe_watch_session_meta<R>(
         _path: &std::path::Path,
         reader: R,
-    ) -> crate::Result<crate::watch::provider::ParsedWatchSession>
+    ) -> crate::Result<crate::agent_session::SessionMeta>
     where
         R: std::io::BufRead,
     {
-        let Some(meta) = crate::Claude::probe_session_meta(reader)? else {
-            return Err(crate::Error::Detection { agent: "claude" });
-        };
-        Ok(crate::watch::provider::parsed_watch_metadata(
-            meta.session_id
-                .map(|session_id| session_id.to_string().into()),
-            meta.cwd,
-        ))
+        crate::Claude::probe_agent_session_meta_with_title(reader)?
+            .ok_or(crate::Error::Detection { agent: "claude" })
     }
 
     fn needs_watch_state_seed() -> bool {

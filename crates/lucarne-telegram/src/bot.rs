@@ -11291,7 +11291,7 @@ done
             .expect("send split notification");
 
         let sent = channel.sent.lock().unwrap();
-        assert!(sent.iter().all(|msg| msg.body.contains("==========")
+        assert!(sent.iter().all(|msg| msg.body.contains("\n\n---\n\n")
             && msg.body.contains("session: `thread-split`")
             && msg.body.contains("cwd: `/tmp/project`")));
         drop(sent);
@@ -14690,7 +14690,7 @@ done
             .collect::<Vec<_>>();
         assert!(!turn_bodies.is_empty());
         assert!(
-            turn_bodies.iter().all(|body| !body.contains("==========")
+            turn_bodies.iter().all(|body| !body.contains("\n\n---\n\n")
                 && !body.contains("session:")
                 && !body.contains("cwd:")),
             "non-notification Telegram turn must not include agent footer: {turn_bodies:?}"

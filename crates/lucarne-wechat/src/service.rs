@@ -2621,7 +2621,7 @@ fn render_agent_message(
     } else if text.is_empty() {
         footer_lines.join("\n")
     } else {
-        format!("{}\n\n==========\n{}", text, footer_lines.join("\n"))
+        format!("{}\n\n ---\n\n{}", text, footer_lines.join("\n"))
     }
 }
 
@@ -2758,52 +2758,121 @@ fn render_wechat_workspace_status(
 }
 
 fn render_wechat_agent_resource_snapshot(snapshot: &AgentResourceSnapshot) -> String {
-    let mut body = format!(
-        "📊 agent 资源\n托管 agent：`{}`\n最近历史会话：`{}`\n实际进程：`{}`\nCPU：`{:.1}%`\n内存：`{}`",
-        snapshot.managed_agent_count,
-        snapshot.observed_sessions.len(),
-        snapshot.process_count,
-        snapshot.total_cpu_percent,
-        format_resource_bytes(snapshot.total_memory_bytes),
+    let mut body = "### 📊 Agent 资源\n\n".to_string();
+    begin_wechat_markdown_table(&mut body);
+    push_wechat_markdown_table_line(&mut body, "| 指标 | 值 |");
+    push_wechat_markdown_table_line(&mut body, "|---|---:|");
+    push_wechat_markdown_table_line(
+        &mut body,
+        &format!("| 托管 agent | {} |", snapshot.managed_agent_count),
     );
-    for agent in &snapshot.agents {
-        body.push_str("\n\n");
-        body.push_str(agent.identity.as_deref().unwrap_or("未识别"));
-        body.push('\n');
-        body.push_str(&format!(
-            "工作区：`{}`\n提供方：`{}`\n会话：`{}`\n最近活跃：`{}`\nPID：`{}`\n进程数：`{}`\nCPU：`{:.1}%`\n内存：`{}`",
-            agent.workspace_id.as_str(),
-            agent.provider_id,
-            agent.native_resume_ref,
-            non_empty_or_unknown(&agent.last_active_display),
-            agent
-                .pid
-                .map(|pid| pid.to_string())
-                .unwrap_or_else(|| "未知".to_string()),
-            agent.process_count,
-            agent.cpu_percent,
-            format_resource_bytes(agent.memory_bytes),
-        ));
-    }
-    if !snapshot.observed_sessions.is_empty() {
-        body.push_str("\n\n最近历史会话");
-        for session in &snapshot.observed_sessions {
-            body.push_str("\n\n");
-            body.push_str(session.title.as_ref());
-            body.push('\n');
-            body.push_str(&format!(
-                "工作区：`{}`\n提供方：`{}`\n会话：`{}`\n最近活跃：`{}`",
-                session.workspace_id.as_str(),
-                session.provider_id,
-                session.native_resume_ref,
-                non_empty_or_unknown(&session.last_active_display),
-            ));
-            if let Some(cwd) = session.cwd.as_ref() {
-                body.push_str(&format!("\n目录：`{}`", cwd.display()));
-            }
+    push_wechat_markdown_table_line(
+        &mut body,
+        &format!("| 最近历史会话 | {} |", snapshot.observed_sessions.len()),
+    );
+    push_wechat_markdown_table_line(
+        &mut body,
+        &format!("| 实际进程 | {} |", snapshot.process_count),
+    );
+    push_wechat_markdown_table_line(
+        &mut body,
+        &format!("| CPU | {:.1}% |", snapshot.total_cpu_percent),
+    );
+    push_wechat_markdown_table_line(
+        &mut body,
+        &format!(
+            "| 内存 | {} |",
+            wechat_table_cell(format_resource_bytes(snapshot.total_memory_bytes))
+        ),
+    );
+
+    end_wechat_markdown_table(&mut body);
+
+    if !snapshot.agents.is_empty() {
+        body.push_str("\n### 托管 agent\n\n");
+        begin_wechat_markdown_table(&mut body);
+        push_wechat_markdown_table_line(
+            &mut body,
+            "| 标题 | 工作区 | 提供方 | 会话 | PID | 进程 | CPU | 内存 | 最近活跃 |",
+        );
+        push_wechat_markdown_table_line(&mut body, "|---|---|---|---|---:|---:|---:|---:|---|");
+        for agent in &snapshot.agents {
+            push_wechat_markdown_table_line(
+                &mut body,
+                &format!(
+                    "| {} | {} | {} | {} | {} | {} | {:.1}% | {} | {} |",
+                    wechat_table_cell(agent.title.as_str()),
+                    wechat_table_cell(agent.workspace_id.as_str()),
+                    wechat_table_cell(agent.provider_id),
+                    wechat_table_cell(agent.native_resume_ref.as_str()),
+                    wechat_table_cell(
+                        agent
+                            .pid
+                            .map(|pid| pid.to_string())
+                            .unwrap_or_else(|| "未知".to_string()),
+                    ),
+                    agent.process_count,
+                    agent.cpu_percent,
+                    wechat_table_cell(format_resource_bytes(agent.memory_bytes)),
+                    wechat_table_cell(non_empty_or_unknown(&agent.last_active_display)),
+                ),
+            );
         }
+        end_wechat_markdown_table(&mut body);
+    }
+
+    if !snapshot.observed_sessions.is_empty() {
+        body.push_str("\n### 最近历史会话\n\n");
+        begin_wechat_markdown_table(&mut body);
+        push_wechat_markdown_table_line(&mut body, "| 标题 | 提供方 | 会话 | 最近活跃 | 目录 |");
+        push_wechat_markdown_table_line(&mut body, "|---|---|---|---|---|");
+        for session in &snapshot.observed_sessions {
+            let cwd = session
+                .cwd
+                .as_ref()
+                .map(|cwd| compact_path(&cwd.display().to_string(), 48))
+                .unwrap_or_else(|| "未知".to_string());
+            push_wechat_markdown_table_line(
+                &mut body,
+                &format!(
+                    "| {} | {} | {} | {} | {} |",
+                    wechat_table_cell(session.title.as_str()),
+                    wechat_table_cell(session.provider_id),
+                    wechat_table_cell(session.native_resume_ref.as_str()),
+                    wechat_table_cell(non_empty_or_unknown(&session.last_active_display)),
+                    wechat_table_cell(cwd),
+                ),
+            );
+        }
+        end_wechat_markdown_table(&mut body);
     }
     body
+}
+
+fn begin_wechat_markdown_table(body: &mut String) {
+    body.push_str("```\n");
+}
+
+fn end_wechat_markdown_table(body: &mut String) {
+    body.push_str("```\n");
+}
+
+fn push_wechat_markdown_table_line(body: &mut String, line: &str) {
+    body.push_str(line);
+    body.push('\n');
+}
+
+fn wechat_table_cell(value: impl AsRef<str>) -> String {
+    let value = value
+        .as_ref()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let value = value.trim();
+    if value.is_empty() {
+        return "未知".to_string();
+    }
+    value.replace('`', "\\`").replace('|', "\\|")
 }
 
 fn render_wechat_kill_agent_report(report: &KillAgentReport) -> String {
@@ -3089,6 +3158,48 @@ mod tests {
         assert!(!body.contains("/Volumes/Data"));
     }
 
+    #[test]
+    fn wechat_agent_resource_snapshot_uses_markdown_tables_for_observed_sessions() {
+        let snapshot = AgentResourceSnapshot {
+            managed_agent_count: 0,
+            process_count: 0,
+            total_cpu_percent: 0.0,
+            total_memory_bytes: 0,
+            agents: Vec::new(),
+            observed_sessions: vec![lucarne::core_service::ObservedAgentSession {
+                workspace_id: WorkspaceId::new("codex:resume:observed"),
+                provider_id: "codex",
+                provider_session_id: ProviderSessionId::new("codex:thread-1"),
+                native_resume_ref: "thread-1".into(),
+                title: "real user title".into(),
+                cwd: Some(PathBuf::from("/Volumes/Data/crypto/meme/meme-strategy-me")),
+                session_path: PathBuf::from("/tmp/rollout-thread-1.jsonl"),
+                last_active_unix: 1_776_960_000,
+                last_active_display: "05-23 15:50:34".into(),
+                observed_pid: None,
+            }],
+        };
+
+        let body = render_wechat_agent_resource_snapshot(&snapshot);
+
+        assert!(body.contains("### 📊 Agent 资源"));
+        assert!(body.contains("| 最近历史会话 | 1 |"));
+        assert!(body.contains("### 最近历史会话"));
+        assert!(body.contains("| 标题 | 提供方 | 会话 | 最近活跃 | 目录 |"));
+        assert!(body.contains("real user title"));
+        assert!(body.contains("thread-1"));
+        assert!(body.contains("meme-strategy-me"));
+
+        assert!(body.contains("```\n| 指标 | 值 |"));
+        assert!(body.contains("```\n| 标题 | 提供方 | 会话 | 最近活跃 | 目录 |"));
+
+        let filtered = wechat_ilink::filter_markdown(&body);
+        assert!(!filtered.contains("```"));
+        assert!(filtered.contains("| 指标 | 值 |"));
+        assert!(filtered.contains("| 标题 | 提供方 | 会话 | 最近活跃 | 目录 |"));
+        assert!(filtered.contains("| real user title | codex | thread-1 |"));
+    }
+
     fn compact_cwd_footer(path: &Path) -> String {
         format!("目录：`{}`", compact_path(&path.display().to_string(), 58))
     }
@@ -3163,7 +3274,7 @@ mod tests {
         assert!(
             replies[0]
                 .text
-                .contains("==========\n耗时：0s\n会话：`thread-1`\n目录：`/tmp/workspace-a`"),
+                .contains(" ---\n\n耗时：0s\n会话：`thread-1`\n目录：`/tmp/workspace-a`"),
             "assistant reply footer must keep cost/session/cwd in one shared block: {}",
             replies[0].text
         );
@@ -3580,11 +3691,14 @@ mod tests {
 
         let replies = transport.replies();
         assert_eq!(replies.len(), 1);
-        assert!(replies[0].text.contains("📊 agent 资源"));
-        assert!(replies[0].text.contains("托管 agent：`1`"));
+        assert!(replies[0].text.contains("📊 Agent 资源"));
+        assert!(replies[0].text.contains("| 托管 agent | 1 |"));
         assert!(replies[0]
             .text
-            .contains(&format!("thread-1:{}", std::process::id())));
+            .contains("| 标题 | 工作区 | 提供方 | 会话 | PID |"));
+        assert!(replies[0].text.contains("workspace-a"));
+        assert!(replies[0].text.contains("thread-1"));
+        assert!(replies[0].text.contains(&std::process::id().to_string()));
     }
 
     #[tokio::test]
@@ -3980,7 +4094,7 @@ mod tests {
             sends[0].text
         );
         assert!(
-            sends[0].text.contains("\n\n==========\n耗时：14s"),
+            sends[0].text.contains("\n\n ---\n\n耗时：14s"),
             "created Pi notification should use synthesized completion cost: {}",
             sends[0].text
         );
@@ -4124,7 +4238,7 @@ mod tests {
         assert!(!replies[0].text.contains("working first"));
         assert!(
             replies[0].text.contains(
-                "==========\n耗时：0s\n会话：`thread-1`\n目录：`/tmp/workspace-turn-complete`"
+                " ---\n\n耗时：0s\n会话：`thread-1`\n目录：`/tmp/workspace-turn-complete`"
             ),
             "completed reply should keep cost/session/cwd in one shared block: {}",
             replies[0].text

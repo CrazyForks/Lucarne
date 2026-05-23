@@ -595,25 +595,19 @@ impl crate::watch::provider::ProviderWatchEvents for super::Pi {
         Ok(crate::watch::provider::ParsedWatchSession {
             session_id,
             cwd,
+            title: None,
             events: watch_events_from_pi_entries(&body.entries, selection),
         })
     }
 
-    fn parse_watch_metadata_reader<R>(
+    fn probe_watch_session_meta<R>(
         _path: &std::path::Path,
         reader: R,
-    ) -> crate::Result<crate::watch::provider::ParsedWatchSession>
+    ) -> crate::Result<crate::agent_session::SessionMeta>
     where
         R: std::io::BufRead,
     {
-        let meta = super::Pi::probe_session_meta(reader)?;
-        let (session_id, cwd) = meta
-            .map(|meta| (meta.session_id, meta.cwd))
-            .unwrap_or((None, None));
-        Ok(crate::watch::provider::parsed_watch_metadata(
-            session_id.map(|session_id| session_id.to_string().into()),
-            cwd,
-        ))
+        Ok(super::Pi::probe_agent_session_meta_with_title(reader)?.unwrap_or_default())
     }
 
     fn needs_watch_state_seed() -> bool {

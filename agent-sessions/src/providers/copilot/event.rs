@@ -1332,14 +1332,15 @@ impl crate::watch::provider::ProviderWatchEvents for crate::Copilot {
         Ok(crate::watch::provider::ParsedWatchSession {
             session_id,
             cwd,
+            title: None,
             events,
         })
     }
 
-    fn parse_watch_metadata_reader<R>(
+    fn probe_watch_session_meta<R>(
         path: &std::path::Path,
         reader: R,
-    ) -> crate::Result<crate::watch::provider::ParsedWatchSession>
+    ) -> crate::Result<crate::agent_session::SessionMeta>
     where
         R: std::io::BufRead,
     {
@@ -1361,9 +1362,11 @@ impl crate::watch::provider::ProviderWatchEvents for crate::Copilot {
             ),
             super::Body::ChatSession(body) => (body.session_id, None),
         };
-        Ok(crate::watch::provider::parsed_watch_metadata(
-            session_id, cwd,
-        ))
+        Ok(crate::agent_session::SessionMeta {
+            session_id,
+            cwd,
+            ..crate::agent_session::SessionMeta::default()
+        })
     }
 
     fn needs_watch_state_seed() -> bool {

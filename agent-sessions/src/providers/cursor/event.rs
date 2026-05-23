@@ -187,14 +187,15 @@ impl crate::watch::provider::ProviderWatchEvents for crate::Cursor {
         Ok(crate::watch::provider::ParsedWatchSession {
             session_id: body.session_id,
             cwd: None,
+            title: None,
             events: watch_events_from_cursor_entries(body.entries),
         })
     }
 
-    fn parse_watch_metadata_reader<R>(
+    fn probe_watch_session_meta<R>(
         path: &std::path::Path,
         reader: R,
-    ) -> crate::Result<crate::watch::provider::ParsedWatchSession>
+    ) -> crate::Result<crate::agent_session::SessionMeta>
     where
         R: std::io::BufRead,
     {
@@ -203,10 +204,10 @@ impl crate::watch::provider::ProviderWatchEvents for crate::Cursor {
             super::cursor_session_id_from_name(path.file_name().and_then(|name| name.to_str())),
             crate::ParseSelection::meta_only(),
         )?;
-        Ok(crate::watch::provider::parsed_watch_metadata(
-            body.session_id,
-            None,
-        ))
+        Ok(crate::agent_session::SessionMeta {
+            session_id: body.session_id,
+            ..crate::agent_session::SessionMeta::default()
+        })
     }
 
     fn needs_watch_state_seed() -> bool {

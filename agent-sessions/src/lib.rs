@@ -51,7 +51,8 @@ mod parse_selection;
         feature = "codex",
         feature = "copilot",
         feature = "cursor",
-        feature = "gemini"
+        feature = "gemini",
+        feature = "pi"
     )
 ))]
 mod paths;

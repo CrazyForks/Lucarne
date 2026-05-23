@@ -347,7 +347,18 @@ fn finish_pi_body(session_id: Option<SmolStr>, entries: Vec<Entry>) -> Result<Bo
 
 #[cfg(feature = "agent_session")]
 impl Pi {
-    pub fn probe_session_meta<R>(mut reader: R) -> Result<Option<crate::agent_session::SessionMeta>>
+    pub fn probe_agent_session_meta_with_title<R>(
+        reader: R,
+    ) -> Result<Option<crate::agent_session::SessionMeta>>
+    where
+        R: BufRead,
+    {
+        Self::probe_session_meta_with_title(reader)
+    }
+
+    pub fn probe_session_meta_with_title<R>(
+        mut reader: R,
+    ) -> Result<Option<crate::agent_session::SessionMeta>>
     where
         R: BufRead,
     {
@@ -625,7 +636,7 @@ mod tests {
     }
 
     #[test]
-    fn probe_session_meta_uses_first_post_parent_session_user_text_as_title() {
+    fn probe_session_meta_with_title_uses_first_post_parent_session_user_text_as_title() {
         let mut lines = vec![
             r#"{"type":"session","version":3,"id":"child","timestamp":"2026-05-11T00:49:47.936Z","cwd":"/tmp/project","parentSession":"/tmp/parent.jsonl"}"#,
             r#"{"type":"message","id":"old","timestamp":"2026-05-10T11:59:25.404Z","message":{"role":"user","content":[{"type":"text","text":"review下项目架构 看看除了agent session还有哪里需要统一抽象的"}]}}"#,
@@ -641,7 +652,7 @@ mod tests {
         );
         let bytes = lines.join("\n");
 
-        let meta = super::Pi::probe_session_meta(Cursor::new(bytes.as_bytes()))
+        let meta = super::Pi::probe_session_meta_with_title(Cursor::new(bytes.as_bytes()))
             .unwrap()
             .expect("expected session meta");
 
@@ -654,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn probe_session_meta_scans_full_inherited_parent_lines_for_title() {
+    fn probe_session_meta_with_title_scans_full_inherited_parent_lines_for_title() {
         let mut lines = vec![
             r#"{"type":"session","version":3,"id":"child","timestamp":"2026-05-11T00:49:47.936Z","cwd":"/tmp/project","parentSession":"/tmp/parent.jsonl"}"#.to_string(),
         ];
@@ -668,7 +679,7 @@ mod tests {
         );
         lines.push("not-json-after-title".into());
 
-        let meta = super::Pi::probe_session_meta(Cursor::new(lines.join("\n")))
+        let meta = super::Pi::probe_session_meta_with_title(Cursor::new(lines.join("\n")))
             .expect("poison after title must not be read")
             .expect("expected session meta");
 
@@ -682,7 +693,7 @@ mod tests {
     }
 
     #[test]
-    fn probe_session_meta_uses_first_user_without_parent_session() {
+    fn probe_session_meta_with_title_uses_first_user_without_parent_session() {
         let bytes = [
             r#"{"type":"session","version":3,"id":"plain","timestamp":"2026-05-11T00:49:47.936Z","cwd":"/tmp/project"}"#,
             r#"{"type":"message","id":"old","timestamp":"2026-05-10T11:59:25.404Z","message":{"role":"user","content":[{"type":"text","text":"plain first user title"}]}}"#,
@@ -690,7 +701,7 @@ mod tests {
         ]
         .join("\n");
 
-        let meta = super::Pi::probe_session_meta(Cursor::new(bytes.as_bytes()))
+        let meta = super::Pi::probe_session_meta_with_title(Cursor::new(bytes.as_bytes()))
             .unwrap()
             .expect("expected session meta");
 

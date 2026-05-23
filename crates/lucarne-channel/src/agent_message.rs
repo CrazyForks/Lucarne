@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-const FOOTER_SEPARATOR: &str = "==========";
+const FOOTER_SEPARATOR: &str = "---";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AgentMessageFooter {
@@ -39,7 +39,10 @@ pub fn render_agent_message_markdown(text: &str, footer: &AgentMessageFooter) ->
     if text.is_empty() {
         return footer_lines.join("\n");
     }
-    format!("{text}\n\n{FOOTER_SEPARATOR}\n{}", footer_lines.join("\n"))
+    format!(
+        "{text}\n\n{FOOTER_SEPARATOR}\n\n{}",
+        footer_lines.join("\n")
+    )
 }
 
 pub fn format_cost_duration(duration: Duration) -> String {
@@ -151,7 +154,7 @@ mod tests {
 
         assert_eq!(
             body,
-            "done\n\n==========\ncost: 2m 5s\nsession: `thread-1`\ncwd: `/tmp/workspace-a`"
+            "done\n\n---\n\ncost: 2m 5s\nsession: `thread-1`\ncwd: `/tmp/workspace-a`"
         );
     }
 
@@ -166,7 +169,7 @@ mod tests {
             },
         );
 
-        assert_eq!(body, "done\n\n==========\ncost: 41s\nsession: `thread-1`");
+        assert_eq!(body, "done\n\n---\n\ncost: 41s\nsession: `thread-1`");
     }
 
     #[test]

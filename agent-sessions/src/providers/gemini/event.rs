@@ -467,22 +467,24 @@ impl crate::watch::provider::ProviderWatchEvents for crate::Gemini {
         Ok(crate::watch::provider::ParsedWatchSession {
             session_id: Some(body.session_id.clone()),
             cwd: body.cwd.clone(),
+            title: None,
             events: watch_events_from_gemini_body(&body),
         })
     }
 
-    fn parse_watch_metadata_reader<R>(
+    fn probe_watch_session_meta<R>(
         _path: &std::path::Path,
         reader: R,
-    ) -> crate::Result<crate::watch::provider::ParsedWatchSession>
+    ) -> crate::Result<crate::agent_session::SessionMeta>
     where
         R: std::io::BufRead,
     {
         let body = super::parse_gemini_reader(reader, None, crate::ParseSelection::meta_only())?;
-        Ok(crate::watch::provider::parsed_watch_metadata(
-            Some(body.session_id),
-            body.cwd,
-        ))
+        Ok(crate::agent_session::SessionMeta {
+            session_id: Some(body.session_id),
+            cwd: body.cwd,
+            ..crate::agent_session::SessionMeta::default()
+        })
     }
 
     fn supports_incremental_watch_events() -> bool {
