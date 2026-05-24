@@ -2760,28 +2760,19 @@ fn render_wechat_workspace_status(
 fn render_wechat_agent_resource_snapshot(snapshot: &AgentResourceSnapshot) -> String {
     let mut body = "### 📊 Agent 资源\n\n".to_string();
     begin_wechat_markdown_table(&mut body);
-    push_wechat_markdown_table_line(&mut body, "| 指标 | 值 |");
-    push_wechat_markdown_table_line(&mut body, "|---|---:|");
     push_wechat_markdown_table_line(
         &mut body,
-        &format!("| 托管 agent | {} |", snapshot.managed_agent_count),
+        "| 托管 agent | 最近历史会话 | 实际进程 | CPU | 内存 |",
     );
-    push_wechat_markdown_table_line(
-        &mut body,
-        &format!("| 最近历史会话 | {} |", snapshot.observed_sessions.len()),
-    );
-    push_wechat_markdown_table_line(
-        &mut body,
-        &format!("| 实际进程 | {} |", snapshot.process_count),
-    );
-    push_wechat_markdown_table_line(
-        &mut body,
-        &format!("| CPU | {:.1}% |", snapshot.total_cpu_percent),
-    );
+    push_wechat_markdown_table_line(&mut body, "|---:|---:|---:|---:|---:|");
     push_wechat_markdown_table_line(
         &mut body,
         &format!(
-            "| 内存 | {} |",
+            "| {} | {} | {} | {:.1}% | {} |",
+            snapshot.managed_agent_count,
+            snapshot.observed_sessions.len(),
+            snapshot.process_count,
+            snapshot.total_cpu_percent,
             wechat_table_cell(format_resource_bytes(snapshot.total_memory_bytes))
         ),
     );
@@ -3185,7 +3176,8 @@ mod tests {
         let body = render_wechat_agent_resource_snapshot(&snapshot);
 
         assert!(body.contains("### 📊 Agent 资源"));
-        assert!(body.contains("| 最近历史会话 | 1 |"));
+        assert!(body.contains("| 托管 agent | 最近历史会话 | 实际进程 | CPU | 内存 |"));
+        assert!(body.contains("| 0 | 1 | 0 | 0.0% | 0 B |"));
         assert!(body.contains("### 最近历史会话"));
         assert!(body.contains("| 标题 | 提供方 | 会话 | 最近活跃 | 目录 |"));
         assert!(body.contains("real user title"));
@@ -3193,7 +3185,7 @@ mod tests {
         assert!(body.contains("meme-strategy-me"));
 
         assert!(!body.contains("```"));
-        assert!(body.contains("| 指标 | 值 |"));
+        assert!(!body.contains("| 指标 | 值 |"));
         assert!(body.contains("| 标题 | 提供方 | 会话 | 最近活跃 | 目录 |"));
         assert!(body.contains("| real user title | codex | thread-1 |"));
     }
@@ -3690,7 +3682,10 @@ mod tests {
         let replies = transport.replies();
         assert_eq!(replies.len(), 1);
         assert!(replies[0].text.contains("📊 Agent 资源"));
-        assert!(replies[0].text.contains("| 托管 agent | 1 |"));
+        assert!(replies[0]
+            .text
+            .contains("| 托管 agent | 最近历史会话 | 实际进程 | CPU | 内存 |"));
+        assert!(replies[0].text.contains("| 1 | 0 |"));
         assert!(replies[0]
             .text
             .contains("| 标题 | 工作区 | 提供方 | 会话 | PID |"));
