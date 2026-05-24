@@ -1444,7 +1444,7 @@ fn translate_turn_end(
         }
         let text = decode_pi_content(m.get("content"));
         if !text.is_empty() {
-            evs.push(tl(event::new_timeline_assistant("", &text, false)));
+            evs.push(tl(event::new_timeline_assistant("", &text, !terminal)));
         }
     }
     evs.extend(decode_pi_tool_results(tool_results_raw));
@@ -2414,11 +2414,22 @@ mod tests {
         d.state = SessionState::Streaming;
         d.turn_active = true;
 
-        let intermediate = json!({"type":"turn_end","message":{"role":"assistant","stopReason":"toolUse","content":[{"type":"thinking","thinking":"Need date."},{"type":"toolCall","id":"call_1","name":"bash","arguments":{"command":"date"}}]}});
+        let intermediate = json!({"type":"turn_end","message":{"role":"assistant","stopReason":"toolUse","content":[{"type":"thinking","thinking":"Need date."},{"type":"text","text":"Running tool next."},{"type":"toolCall","id":"call_1","name":"bash","arguments":{"command":"date"}}]}});
         let evs = d.translate(&serde_json::to_vec(&intermediate).unwrap());
         assert!(
             evs.iter().all(|event| event.kind() != Kind::TurnCompleted),
             "tool-use handoff without a final assistant message must not complete the turn"
+        );
+        let assistant_messages = evs
+            .iter()
+            .filter_map(|event| match &event.payload {
+                Payload::Timeline(timeline) => timeline.item.assistant_message.as_ref(),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            assistant_messages.iter().all(|message| message.streaming),
+            "tool-use handoff text is intermediate progress and must not be emitted as final assistant output"
         );
         assert_eq!(d.state, SessionState::Streaming);
         assert!(d.turn_active);
