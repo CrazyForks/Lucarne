@@ -1,7 +1,7 @@
 use crate::error::{LucarneError, Result};
 use nix::{
     errno::Errno,
-    sys::signal::{Signal, kill},
+    sys::signal::{kill, Signal},
     unistd::Pid,
 };
 use std::os::unix::process::CommandExt;

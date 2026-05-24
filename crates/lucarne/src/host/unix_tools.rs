@@ -6,11 +6,7 @@ pub(crate) fn resolve_command(name: &str, fallbacks: &[&str]) -> PathBuf {
     resolve_command_with_path(name, std::env::var_os("PATH"), fallbacks)
 }
 
-fn resolve_command_with_path(
-    name: &str,
-    path: Option<OsString>,
-    fallbacks: &[&str],
-) -> PathBuf {
+fn resolve_command_with_path(name: &str, path: Option<OsString>, fallbacks: &[&str]) -> PathBuf {
     if let Some(path) = path {
         for dir in std::env::split_paths(&path) {
             let candidate = dir.join(name);

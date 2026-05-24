@@ -4232,9 +4232,9 @@ mod tests {
         assert!(replies[0].text.contains("reply: please continue"));
         assert!(!replies[0].text.contains("working first"));
         assert!(
-            replies[0].text.contains(
-                " ---\n\n耗时：0s\n会话：thread-1\n目录：/tmp/workspace-turn-complete"
-            ),
+            replies[0]
+                .text
+                .contains(" ---\n\n耗时：0s\n会话：thread-1\n目录：/tmp/workspace-turn-complete"),
             "completed reply should keep cost/session/cwd in one shared block: {}",
             replies[0].text
         );

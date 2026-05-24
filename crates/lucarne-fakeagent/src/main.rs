@@ -36,10 +36,7 @@ use std::{
     fs::File,
     io::{self, BufRead, BufReader, Read, Write},
     process::exit,
-    sync::{
-        atomic::Ordering,
-        Arc, Condvar, Mutex,
-    },
+    sync::{atomic::Ordering, Arc, Condvar, Mutex},
     thread,
     time::{Duration, Instant},
 };

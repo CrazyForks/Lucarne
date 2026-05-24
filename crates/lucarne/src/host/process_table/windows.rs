@@ -8,10 +8,10 @@ use std::{
 use once_cell::sync::Lazy;
 use tracing::trace;
 use windows_sys::Win32::{
-    Foundation::{FILETIME, GetLastError, HANDLE, INVALID_HANDLE_VALUE},
+    Foundation::{GetLastError, FILETIME, HANDLE, INVALID_HANDLE_VALUE},
     System::{
         Diagnostics::ToolHelp::{
-            CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
             TH32CS_SNAPPROCESS,
         },
         ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS},

@@ -5,7 +5,7 @@ mod windows;
 
 #[cfg(unix)]
 #[allow(unused_imports)]
-pub(crate) use unix::{ManagedProcess, configure_command, pid_is_alive};
+pub(crate) use unix::{configure_command, pid_is_alive, ManagedProcess};
 #[cfg(windows)]
 #[allow(unused_imports)]
-pub(crate) use windows::{ManagedProcess, configure_command, pid_is_alive};
+pub(crate) use windows::{configure_command, pid_is_alive, ManagedProcess};

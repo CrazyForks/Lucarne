@@ -3515,9 +3515,11 @@ fn codex_permission_preset_from_result(result: &Value) -> Option<&'static CodexP
         Some("danger-full-access" | "dangerFullAccess")
     ) || codex_permission_profile_is_disabled(result)
         || codex_permission_profile_is_full_access(result)
-        || codex_active_permission_profile_id(result) == Some(CODEX_FULL_ACCESS_PERMISSION_PROFILE_ID)
+        || codex_active_permission_profile_id(result)
+            == Some(CODEX_FULL_ACCESS_PERMISSION_PROFILE_ID)
         || (!has_permission_profile
-            && codex_result_default_permissions(result) == Some(CODEX_FULL_ACCESS_PERMISSION_PROFILE_ID))
+            && codex_result_default_permissions(result)
+                == Some(CODEX_FULL_ACCESS_PERMISSION_PROFILE_ID))
     {
         return codex_permission_preset("full-access").ok();
     }

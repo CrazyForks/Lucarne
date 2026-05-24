@@ -34,8 +34,8 @@ pub mod dialects;
 pub mod error;
 pub mod event;
 pub mod framer;
-pub(crate) mod host;
 pub mod history;
+pub(crate) mod host;
 pub mod journal;
 pub mod launcher;
 #[cfg(feature = "memory-profiling")]

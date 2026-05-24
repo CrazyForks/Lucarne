@@ -83,8 +83,26 @@ impl ControlPlaneSqliteStore {
         let mut stmt = conn.prepare(
             "SELECT kind, entity_id, workspace_id, state_json
              FROM control_plane_entities
-             WHERE kind NOT IN ('timeline', 'message_session_binding')
-             ORDER BY kind, workspace_id, entity_id",
+             WHERE kind IN (
+                'channel_binding',
+                'command',
+                'command_callback',
+                'history_older_callback',
+                'history_replay',
+                'intervention_callback',
+                'live_instance',
+                'meta',
+                'panel_render',
+                'provider_session',
+                'reconcile_outcome',
+                'scheduled_task',
+                'subagent_action',
+                'subagent_callback',
+                'subagent_link',
+                'system_settings',
+                'turn',
+                'workspace'
+             )",
         )?;
         let mut rows = stmt.query([])?;
         let mut state = ControlPlaneState::default();

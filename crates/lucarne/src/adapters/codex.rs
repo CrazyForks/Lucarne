@@ -254,9 +254,15 @@ mod tests {
         let args = codex_app_server_args(&req, &blocked_args());
 
         assert!(!args.iter().any(|arg| arg.contains("default_permissions")));
-        assert!(!args.iter().any(|arg| arg.contains("sandbox_mode=\"read-only\"")));
-        assert!(!args.iter().any(|arg| arg.contains("approval_policy=\"untrusted\"")));
-        assert!(args.windows(2).any(|pair| pair == ["-c", "model=\"gpt-5.5\""]));
+        assert!(!args
+            .iter()
+            .any(|arg| arg.contains("sandbox_mode=\"read-only\"")));
+        assert!(!args
+            .iter()
+            .any(|arg| arg.contains("approval_policy=\"untrusted\"")));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-c", "model=\"gpt-5.5\""]));
         assert!(args.iter().any(|arg| arg == "--keep"));
     }
 }
