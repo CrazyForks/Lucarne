@@ -26,17 +26,17 @@ use crate::{
         OpenSession, ResumeSession, SessionRef,
     },
     control_plane::{
-        ActivationPlan, ActivationRequest, ChannelBinding, ChannelBindingId, CommandCallbackRecord,
-        CommandCallbackToken, CommandCompletionPolicy, CommandId, CommandWorkflow,
-        ControlPlaneError, ControlPlanePersistenceEntity, ControlPlaneSqliteStore,
+        build_status_snapshot, ActivationPlan, ActivationRequest, ChannelBinding, ChannelBindingId,
+        CommandCallbackRecord, CommandCallbackToken, CommandCompletionPolicy, CommandId,
+        CommandWorkflow, ControlPlaneError, ControlPlanePersistenceEntity, ControlPlaneSqliteStore,
         ControlPlaneState, ControlPlaneStoreError, EffectiveSettings, ForkWorkspaceSession,
         HistoryOlderCallbackRecord, HistoryOlderCallbackToken, HistoryReplayRecord,
         InterventionCallbackRecord, InterventionCallbackToken, LiveInstanceId, LiveInstanceRecord,
-        MessageSessionBinding, PanelRenderId, PanelRenderRecord, ProviderSessionId,
-        ProviderSessionRecord, ReconcileOutcome, Revision, ScheduledTaskId, ScheduledTaskRecord,
-        StatusSnapshot, SubAgentActionRecord, SubAgentCallbackRecord, SubAgentCallbackToken,
-        SubAgentLinkId, SubAgentLinkRecord, SystemSettings, TimelineItem, TimelineItemKind, TurnId,
-        TurnRecord, TurnSource, WorkspaceBinding, WorkspaceId,
+        LiveInstanceState, MessageSessionBinding, PanelRenderId, PanelRenderRecord,
+        ProviderSessionId, ProviderSessionRecord, ReconcileOutcome, Revision, ScheduledTaskId,
+        ScheduledTaskRecord, StatusSnapshot, SubAgentActionRecord, SubAgentCallbackRecord,
+        SubAgentCallbackToken, SubAgentLinkId, SubAgentLinkRecord, SystemSettings, TimelineItem,
+        TimelineItemKind, TurnId, TurnRecord, TurnSource, TurnState, WorkspaceBinding, WorkspaceId,
     },
     dialect::PermissionMode,
     host::process_table::{self, ProcessAggregate, ProcessSample},
@@ -275,7 +275,8 @@ impl LucarneCore {
         options: CoreOptions,
     ) -> Result<Arc<Self>, CoreError> {
         crate::memory_profile_snapshot!("lucarne.core.from_runtime_and_store.start");
-        let state = store.load_control_plane()?.unwrap_or_default();
+        let mut state = store.load_control_plane()?.unwrap_or_default();
+        state.set_timeline_store(store.clone_connection());
         crate::memory_profile_snapshot!(
             "lucarne.core.from_runtime_and_store.after_load_control_plane"
         );
@@ -853,9 +854,7 @@ impl LucarneCore {
     }
 
     pub fn list_workspaces(&self) -> Vec<WorkspaceSummary> {
-        let state = self.state.read().expect("control plane lock");
-        state
-            .workspace_bindings()
+        self.workspace_bindings()
             .into_iter()
             .map(|binding| self.summary_from_binding(binding))
             .collect()
@@ -951,10 +950,17 @@ impl LucarneCore {
     }
 
     pub fn history_replay_record(&self, workspace_id: &WorkspaceId) -> Option<HistoryReplayRecord> {
-        self.state
-            .read()
-            .expect("control plane lock")
+        self.store
             .history_replay(workspace_id)
+            .unwrap_or_else(|err| {
+                warn!(
+                    target: "lucarne::core_service",
+                    workspace_id = workspace_id.as_str(),
+                    error = %err,
+                    "history replay store lookup failed"
+                );
+                None
+            })
     }
 
     pub fn remember_history_replay_record(
@@ -971,15 +977,20 @@ impl LucarneCore {
         &self,
         record: HistoryReplayRecord,
     ) -> Result<HistoryReplayRecord, CoreError> {
-        let (record, entities) = {
+        let existing = self.store.history_replay(&record.workspace_id)?;
+        let record = {
             let mut state = self.state.write().expect("control plane lock");
-            let record = state.upsert_history_replay(record);
-            (
-                record.clone(),
-                state.persistence_entities_without_timeline(),
-            )
+            if let Some(existing) = existing {
+                state.upsert_history_replay(existing);
+            }
+            state.upsert_history_replay(record)
         };
-        self.persist_non_timeline_entities(entities)?;
+        self.store.upsert_entity_state(
+            "history_replay",
+            record.workspace_id.as_str(),
+            Some(record.workspace_id.as_str()),
+            &record,
+        )?;
         Ok(record)
     }
 
@@ -987,15 +998,13 @@ impl LucarneCore {
         &self,
         workspace_id: &WorkspaceId,
     ) -> Result<bool, CoreError> {
-        let (removed, entities) = {
-            let mut state = self.state.write().expect("control plane lock");
-            let removed = state.remove_history_replay(workspace_id);
-            (removed, state.persistence_entities_without_timeline())
-        };
-        if removed {
-            self.persist_non_timeline_entities(entities)?;
-        }
-        Ok(removed)
+        self.state
+            .write()
+            .expect("control plane lock")
+            .remove_history_replay(workspace_id);
+        Ok(self
+            .store
+            .delete_entity("history_replay", workspace_id.as_str())?)
     }
 
     pub fn register_history_older_callback(
@@ -1021,6 +1030,12 @@ impl LucarneCore {
             )
         };
         self.persist_non_timeline_entities(entities)?;
+        self.store.upsert_entity_state(
+            "history_older_callback",
+            record.token.as_str(),
+            Some(record.workspace_id.as_str()),
+            &record,
+        )?;
         Ok(record)
     }
 
@@ -1028,10 +1043,17 @@ impl LucarneCore {
         &self,
         token: &HistoryOlderCallbackToken,
     ) -> Option<HistoryOlderCallbackRecord> {
-        self.state
-            .read()
-            .expect("control plane lock")
-            .resolve_history_older_callback(token)
+        self.store
+            .history_older_callback(token)
+            .unwrap_or_else(|err| {
+                warn!(
+                    target: "lucarne::core_service",
+                    token = token.as_str(),
+                    error = %err,
+                    "history older callback store lookup failed"
+                );
+                None
+            })
     }
 
     pub fn record_workspace(
@@ -1070,17 +1092,12 @@ impl LucarneCore {
         &self,
         workspace_id: WorkspaceId,
     ) -> Result<OpenedCoreSession, CoreError> {
-        let (provider_id, project_path, title) = {
-            let state = self.state.read().expect("control plane lock");
-            let workspace = state
-                .get_workspace(&workspace_id)
-                .ok_or_else(|| CoreError::invalid_state("workspace not found"))?;
-            (
-                self.provider_id_static(workspace.provider_id.as_str())?,
-                workspace.project_path.clone(),
-                workspace.title.to_string(),
-            )
-        };
+        let workspace = self
+            .workspace_binding(&workspace_id)
+            .ok_or_else(|| CoreError::invalid_state("workspace not found"))?;
+        let provider_id = self.provider_id_static(workspace.provider_id.as_str())?;
+        let project_path = workspace.project_path.clone();
+        let title = workspace.title.to_string();
         let live_instance_id = self
             .live_sessions
             .read()
@@ -1114,27 +1131,45 @@ impl LucarneCore {
             title,
         } = req;
         let project_path = project_path.unwrap_or_else(default_project_path);
-        let (summary, entities) = {
+        let existing_workspace = self.store.workspace(&workspace_id)?;
+        let (summary, binding, provider_session) = {
             let mut state = self.state.write().expect("control plane lock");
-            let binding = state.upsert_workspace(WorkspaceBinding::new(
+            if let Some(existing_workspace) = existing_workspace {
+                state.record_workspace_projection(existing_workspace);
+            }
+            let mut binding = state.upsert_workspace(WorkspaceBinding::new(
                 workspace_id.clone(),
                 title,
                 provider_id,
                 project_path,
             ));
-            let summary = self.summary_from_binding(binding);
+            let mut provider_session = None;
             if let Some(native_resume_ref) = native_resume_ref.filter(|value| !value.is_empty()) {
                 let provider_session_id = provider_session_id(provider_id, native_resume_ref);
-                state.upsert_provider_session(ProviderSessionRecord::new(
-                    provider_session_id.clone(),
-                    provider_id,
-                    native_resume_ref,
+                let existing_provider_session =
+                    self.store.provider_session(&provider_session_id)?;
+                provider_session = Some(state.upsert_provider_session(
+                    existing_provider_session.unwrap_or_else(|| {
+                        ProviderSessionRecord::new(
+                            provider_session_id.clone(),
+                            provider_id,
+                            native_resume_ref,
+                        )
+                    }),
                 ));
-                state.activate_provider_session(workspace_id.clone(), provider_session_id)?;
+                binding =
+                    state.activate_provider_session(workspace_id.clone(), provider_session_id)?;
             }
-            (summary, state.persistence_entities_without_timeline())
+            let summary = self.summary_from_binding(binding.clone());
+            (summary, binding, provider_session)
         };
-        self.persist_non_timeline_entities(entities)?;
+        let mut entities = ControlPlaneState::persistence_entities_for_workspace(&binding);
+        if let Some(provider_session) = provider_session {
+            entities.extend(
+                ControlPlaneState::persistence_entities_for_provider_session(&provider_session),
+            );
+        }
+        self.upsert_persistence_entities(entities)?;
         let _ = self
             .events
             .send(CoreEvent::WorkspaceChanged { workspace_id });
@@ -1241,29 +1276,29 @@ impl LucarneCore {
             );
             return Ok(opened);
         }
-        let (provider_id, resume_ref, project_path, settings) = {
-            let state = self.state.read().expect("control plane lock");
-            let workspace = state
-                .get_workspace(&req.workspace_id)
-                .ok_or_else(|| CoreError::invalid_state("workspace not found"))?;
-            let provider_id = self.provider_id_static(workspace.provider_id.as_str())?;
-            let provider_session_id = workspace
-                .active_provider_session_id
-                .as_ref()
-                .ok_or_else(|| CoreError::invalid_state("workspace has no provider session"))?;
-            let provider_session = state
-                .get_provider_session(provider_session_id)
+        let workspace = self
+            .workspace_binding(&req.workspace_id)
+            .ok_or_else(|| CoreError::invalid_state("workspace not found"))?;
+        let provider_id = self.provider_id_static(workspace.provider_id.as_str())?;
+        let provider_session_id = workspace
+            .active_provider_session_id
+            .clone()
+            .ok_or_else(|| CoreError::invalid_state("workspace has no provider session"))?;
+        let (resume_ref, settings) = {
+            let provider_session = self
+                .store
+                .provider_session(&provider_session_id)?
                 .ok_or_else(|| CoreError::invalid_state("provider session not found"))?;
+            let state = self.state.read().expect("control plane lock");
             (
-                provider_id,
                 provider_session.native_resume_ref.clone(),
-                workspace.project_path.clone(),
                 state.effective_settings(
                     Some(workspace.project_path.as_path()),
-                    Some(provider_session_id),
+                    Some(&provider_session_id),
                 ),
             )
         };
+        let project_path = workspace.project_path.clone();
         let session = self
             .runtime
             .resume(
@@ -1329,17 +1364,16 @@ impl LucarneCore {
         };
 
         let workspace = {
-            let state = self.state.read().expect("control plane lock");
-            let binding = state
-                .get_workspace(workspace_id)
+            let binding = self
+                .workspace_binding(workspace_id)
                 .ok_or_else(|| CoreError::invalid_state("workspace not found"))?;
             let provider_id = self.provider_id_static(binding.provider_id.as_str())?;
             let provider_session_id = binding
                 .active_provider_session_id
                 .as_ref()
                 .ok_or_else(|| CoreError::invalid_state("workspace has no provider session"))?;
-            let provider_session = state
-                .get_provider_session(provider_session_id)
+            let provider_session = self
+                .provider_session_record(provider_session_id)
                 .ok_or_else(|| CoreError::invalid_state("provider session not found"))?;
             LiveWorkspace {
                 workspace_id: binding.workspace_id.clone(),
@@ -1420,25 +1454,40 @@ impl LucarneCore {
             req.next_run_unix_ms,
         );
         record.enabled = req.enabled;
-        self.mutate_state_and_persist(|state| Ok(state.upsert_scheduled_task(record)))
+        let existing = self.store.scheduled_task(&record.task_id)?;
+        let record = {
+            let mut state = self.state.write().expect("control plane lock");
+            if let Some(existing) = existing {
+                state.upsert_scheduled_task(existing);
+            }
+            state.upsert_scheduled_task(record)
+        };
+        self.store.upsert_entity_state(
+            "scheduled_task",
+            record.task_id.as_str(),
+            Some(record.workspace_id.as_str()),
+            &record,
+        )?;
+        Ok(record)
     }
 
     pub fn scheduled_task(&self, task_id: &ScheduledTaskId) -> Option<ScheduledTaskRecord> {
-        self.state
-            .read()
-            .expect("control plane lock")
-            .scheduled_task(task_id)
+        self.store.scheduled_task(task_id).unwrap_or_else(|err| {
+            warn!(
+                target: "lucarne::core_service",
+                task_id = task_id.as_str(),
+                error = %err,
+                "scheduled task store lookup failed"
+            );
+            None
+        })
     }
 
     pub async fn run_due_scheduled_tasks(
         &self,
         req: RunDueScheduledTasksRequest,
     ) -> Result<RunScheduledTasksReport, CoreError> {
-        let due_tasks = self
-            .state
-            .read()
-            .expect("control plane lock")
-            .due_scheduled_tasks(req.now_unix_ms);
+        let due_tasks = self.store.due_scheduled_tasks(req.now_unix_ms)?;
         let mut report = RunScheduledTasksReport::default();
         for task in due_tasks {
             let result = self.run_scheduled_task(task.clone(), req.now_unix_ms).await;
@@ -1460,13 +1509,10 @@ impl LucarneCore {
         now_unix_ms: u64,
     ) -> Result<ScheduledTaskRun, CoreError> {
         let provider_id = self.provider_id_static(task.provider_id.as_str())?;
-        let has_resumable_session = {
-            let state = self.state.read().expect("control plane lock");
-            state
-                .get_workspace(&task.workspace_id)
-                .and_then(|workspace| workspace.active_provider_session_id.as_ref())
-                .is_some()
-        };
+        let has_resumable_session = self
+            .workspace_binding(&task.workspace_id)
+            .and_then(|workspace| workspace.active_provider_session_id)
+            .is_some();
         if has_resumable_session {
             self.resume_workspace_with_events(ResumeWorkspaceRequest {
                 workspace_id: task.workspace_id.clone(),
@@ -1493,11 +1539,19 @@ impl LucarneCore {
                 },
             })
             .await?;
-        self.mutate_state_and_persist(|state| {
+        let updated_task = {
+            let mut state = self.state.write().expect("control plane lock");
+            state.upsert_scheduled_task(task.clone());
             state
                 .mark_scheduled_task_triggered(&task.task_id, now_unix_ms)
-                .ok_or_else(|| CoreError::invalid_state("scheduled task not found"))
-        })?;
+                .ok_or_else(|| CoreError::invalid_state("scheduled task not found"))?
+        };
+        self.store.upsert_entity_state(
+            "scheduled_task",
+            updated_task.task_id.as_str(),
+            Some(updated_task.workspace_id.as_str()),
+            &updated_task,
+        )?;
         Ok(ScheduledTaskRun {
             task_id: task.task_id,
             workspace_id: task.workspace_id,
@@ -1519,12 +1573,10 @@ impl LucarneCore {
             token,
             response,
         } = req;
-        let callback = {
-            let state = self.state.read().expect("control plane lock");
-            state
-                .resolve_intervention_callback(&token)
-                .ok_or_else(|| CoreError::invalid_state("intervention callback not found"))?
-        };
+        let callback = self
+            .store
+            .intervention_callback(&token)?
+            .ok_or_else(|| CoreError::invalid_state("intervention callback not found"))?;
         if callback.workspace_id != workspace_id {
             return Err(CoreError::invalid_state(
                 "intervention callback workspace mismatch",
@@ -1553,7 +1605,20 @@ impl LucarneCore {
     ) -> Result<(), CoreError> {
         let provider_session_id =
             native_resume_ref.map(|resume_ref| provider_session_id(provider_id, resume_ref));
-        self.mutate_state_and_persist(|state| {
+        let existing_provider_session = provider_session_id
+            .as_ref()
+            .map(|provider_session_id| self.store.provider_session(provider_session_id))
+            .transpose()?
+            .flatten();
+        let Some(source_workspace) = self.store.workspace(&source_workspace_id)? else {
+            return Err(ControlPlaneError::MissingWorkspace(source_workspace_id).into());
+        };
+        let result = {
+            let mut state = self.state.write().expect("control plane lock");
+            state.record_workspace_projection(source_workspace);
+            if let Some(existing_provider_session) = existing_provider_session {
+                state.upsert_provider_session(existing_provider_session);
+            }
             state.fork_workspace_session(ForkWorkspaceSession {
                 source_workspace_id: source_workspace_id.clone(),
                 fork_workspace_id: fork_workspace_id.clone(),
@@ -1562,9 +1627,22 @@ impl LucarneCore {
                 native_resume_ref: native_resume_ref.map(Into::into),
                 live_instance_id,
                 pid_or_handle: None,
-            })?;
-            Ok(())
-        })?;
+            })?
+        };
+        let mut entities =
+            ControlPlaneState::persistence_entities_for_workspace(&result.fork_workspace);
+        if let Some(provider_session) = result.provider_session.as_ref() {
+            entities.extend(
+                ControlPlaneState::persistence_entities_for_provider_session(provider_session),
+            );
+        }
+        if let Some(live_instance) = result.live_instance.as_ref() {
+            entities.extend(ControlPlaneState::persistence_entities_for_live_instance(
+                live_instance,
+                Some(&result.fork_workspace.workspace_id),
+            ));
+        }
+        self.upsert_persistence_entities(entities)?;
         let _ = self.events.send(CoreEvent::WorkspaceChanged {
             workspace_id: source_workspace_id,
         });
@@ -2215,28 +2293,11 @@ impl LucarneCore {
     }
 
     pub async fn close_workspace(&self, req: CloseWorkspaceRequest) -> Result<(), CoreError> {
-        let session = self
-            .live_sessions
-            .write()
-            .expect("live session registry lock")
-            .remove(&req.workspace_id);
-        self.live_session_generations
-            .write()
-            .expect("live session generation lock")
-            .remove(&req.workspace_id);
+        let session = self.remove_runtime_workspace(&req.workspace_id);
         if let Some(session) = session {
             session.close().await?;
         }
-        self.workspace_events
-            .write()
-            .expect("workspace event registry lock")
-            .remove(&req.workspace_id);
-        let entities = {
-            let mut state = self.state.write().expect("control plane lock");
-            let _ = state.clear_workspace_activation(&req.workspace_id, "closed by daemon API");
-            state.persistence_entities_without_timeline()
-        };
-        self.persist_non_timeline_entities(entities)?;
+        self.clear_workspace_activation(&req.workspace_id)?;
         let _ = self.events.send(CoreEvent::WorkspaceChanged {
             workspace_id: req.workspace_id,
         });
@@ -2270,16 +2331,36 @@ impl LucarneCore {
                 .expect("live session generation lock")
                 .remove(workspace_id);
         }
-        let entities = {
-            let mut state = self.state.write().expect("control plane lock");
-            state.detach_live_instance(
-                workspace_id.clone(),
-                live_instance_id,
-                close_reason.clone(),
-            )?;
-            state.persistence_entities_without_timeline()
-        };
-        self.persist_non_timeline_entities(entities)?;
+        let mut entities = Vec::new();
+        if let Some(mut live) = self.store.live_instance(live_instance_id)? {
+            live.active_turn_id = None;
+            live.state = LiveInstanceState::Closed;
+            live.close_reason = Some(close_reason.clone());
+            live.last_seen_at = SystemTime::now();
+            entities.extend(ControlPlaneState::persistence_entities_for_live_instance(
+                &live,
+                self.store
+                    .workspace_id_for_live_instance(live_instance_id)?
+                    .as_ref(),
+            ));
+            self.store
+                .delete_intervention_callbacks_for_live_instances(std::slice::from_ref(
+                    live_instance_id,
+                ))?;
+        }
+        if let Some(mut workspace) = self.store.workspace(workspace_id)? {
+            if workspace.active_live_instance_id.as_ref() == Some(live_instance_id) {
+                workspace.active_live_instance_id = None;
+                workspace.updated_at = SystemTime::now();
+                workspace.revision = workspace.revision.next();
+                entities.extend(ControlPlaneState::persistence_entities_for_workspace(
+                    &workspace,
+                ));
+            }
+        }
+        if !entities.is_empty() {
+            self.upsert_persistence_entities(entities)?;
+        }
         if let Some(session) = session {
             if let Err(err) = session.close().await {
                 warn!(
@@ -2298,11 +2379,15 @@ impl LucarneCore {
     }
 
     pub fn workspace_binding(&self, workspace_id: &WorkspaceId) -> Option<WorkspaceBinding> {
-        self.state
-            .read()
-            .expect("control plane lock")
-            .get_workspace(workspace_id)
-            .cloned()
+        self.store.workspace(workspace_id).unwrap_or_else(|err| {
+            warn!(
+                target: "lucarne::core_service",
+                workspace_id = workspace_id.as_str(),
+                error = %err,
+                "workspace binding store lookup failed"
+            );
+            None
+        })
     }
 
     pub fn has_live_session(&self, workspace_id: &WorkspaceId) -> bool {
@@ -2313,21 +2398,31 @@ impl LucarneCore {
     }
 
     pub fn workspace_bindings(&self) -> Vec<WorkspaceBinding> {
-        self.state
-            .read()
-            .expect("control plane lock")
-            .workspace_bindings()
+        self.store.workspace_bindings().unwrap_or_else(|err| {
+            warn!(
+                target: "lucarne::core_service",
+                error = %err,
+                "workspace bindings store lookup failed"
+            );
+            Vec::new()
+        })
     }
 
     pub fn provider_session_record(
         &self,
         provider_session_id: &ProviderSessionId,
     ) -> Option<ProviderSessionRecord> {
-        self.state
-            .read()
-            .expect("control plane lock")
-            .get_provider_session(provider_session_id)
-            .cloned()
+        self.store
+            .provider_session(provider_session_id)
+            .unwrap_or_else(|err| {
+                warn!(
+                    target: "lucarne::core_service",
+                    provider_session_id = provider_session_id.as_str(),
+                    error = %err,
+                    "provider session store lookup failed"
+                );
+                None
+            })
     }
 
     pub fn bind_message_to_provider_session(
@@ -2337,12 +2432,7 @@ impl LucarneCore {
         message_id: &str,
         provider_session_id: ProviderSessionId,
     ) -> Result<MessageSessionBinding, CoreError> {
-        let provider_exists = self
-            .state
-            .read()
-            .expect("control plane lock")
-            .get_provider_session(&provider_session_id)
-            .is_some();
+        let provider_exists = self.store.provider_session(&provider_session_id)?.is_some();
         if !provider_exists {
             return Err(ControlPlaneError::MissingProviderSession(provider_session_id).into());
         }
@@ -2369,14 +2459,16 @@ impl LucarneCore {
     ) -> Option<MessageSessionBinding> {
         self.store
             .message_session_binding(channel, chat_id, message_id)
-            .ok()
-            .flatten()
-            .or_else(|| {
-                self.state
-                    .read()
-                    .expect("control plane lock")
-                    .message_session_binding(channel, chat_id, message_id)
-                    .cloned()
+            .unwrap_or_else(|err| {
+                warn!(
+                    target: "lucarne::core_service",
+                    channel,
+                    chat_id,
+                    message_id,
+                    error = %err,
+                    "message session binding store lookup failed"
+                );
+                None
             })
     }
 
@@ -2384,47 +2476,79 @@ impl LucarneCore {
         &self,
         provider_session_id: &ProviderSessionId,
     ) -> Option<WorkspaceBinding> {
-        self.state
-            .read()
-            .expect("control plane lock")
+        self.store
             .workspace_for_provider_session(provider_session_id)
-            .cloned()
+            .unwrap_or_else(|err| {
+                warn!(
+                    target: "lucarne::core_service",
+                    provider_session_id = provider_session_id.as_str(),
+                    error = %err,
+                    "workspace for provider session store lookup failed"
+                );
+                None
+            })
     }
 
     pub fn live_instance_record(
         &self,
         live_instance_id: &LiveInstanceId,
     ) -> Option<LiveInstanceRecord> {
-        self.state
-            .read()
-            .expect("control plane lock")
-            .get_live_instance(live_instance_id)
-            .cloned()
+        self.store
+            .live_instance(live_instance_id)
+            .unwrap_or_else(|err| {
+                warn!(
+                    target: "lucarne::core_service",
+                    live_instance_id = live_instance_id.as_str(),
+                    error = %err,
+                    "live instance store lookup failed"
+                );
+                None
+            })
     }
 
     pub fn channel_bindings_for_workspace(
         &self,
         workspace_id: &WorkspaceId,
     ) -> Vec<ChannelBinding> {
-        self.state
-            .read()
-            .expect("control plane lock")
+        self.store
             .channel_bindings_for_workspace(workspace_id)
+            .unwrap_or_else(|err| {
+                warn!(
+                    target: "lucarne::core_service",
+                    workspace_id = workspace_id.as_str(),
+                    error = %err,
+                    "channel bindings store lookup failed"
+                );
+                Vec::new()
+            })
     }
 
     pub fn channel_binding(&self, binding_id: &ChannelBindingId) -> Option<ChannelBinding> {
-        self.state
-            .read()
-            .expect("control plane lock")
-            .get_channel_binding(binding_id)
-            .cloned()
+        self.store
+            .channel_binding(binding_id)
+            .unwrap_or_else(|err| {
+                warn!(
+                    target: "lucarne::core_service",
+                    binding_id = binding_id.as_str(),
+                    error = %err,
+                    "channel binding store lookup failed"
+                );
+                None
+            })
     }
 
     pub fn upsert_channel_binding(&self, binding: ChannelBinding) -> Result<(), CoreError> {
-        self.mutate_state_and_persist(|state| {
-            state.upsert_channel_binding(binding);
-            Ok(())
-        })
+        let existing = self.store.channel_binding(&binding.channel_binding_id)?;
+        let binding = {
+            let mut state = self.state.write().expect("control plane lock");
+            if let Some(existing) = existing {
+                state.upsert_channel_binding(existing);
+            }
+            state.upsert_channel_binding(binding)
+        };
+        self.upsert_persistence_entities(
+            ControlPlaneState::persistence_entities_for_channel_binding(&binding),
+        )
     }
 
     pub fn attach_live_session_projection(
@@ -2443,32 +2567,70 @@ impl LucarneCore {
     }
 
     pub fn clear_workspace_activation(&self, workspace_id: &WorkspaceId) -> Result<(), CoreError> {
-        self.mutate_state_and_persist(|state| {
-            let _ = state.clear_workspace_activation(workspace_id, "resume ref cleared");
-            Ok(())
-        })
+        let Some(mut workspace) = self.store.workspace(workspace_id)? else {
+            return Ok(());
+        };
+        let live_instance_id = workspace.active_live_instance_id.clone();
+        workspace.active_provider_session_id = None;
+        workspace.active_live_instance_id = None;
+        workspace.updated_at = SystemTime::now();
+        workspace.revision = workspace.revision.next();
+        let mut entities = ControlPlaneState::persistence_entities_for_workspace(&workspace);
+        if let Some(live_instance_id) = live_instance_id {
+            if let Some(mut live) = self.store.live_instance(&live_instance_id)? {
+                live.active_turn_id = None;
+                live.state = LiveInstanceState::Closed;
+                live.close_reason = Some("resume ref cleared".into());
+                live.last_seen_at = SystemTime::now();
+                entities.extend(ControlPlaneState::persistence_entities_for_live_instance(
+                    &live,
+                    Some(&workspace.workspace_id),
+                ));
+            }
+        }
+        self.upsert_persistence_entities(entities)?;
+        Ok(())
     }
 
-    pub fn remove_workspace_projection(&self, workspace_id: &WorkspaceId) -> Result<(), CoreError> {
-        let entities = {
+    pub async fn remove_workspace_projection(
+        &self,
+        workspace_id: &WorkspaceId,
+    ) -> Result<(), CoreError> {
+        let workspace = self.store.workspace(workspace_id)?;
+        let provider_session_id = workspace
+            .as_ref()
+            .and_then(|workspace| workspace.active_provider_session_id.clone());
+        let session = self.remove_runtime_workspace(workspace_id);
+        if let Some(session) = session {
+            session.close().await?;
+        }
+        let hot_entities = {
             let mut state = self.state.write().expect("control plane lock");
+            if let Some(workspace) = workspace.clone() {
+                state.record_workspace_projection(workspace);
+            }
             state.remove_workspace(workspace_id);
-            state.persistence_entities_without_timeline()
+            state.persistence_entities()
         };
-        self.workspace_events
-            .write()
-            .expect("workspace event registry lock")
-            .remove(workspace_id);
         self.store
             .delete_workspace_entities(workspace_id.as_str())?;
-        self.persist_non_timeline_entities(entities)
+        self.persist_non_timeline_entities(hot_entities)?;
+        if let Some(provider_session_id) = provider_session_id {
+            if !self.store.provider_session_referenced_by_other_workspace(
+                &provider_session_id,
+                workspace_id,
+            )? {
+                self.store
+                    .delete_message_session_bindings_for_provider_session(&provider_session_id)?;
+                self.store
+                    .delete_entity("provider_session", provider_session_id.as_str())?;
+            }
+        }
+        Ok(())
     }
 
     pub fn clear_workspace_records(&self) -> Result<usize, CoreError> {
         let workspace_ids = self
-            .state
-            .read()
-            .expect("control plane lock")
             .workspace_bindings()
             .into_iter()
             .map(|workspace| workspace.workspace_id)
@@ -2486,12 +2648,31 @@ impl LucarneCore {
             .write()
             .expect("workspace event registry lock")
             .clear();
+        self.notification_suppression
+            .write()
+            .expect("notification suppression lock")
+            .clear();
+        self.submitted_turns
+            .write()
+            .expect("submitted turn lock")
+            .clear();
+        self.submitted_turn_activity
+            .write()
+            .expect("submitted turn activity lock")
+            .clear();
         let entities = {
             let mut state = self.state.write().expect("control plane lock");
             state.clear_workspace_records();
             state.persistence_entities()
         };
-        self.store.replace_entities(entities)?;
+        for workspace_id in &workspace_ids {
+            self.store
+                .delete_workspace_entities(workspace_id.as_str())?;
+        }
+        self.store.delete_entities_by_kind("provider_session")?;
+        self.store
+            .delete_entities_by_kind("message_session_binding")?;
+        self.persist_non_timeline_entities(entities)?;
         for workspace_id in workspace_ids {
             let _ = self
                 .events
@@ -2505,14 +2686,28 @@ impl LucarneCore {
         workspace_id: &WorkspaceId,
         title: impl Into<SmolStr>,
     ) -> Result<WorkspaceBinding, CoreError> {
-        self.mutate_state_and_persist(|state| Ok(state.rename_workspace(workspace_id, title)?))
+        let Some(workspace) = self.store.workspace(workspace_id)? else {
+            return Err(ControlPlaneError::MissingWorkspace(workspace_id.clone()).into());
+        };
+        let renamed = {
+            let mut state = self.state.write().expect("control plane lock");
+            state.record_workspace_projection(workspace);
+            state.rename_workspace(workspace_id, title)?
+        };
+        self.upsert_persistence_entities(ControlPlaneState::persistence_entities_for_workspace(
+            &renamed,
+        ))?;
+        Ok(renamed)
     }
 
     pub fn remove_channel_binding(&self, binding_id: &ChannelBindingId) -> Result<(), CoreError> {
-        self.mutate_state_and_persist(|state| {
-            state.remove_channel_binding(binding_id);
-            Ok(())
-        })
+        self.state
+            .write()
+            .expect("control plane lock")
+            .remove_channel_binding(binding_id);
+        self.store
+            .delete_entity("channel_binding", binding_id.as_str())?;
+        Ok(())
     }
 
     pub fn record_panel_stale_revision(
@@ -2523,49 +2718,168 @@ impl LucarneCore {
         observed: Revision,
         current: Revision,
     ) -> Result<(), CoreError> {
-        self.mutate_state_and_persist(|state| {
-            state.record_panel_stale_revision(panel_id, channel, chat_id, observed, current);
-            Ok(())
-        })
+        let existing = self.store.panel_render(&panel_id)?;
+        let panel = {
+            let mut state = self.state.write().expect("control plane lock");
+            if let Some(existing) = existing {
+                state.upsert_panel_render(existing);
+            }
+            state.record_panel_stale_revision(panel_id, channel, chat_id, observed, current)
+        };
+        self.upsert_persistence_entities(ControlPlaneState::persistence_entities_for_panel_render(
+            &panel,
+        ))
     }
 
     pub fn upsert_panel_render(&self, panel: PanelRenderRecord) -> Result<(), CoreError> {
-        self.mutate_state_and_persist(|state| {
-            state.upsert_panel_render(panel);
-            Ok(())
-        })
+        let existing = self.store.panel_render(&panel.panel_id)?;
+        let panel = {
+            let mut state = self.state.write().expect("control plane lock");
+            if let Some(existing) = existing {
+                state.upsert_panel_render(existing);
+            }
+            state.upsert_panel_render(panel)
+        };
+        self.upsert_persistence_entities(ControlPlaneState::persistence_entities_for_panel_render(
+            &panel,
+        ))
     }
 
     pub fn panel_render(&self, panel_id: &PanelRenderId) -> Option<PanelRenderRecord> {
-        self.state
-            .read()
-            .expect("control plane lock")
-            .get_panel_render(panel_id)
-            .cloned()
+        self.store.panel_render(panel_id).unwrap_or_else(|err| {
+            warn!(
+                target: "lucarne::core_service",
+                panel_id = panel_id.as_str(),
+                error = %err,
+                "panel render store lookup failed"
+            );
+            None
+        })
     }
 
     pub fn max_panel_render_revision(&self) -> Option<Revision> {
-        self.state
-            .read()
-            .expect("control plane lock")
+        self.store
             .max_panel_render_revision()
+            .unwrap_or_else(|err| {
+                warn!(
+                    target: "lucarne::core_service",
+                    error = %err,
+                    "max panel render revision store lookup failed"
+                );
+                None
+            })
     }
 
     pub fn mark_panel_renders_stale_after_restart(&self) -> Result<(), CoreError> {
-        self.mutate_state_and_persist(|state| {
-            state.mark_panel_renders_stale_after_restart();
-            Ok(())
-        })
+        let now = SystemTime::now();
+        let mut entities = Vec::new();
+        for mut panel in self.store.panel_renders()? {
+            if panel.last_observed_stale_revision.is_none() {
+                panel.last_observed_stale_revision = Some(panel.last_rendered_revision);
+            }
+            panel.last_reconcile_outcome = Some(ReconcileOutcome::StaleRevision);
+            panel.updated_at = now;
+            entities.extend(ControlPlaneState::persistence_entities_for_panel_render(
+                &panel,
+            ));
+        }
+        self.upsert_persistence_entities(entities)
     }
 
     pub fn mark_live_instances_stale_after_restart(
         &self,
         reason: impl Into<SmolStr>,
     ) -> Result<(), CoreError> {
-        self.mutate_state_and_persist(|state| {
-            state.mark_live_instances_stale_after_restart(reason);
-            Ok(())
-        })
+        let reason = reason.into();
+        let stale_lives = self.store.live_instances_for_restart_cleanup()?;
+
+        let now = SystemTime::now();
+        let mut entities = Vec::new();
+        let mut affected_workspaces = Vec::new();
+        let mut callback_cleanup_live_instance_ids = HashSet::<LiveInstanceId>::new();
+        let mut cleanup_outcomes = HashMap::<LiveInstanceId, ReconcileOutcome>::new();
+        let mut known_live_instance_ids = HashSet::<LiveInstanceId>::new();
+
+        for (workspace_id, mut live) in stale_lives {
+            let live_instance_id = live.live_instance_id.clone();
+            known_live_instance_ids.insert(live_instance_id.clone());
+            callback_cleanup_live_instance_ids.insert(live_instance_id.clone());
+            let outcome = if live.state == LiveInstanceState::WaitingPermission {
+                ReconcileOutcome::PermissionOrphaned
+            } else {
+                ReconcileOutcome::LiveInstanceStale
+            };
+            cleanup_outcomes.insert(live_instance_id.clone(), outcome);
+            if matches!(
+                live.state,
+                LiveInstanceState::Closed | LiveInstanceState::Failed | LiveInstanceState::Stale
+            ) {
+                continue;
+            }
+
+            if let Some(active_turn_id) = live.active_turn_id.take() {
+                if let Some(mut turn) = self.store.turn(&active_turn_id)? {
+                    turn.state = TurnState::Orphaned;
+                    turn.completed_at = Some(now);
+                    entities.extend(ControlPlaneState::persistence_entities_for_turn_record(
+                        &turn,
+                    ));
+                }
+            }
+
+            live.state = LiveInstanceState::Stale;
+            live.close_reason = Some(reason.clone());
+            live.last_seen_at = now;
+            entities.extend(ControlPlaneState::persistence_entities_for_live_instance(
+                &live,
+                workspace_id.as_ref(),
+            ));
+        }
+
+        for mut workspace in self.store.workspace_bindings()? {
+            let Some(active_live_instance_id) = workspace.active_live_instance_id.clone() else {
+                continue;
+            };
+            let outcome = cleanup_outcomes
+                .get(&active_live_instance_id)
+                .copied()
+                .or_else(|| {
+                    (!known_live_instance_ids.contains(&active_live_instance_id))
+                        .then_some(ReconcileOutcome::LiveInstanceStale)
+                });
+            let Some(outcome) = outcome else {
+                continue;
+            };
+            callback_cleanup_live_instance_ids.insert(active_live_instance_id);
+            workspace.active_live_instance_id = None;
+            workspace.updated_at = now;
+            workspace.revision = workspace.revision.next();
+            entities.extend(ControlPlaneState::persistence_entities_for_workspace(
+                &workspace,
+            ));
+            entities.extend(
+                ControlPlaneState::persistence_entities_for_reconcile_outcome(
+                    &workspace.workspace_id,
+                    outcome,
+                ),
+            );
+            affected_workspaces.push(workspace.workspace_id);
+        }
+
+        let callback_cleanup_live_instance_ids = callback_cleanup_live_instance_ids
+            .into_iter()
+            .collect::<Vec<_>>();
+        self.store
+            .delete_intervention_callbacks_for_live_instances(
+                &callback_cleanup_live_instance_ids,
+            )?;
+        self.upsert_persistence_entities(entities)?;
+        for workspace_id in affected_workspaces {
+            let _ = self
+                .events
+                .send(CoreEvent::WorkspaceChanged { workspace_id });
+        }
+        Ok(())
     }
 
     pub fn workspace_revision(&self, workspace_id: &WorkspaceId) -> Option<Revision> {
@@ -2574,11 +2888,38 @@ impl LucarneCore {
     }
 
     pub fn status_snapshot(&self, workspace_id: &WorkspaceId) -> Option<StatusSnapshot> {
-        self.state
-            .read()
-            .expect("control plane lock")
-            .status_snapshot(workspace_id)
-            .ok()
+        let workspace = self.workspace_binding(workspace_id)?;
+        let provider_session = workspace
+            .active_provider_session_id
+            .as_ref()
+            .and_then(|provider_session_id| self.provider_session_record(provider_session_id));
+        let live_instance = workspace
+            .active_live_instance_id
+            .as_ref()
+            .and_then(|live_instance_id| self.live_instance_record(live_instance_id));
+        let channel_binding = self
+            .channel_bindings_for_workspace(workspace_id)
+            .into_iter()
+            .next();
+        let last_reconcile_outcome =
+            self.store
+                .reconcile_outcome(workspace_id)
+                .unwrap_or_else(|err| {
+                    warn!(
+                        target: "lucarne::core_service",
+                        workspace_id = workspace_id.as_str(),
+                        error = %err,
+                        "reconcile outcome store lookup failed"
+                    );
+                    None
+                });
+        Some(build_status_snapshot(
+            Some(&workspace),
+            provider_session.as_ref(),
+            live_instance.as_ref(),
+            channel_binding.as_ref(),
+            last_reconcile_outcome,
+        ))
     }
 
     pub async fn refresh_workspace_status_snapshot(
@@ -2676,30 +3017,56 @@ impl LucarneCore {
         workspace_id: &WorkspaceId,
         status: &AgentStatus,
     ) -> Result<Option<StatusSnapshot>, CoreError> {
-        let Some((snapshot, entities)) = ({
-            let mut state = self.state.write().expect("control plane lock");
-            let Some(provider_session_id) = state
-                .status_snapshot(workspace_id)
-                .ok()
-                .and_then(|snapshot| snapshot.provider_session_id)
-            else {
-                return Ok(None);
-            };
-            state.update_provider_status(&provider_session_id, status)?;
-            Some((
-                state.status_snapshot(workspace_id).ok(),
-                state.persistence_entities_without_timeline(),
-            ))
-        }) else {
+        let Some(provider_session_id) = self
+            .workspace_binding(workspace_id)
+            .and_then(|workspace| workspace.active_provider_session_id)
+        else {
             return Ok(None);
         };
-        self.persist_non_timeline_entities(entities)?;
-        Ok(snapshot)
+        let provider_session = self
+            .store
+            .provider_session(&provider_session_id)?
+            .ok_or_else(|| {
+                ControlPlaneError::MissingProviderSession(provider_session_id.clone())
+            })?;
+        let updated = {
+            let mut state = self.state.write().expect("control plane lock");
+            state.upsert_provider_session(provider_session);
+            state.update_provider_status(&provider_session_id, status)?
+        };
+        self.upsert_persistence_entities(
+            ControlPlaneState::persistence_entities_for_provider_session(&updated),
+        )?;
+        Ok(self.status_snapshot(workspace_id))
     }
 
     pub fn plan_activation(&self, request: ActivationRequest) -> Result<ActivationPlan, CoreError> {
-        let state = self.state.read().expect("control plane lock");
-        Ok(state.plan_activation(request)?)
+        let workspace = self
+            .workspace_binding(&request.workspace_id)
+            .ok_or_else(|| ControlPlaneError::MissingWorkspace(request.workspace_id.clone()))?;
+        let existing_binding = self
+            .channel_bindings_for_workspace(&request.workspace_id)
+            .into_iter()
+            .find(|binding| {
+                binding.channel == request.channel && binding.chat_id == request.chat_id
+            });
+        let provider_session = workspace
+            .active_provider_session_id
+            .as_ref()
+            .and_then(|provider_session_id| self.provider_session_record(provider_session_id));
+        let live_instance = workspace
+            .active_live_instance_id
+            .as_ref()
+            .and_then(|live_instance_id| self.live_instance_record(live_instance_id));
+        let turns = self.store.turns_for_workspace(&request.workspace_id)?;
+        Ok(ControlPlaneState::plan_activation_from_records(
+            request,
+            workspace,
+            existing_binding,
+            provider_session,
+            live_instance,
+            turns,
+        ))
     }
 
     pub fn record_reconcile_outcome(
@@ -2707,10 +3074,12 @@ impl LucarneCore {
         workspace_id: WorkspaceId,
         outcome: ReconcileOutcome,
     ) -> Result<(), CoreError> {
-        self.mutate_state_and_persist(|state| {
-            state.record_reconcile_outcome(workspace_id, outcome)?;
-            Ok(())
-        })
+        if self.store.workspace(&workspace_id)?.is_none() {
+            return Err(ControlPlaneError::MissingWorkspace(workspace_id).into());
+        }
+        self.upsert_persistence_entities(
+            ControlPlaneState::persistence_entities_for_reconcile_outcome(&workspace_id, outcome),
+        )
     }
 
     /// Record reconcile outcomes for multiple workspaces in a single
@@ -2723,12 +3092,25 @@ impl LucarneCore {
         if outcomes.is_empty() {
             return Ok(());
         }
-        self.mutate_state_and_persist(|state| {
-            for (workspace_id, outcome) in outcomes {
-                state.record_reconcile_outcome(workspace_id, outcome)?;
+        let mut deduped = HashMap::<WorkspaceId, ReconcileOutcome>::new();
+        for (workspace_id, outcome) in outcomes {
+            deduped.insert(workspace_id, outcome);
+        }
+        for workspace_id in deduped.keys() {
+            if self.store.workspace(workspace_id)?.is_none() {
+                return Err(ControlPlaneError::MissingWorkspace(workspace_id.clone()).into());
             }
-            Ok(())
-        })
+        }
+        let mut entities = Vec::new();
+        for (workspace_id, outcome) in deduped {
+            entities.extend(
+                ControlPlaneState::persistence_entities_for_reconcile_outcome(
+                    &workspace_id,
+                    outcome,
+                ),
+            );
+        }
+        self.upsert_persistence_entities(entities)
     }
 
     pub fn register_command_callback(
@@ -2739,25 +3121,46 @@ impl LucarneCore {
         args: Option<SmolStr>,
         values: serde_json::Value,
     ) -> Result<Option<CommandCallbackRecord>, CoreError> {
-        self.mutate_state_and_persist(|state| {
-            Ok(state.register_command_callback(
+        let Some(workspace) = self.store.workspace(&workspace_id)? else {
+            return Ok(None);
+        };
+        let (record, entities) = {
+            let mut state = self.state.write().expect("control plane lock");
+            state.record_workspace_projection(workspace);
+            let record = state.register_command_callback(
                 workspace_id,
                 catalog_revision,
                 command_name,
                 args,
                 values,
-            ))
-        })
+            );
+            (record, state.persistence_entities_without_timeline())
+        };
+        self.persist_non_timeline_entities(entities)?;
+        if let Some(record) = &record {
+            self.store.upsert_entity_state(
+                "command_callback",
+                record.token.as_str(),
+                Some(record.workspace_id.as_str()),
+                record,
+            )?;
+        }
+        Ok(record)
     }
 
     pub fn resolve_command_callback(
         &self,
         token: &CommandCallbackToken,
     ) -> Option<CommandCallbackRecord> {
-        self.state
-            .read()
-            .expect("control plane lock")
-            .resolve_command_callback(token)
+        self.store.command_callback(token).unwrap_or_else(|err| {
+            warn!(
+                target: "lucarne::core_service",
+                token = token.as_str(),
+                error = %err,
+                "command callback store lookup failed"
+            );
+            None
+        })
     }
 
     pub fn register_intervention_callback(
@@ -2767,26 +3170,64 @@ impl LucarneCore {
         req_id: impl Into<SmolStr>,
         action: serde_json::Value,
     ) -> Result<Option<InterventionCallbackRecord>, CoreError> {
-        self.mutate_state_and_persist(|state| {
-            Ok(
-                state.register_intervention_callback(
-                    workspace_id,
-                    live_instance_id,
-                    req_id,
-                    action,
-                ),
-            )
-        })
+        let Some(workspace) = self.store.workspace(&workspace_id)? else {
+            return Ok(None);
+        };
+        let live_workspace_id = self
+            .store
+            .workspace_id_for_live_instance(&live_instance_id)?;
+        if live_workspace_id.as_ref() != Some(&workspace_id) {
+            return Ok(None);
+        }
+        if workspace.active_live_instance_id.as_ref() != Some(&live_instance_id) {
+            return Ok(None);
+        }
+        let Some(live) = self.store.live_instance(&live_instance_id)? else {
+            return Ok(None);
+        };
+        let Some(provider_session) = self.store.provider_session(&live.provider_session_id)? else {
+            return Ok(None);
+        };
+        let (record, entities) = {
+            let mut state = self.state.write().expect("control plane lock");
+            state.record_workspace_projection(workspace);
+            state.upsert_provider_session(provider_session);
+            state.record_live_instance_projection(live, Some(workspace_id.clone()));
+            let record = state.register_intervention_callback(
+                workspace_id,
+                live_instance_id,
+                req_id,
+                action,
+            );
+            (record, state.persistence_entities_without_timeline())
+        };
+        self.persist_non_timeline_entities(entities)?;
+        if let Some(record) = &record {
+            self.store.upsert_entity_state(
+                "intervention_callback",
+                record.token.as_str(),
+                Some(record.workspace_id.as_str()),
+                record,
+            )?;
+        }
+        Ok(record)
     }
 
     pub fn resolve_intervention_callback_record(
         &self,
         token: &InterventionCallbackToken,
     ) -> Option<InterventionCallbackRecord> {
-        self.state
-            .read()
-            .expect("control plane lock")
-            .resolve_intervention_callback(token)
+        self.store
+            .intervention_callback(token)
+            .unwrap_or_else(|err| {
+                warn!(
+                    target: "lucarne::core_service",
+                    token = token.as_str(),
+                    error = %err,
+                    "intervention callback store lookup failed"
+                );
+                None
+            })
     }
 
     pub fn remove_intervention_callbacks_for_request(
@@ -2794,28 +3235,42 @@ impl LucarneCore {
         live_instance_id: &LiveInstanceId,
         req_id: &str,
     ) -> Result<(), CoreError> {
-        self.mutate_state_and_persist(|state| {
-            state.remove_intervention_callbacks_for_request(live_instance_id, req_id);
-            Ok(())
-        })
+        self.state
+            .write()
+            .expect("control plane lock")
+            .remove_intervention_callbacks_for_request(live_instance_id, req_id);
+        self.store
+            .delete_intervention_callbacks_for_request(live_instance_id, req_id)?;
+        Ok(())
     }
 
     pub fn command_workflows_for_workspace(
         &self,
         workspace_id: &WorkspaceId,
     ) -> Vec<CommandWorkflow> {
-        self.state
-            .read()
-            .expect("control plane lock")
+        self.store
             .command_workflows_for_workspace(workspace_id)
+            .unwrap_or_else(|err| {
+                warn!(
+                    target: "lucarne::core_service",
+                    workspace_id = workspace_id.as_str(),
+                    error = %err,
+                    "command workflow store lookup failed"
+                );
+                Vec::new()
+            })
     }
 
     pub fn command_workflow(&self, command_id: &CommandId) -> Option<CommandWorkflow> {
-        self.state
-            .read()
-            .expect("control plane lock")
-            .get_command(command_id)
-            .cloned()
+        self.store.command(command_id).unwrap_or_else(|err| {
+            warn!(
+                target: "lucarne::core_service",
+                command_id = command_id.as_str(),
+                error = %err,
+                "command workflow store lookup failed"
+            );
+            None
+        })
     }
 
     pub fn timeline_kinds(&self, workspace_id: &WorkspaceId) -> Vec<TimelineItemKind> {
@@ -2829,20 +3284,34 @@ impl LucarneCore {
     }
 
     pub fn subagent_links_for_turn(&self, turn_id: &TurnId) -> Vec<SubAgentLinkRecord> {
-        self.state
-            .read()
-            .expect("control plane lock")
+        self.store
             .subagent_links_for_turn(turn_id)
+            .unwrap_or_else(|err| {
+                warn!(
+                    target: "lucarne::core_service",
+                    turn_id = turn_id.as_str(),
+                    error = %err,
+                    "subagent links for turn store lookup failed"
+                );
+                Vec::new()
+            })
     }
 
     pub fn subagent_links_for_workspace(
         &self,
         workspace_id: &WorkspaceId,
     ) -> Vec<SubAgentLinkRecord> {
-        self.state
-            .read()
-            .expect("control plane lock")
+        self.store
             .subagent_links_for_workspace(workspace_id)
+            .unwrap_or_else(|err| {
+                warn!(
+                    target: "lucarne::core_service",
+                    workspace_id = workspace_id.as_str(),
+                    error = %err,
+                    "subagent links for workspace store lookup failed"
+                );
+                Vec::new()
+            })
     }
 
     pub fn register_subagent_callback(
@@ -2850,26 +3319,62 @@ impl LucarneCore {
         workspace_id: WorkspaceId,
         link_id: SubAgentLinkId,
     ) -> Result<Option<SubAgentCallbackRecord>, CoreError> {
-        self.mutate_state_and_persist(|state| {
-            Ok(state.register_subagent_callback(workspace_id, link_id))
-        })
+        let Some(workspace) = self.store.workspace(&workspace_id)? else {
+            return Ok(None);
+        };
+        let Some(link) = self.store.subagent_link(&link_id)? else {
+            return Ok(None);
+        };
+        if link.workspace_id != workspace_id {
+            return Ok(None);
+        }
+        let (record, entities) = {
+            let mut state = self.state.write().expect("control plane lock");
+            state.record_workspace_projection(workspace);
+            state.record_subagent_link_projection(link);
+            let record = state.register_subagent_callback(workspace_id, link_id);
+            (record, state.persistence_entities_without_timeline())
+        };
+        self.persist_non_timeline_entities(entities)?;
+        if let Some(record) = &record {
+            self.store.upsert_entity_state(
+                "subagent_callback",
+                record.token.as_str(),
+                Some(record.workspace_id.as_str()),
+                record,
+            )?;
+        }
+        Ok(record)
     }
 
     pub fn resolve_subagent_callback_record(
         &self,
         token: &SubAgentCallbackToken,
     ) -> Option<SubAgentCallbackRecord> {
-        self.state
-            .read()
-            .expect("control plane lock")
-            .resolve_subagent_callback(token)
+        self.store.subagent_callback(token).unwrap_or_else(|err| {
+            warn!(
+                target: "lucarne::core_service",
+                token = token.as_str(),
+                error = %err,
+                "subagent callback store lookup failed"
+            );
+            None
+        })
     }
 
     pub fn openable_subagent_link(&self, link_id: &SubAgentLinkId) -> Option<SubAgentLinkRecord> {
-        self.state
-            .read()
-            .expect("control plane lock")
-            .openable_subagent_link(link_id)
+        self.store
+            .subagent_link(link_id)
+            .unwrap_or_else(|err| {
+                warn!(
+                    target: "lucarne::core_service",
+                    link_id = link_id.as_str(),
+                    error = %err,
+                    "subagent link store lookup failed"
+                );
+                None
+            })
+            .filter(|link| link.openable)
     }
 
     pub fn attach_subagent_child_workspace(
@@ -2877,9 +3382,23 @@ impl LucarneCore {
         link_id: &SubAgentLinkId,
         child_workspace_id: WorkspaceId,
     ) -> Result<Option<SubAgentLinkRecord>, CoreError> {
-        self.mutate_state_and_persist(|state| {
-            Ok(state.attach_subagent_child_workspace(link_id, child_workspace_id))
-        })
+        let Some(link) = self.store.subagent_link(link_id)? else {
+            return Ok(None);
+        };
+        let updated = {
+            let mut state = self.state.write().expect("control plane lock");
+            state.record_subagent_link_projection(link);
+            state.attach_subagent_child_workspace(link_id, child_workspace_id)
+        };
+        if let Some(updated) = &updated {
+            self.store.upsert_entity_state(
+                "subagent_link",
+                updated.link_id.as_str(),
+                Some(updated.workspace_id.as_str()),
+                updated,
+            )?;
+        }
+        Ok(updated)
     }
 
     pub fn start_turn(
@@ -2891,8 +3410,30 @@ impl LucarneCore {
         input: impl Into<SmolStr>,
         reply_to_channel_message_id: Option<i64>,
     ) -> Result<TurnRecord, CoreError> {
+        let Some(workspace) = self.store.workspace(&workspace_id)? else {
+            return Err(ControlPlaneError::MissingWorkspace(workspace_id).into());
+        };
+        let Some(provider_session) = self.store.provider_session(&provider_session_id)? else {
+            return Err(ControlPlaneError::MissingProviderSession(provider_session_id).into());
+        };
+        let live_workspace_id = self
+            .store
+            .workspace_id_for_live_instance(&live_instance_id)?;
+        if live_workspace_id.as_ref() != Some(&workspace_id) {
+            return Err(ControlPlaneError::WorkspaceActiveBindingMismatch {
+                workspace_id,
+                live_instance_id,
+            }
+            .into());
+        }
+        let Some(live) = self.store.live_instance(&live_instance_id)? else {
+            return Err(ControlPlaneError::MissingLiveInstance(live_instance_id).into());
+        };
         let (turn, entities) = {
             let mut state = self.state.write().expect("control plane lock");
+            state.record_workspace_projection(workspace);
+            state.upsert_provider_session(provider_session);
+            state.record_live_instance_projection(live, live_workspace_id);
             let turn = state.start_turn(
                 workspace_id,
                 provider_session_id,
@@ -2918,23 +3459,42 @@ impl LucarneCore {
     }
 
     pub fn start_command(&self, workflow: CommandWorkflow) -> Result<CommandWorkflow, CoreError> {
-        self.mutate_state_and_persist(|state| Ok(state.start_command(workflow)?))
+        let Some(workspace) = self.store.workspace(&workflow.workspace_id)? else {
+            return Err(ControlPlaneError::MissingWorkspace(workflow.workspace_id).into());
+        };
+        let Some(turn) = self.store.turn(&workflow.turn_id)? else {
+            return Err(ControlPlaneError::MissingTurn(workflow.turn_id).into());
+        };
+        let (command, entities) = {
+            let mut state = self.state.write().expect("control plane lock");
+            state.record_workspace_projection(workspace);
+            state.record_turn_projection(turn);
+            let command = state.start_command(workflow)?;
+            (command, state.persistence_entities_without_timeline())
+        };
+        self.persist_non_timeline_entities(entities)?;
+        self.store.upsert_entity_state(
+            "command",
+            command.command_id.as_str(),
+            Some(command.workspace_id.as_str()),
+            &command,
+        )?;
+        Ok(command)
     }
 
     pub fn active_provider_session_ref(
         &self,
         workspace_id: &WorkspaceId,
     ) -> Result<String, CoreError> {
-        let state = self.state.read().expect("control plane lock");
-        let workspace = state
-            .get_workspace(workspace_id)
+        let workspace = self
+            .workspace_binding(workspace_id)
             .ok_or_else(|| CoreError::invalid_state("workspace not found"))?;
         let provider_session_id = workspace
             .active_provider_session_id
             .as_ref()
             .ok_or_else(|| CoreError::invalid_state("workspace has no active provider session"))?;
-        let provider_session = state
-            .get_provider_session(provider_session_id)
+        let provider_session = self
+            .provider_session_record(provider_session_id)
             .ok_or_else(|| CoreError::invalid_state("provider session not found"))?;
         Ok(provider_session.native_resume_ref.to_string())
     }
@@ -2943,15 +3503,14 @@ impl LucarneCore {
         &self,
         workspace_id: &WorkspaceId,
     ) -> Result<ProviderSessionId, CoreError> {
-        let state = self.state.read().expect("control plane lock");
-        let workspace = state
-            .get_workspace(workspace_id)
+        let workspace = self
+            .workspace_binding(workspace_id)
             .ok_or_else(|| CoreError::invalid_state("workspace not found"))?;
         let provider_session_id = workspace
             .active_provider_session_id
             .as_ref()
             .ok_or_else(|| CoreError::invalid_state("workspace has no active provider session"))?;
-        if state.get_provider_session(provider_session_id).is_none() {
+        if self.provider_session_record(provider_session_id).is_none() {
             return Err(CoreError::invalid_state("provider session not found"));
         }
         Ok(provider_session_id.clone())
@@ -2962,23 +3521,32 @@ impl LucarneCore {
         turn_id: TurnId,
         usage: Option<serde_json::Value>,
     ) -> Result<(), CoreError> {
-        let (workspace_id, entities, needs_full_replace) = {
+        let Some(turn_record) = self.store.turn(&turn_id)? else {
+            return Err(ControlPlaneError::MissingTurn(turn_id).into());
+        };
+        let live_owner = self
+            .store
+            .workspace_id_for_live_instance(&turn_record.live_instance_id)?;
+        let Some(live_record) = self.store.live_instance(&turn_record.live_instance_id)? else {
+            return Err(
+                ControlPlaneError::MissingLiveInstance(turn_record.live_instance_id).into(),
+            );
+        };
+        let (workspace_id, live_instance_id, entities) = {
             let mut state = self.state.write().expect("control plane lock");
-            let needs_full_replace = state.turn_has_intervention_callbacks(&turn_id)?;
+            state.record_turn_projection(turn_record);
+            state.record_live_instance_projection(live_record, live_owner);
             let turn = state.complete_turn_with_usage(turn_id.clone(), usage)?;
             let workspace_id = turn.workspace_id;
-            let entities = if needs_full_replace {
-                state.persistence_entities_without_timeline()
-            } else {
-                state.persistence_entities_for_turn_lifecycle(&turn_id)
-            };
-            (workspace_id, entities, needs_full_replace)
+            let live_instance_id = turn.live_instance_id.clone();
+            let entities = state.persistence_entities_for_turn_lifecycle(&turn_id);
+            (workspace_id, live_instance_id, entities)
         };
-        if needs_full_replace {
-            self.persist_non_timeline_entities(entities)?;
-        } else {
-            self.upsert_persistence_entities(entities)?;
-        }
+        self.store
+            .delete_intervention_callbacks_for_live_instances(std::slice::from_ref(
+                &live_instance_id,
+            ))?;
+        self.upsert_persistence_entities(entities)?;
         self.remove_submitted_turn(&workspace_id, &turn_id);
         Ok(())
     }
@@ -2988,45 +3556,106 @@ impl LucarneCore {
         turn_id: &TurnId,
         usage: serde_json::Value,
     ) -> Result<(), CoreError> {
-        self.mutate_state_and_persist(|state| {
-            state.update_turn_usage(turn_id, usage)?;
-            Ok(())
-        })
+        let Some(turn_record) = self.store.turn(turn_id)? else {
+            return Err(ControlPlaneError::MissingTurn(turn_id.clone()).into());
+        };
+        let updated = {
+            let mut state = self.state.write().expect("control plane lock");
+            state.record_turn_projection(turn_record);
+            state.update_turn_usage(turn_id, usage)?
+        };
+        self.upsert_persistence_entities(ControlPlaneState::persistence_entities_for_turn_record(
+            &updated,
+        ))
     }
 
     pub fn mark_turn_waiting_permission(&self, turn_id: &TurnId) -> Result<(), CoreError> {
-        self.mutate_state_and_persist(|state| {
-            state.mark_turn_waiting_permission(turn_id)?;
-            Ok(())
-        })
+        let Some(turn_record) = self.store.turn(turn_id)? else {
+            return Err(ControlPlaneError::MissingTurn(turn_id.clone()).into());
+        };
+        let live_owner = self
+            .store
+            .workspace_id_for_live_instance(&turn_record.live_instance_id)?;
+        let Some(live_record) = self.store.live_instance(&turn_record.live_instance_id)? else {
+            return Err(
+                ControlPlaneError::MissingLiveInstance(turn_record.live_instance_id).into(),
+            );
+        };
+        let live = {
+            let mut state = self.state.write().expect("control plane lock");
+            state.record_turn_projection(turn_record);
+            state.record_live_instance_projection(live_record, live_owner.clone());
+            state.mark_turn_waiting_permission(turn_id)?
+        };
+        self.upsert_persistence_entities(ControlPlaneState::persistence_entities_for_live_instance(
+            &live,
+            live_owner.as_ref(),
+        ))
     }
 
     pub fn mark_live_instance_running(
         &self,
         live_instance_id: &LiveInstanceId,
     ) -> Result<(), CoreError> {
-        self.mutate_state_and_persist(|state| {
-            state.mark_live_instance_running(live_instance_id)?;
-            Ok(())
-        })
+        let live_owner = self
+            .store
+            .workspace_id_for_live_instance(live_instance_id)?;
+        let Some(live_record) = self.store.live_instance(live_instance_id)? else {
+            return Err(ControlPlaneError::MissingLiveInstance(live_instance_id.clone()).into());
+        };
+        let live = {
+            let mut state = self.state.write().expect("control plane lock");
+            state.record_live_instance_projection(live_record, live_owner.clone());
+            state.mark_live_instance_running(live_instance_id)?
+        };
+        self.upsert_persistence_entities(ControlPlaneState::persistence_entities_for_live_instance(
+            &live,
+            live_owner.as_ref(),
+        ))
     }
 
     pub fn fail_turn(&self, turn_id: TurnId, error: &str) -> Result<(), CoreError> {
-        let (workspace_id, entities) = {
+        let Some(turn_record) = self.store.turn(&turn_id)? else {
+            return Err(ControlPlaneError::MissingTurn(turn_id).into());
+        };
+        let live_owner = self
+            .store
+            .workspace_id_for_live_instance(&turn_record.live_instance_id)?;
+        let Some(live_record) = self.store.live_instance(&turn_record.live_instance_id)? else {
+            return Err(
+                ControlPlaneError::MissingLiveInstance(turn_record.live_instance_id).into(),
+            );
+        };
+        let (workspace_id, live_instance_id, entities) = {
             let mut state = self.state.write().expect("control plane lock");
+            state.record_turn_projection(turn_record);
+            state.record_live_instance_projection(live_record, live_owner);
             let turn = state.fail_turn(turn_id.clone(), error)?;
             let workspace_id = turn.workspace_id;
+            let live_instance_id = turn.live_instance_id.clone();
             let entities = state.persistence_entities_for_turn_lifecycle(&turn_id);
-            (workspace_id, entities)
+            (workspace_id, live_instance_id, entities)
         };
+        self.store
+            .delete_intervention_callbacks_for_live_instances(std::slice::from_ref(
+                &live_instance_id,
+            ))?;
         self.upsert_persistence_entities(entities)?;
         self.remove_submitted_turn(&workspace_id, &turn_id);
         Ok(())
     }
 
     pub fn append_timeline(&self, item: TimelineItem) -> Result<TimelineItem, CoreError> {
+        let Some(workspace) = self.store.workspace(&item.workspace_id)? else {
+            return Err(ControlPlaneError::MissingWorkspace(item.workspace_id).into());
+        };
+        let Some(turn) = self.store.turn(&item.turn_id)? else {
+            return Err(ControlPlaneError::MissingTurn(item.turn_id).into());
+        };
         let (item, entities) = {
             let mut state = self.state.write().expect("control plane lock");
+            state.record_workspace_projection(workspace);
+            state.record_turn_projection(turn);
             let item = state.append_timeline(item)?;
             let entities = state.persistence_entities_for_timeline_item(&item);
             (item, entities)
@@ -3044,25 +3673,55 @@ impl LucarneCore {
     }
 
     pub fn turn_record(&self, turn_id: &TurnId) -> Option<TurnRecord> {
-        self.state
-            .read()
-            .expect("control plane lock")
-            .get_turn(turn_id)
-            .cloned()
+        self.store.turn(turn_id).unwrap_or_else(|err| {
+            warn!(
+                target: "lucarne::core_service",
+                turn_id = turn_id.as_str(),
+                error = %err,
+                "turn store lookup failed"
+            );
+            None
+        })
     }
 
     pub fn record_subagent_action(
         &self,
         action: SubAgentActionRecord,
     ) -> Result<SubAgentActionRecord, CoreError> {
-        self.mutate_state_and_persist(|state| Ok(state.record_subagent_action(action)))
+        let (action, entities) = {
+            let mut state = self.state.write().expect("control plane lock");
+            let action = state.record_subagent_action(action);
+            (action, state.persistence_entities_without_timeline())
+        };
+        self.persist_non_timeline_entities(entities)?;
+        self.store.upsert_entity_state(
+            "subagent_action",
+            action.action_id.as_str(),
+            Some(action.workspace_id.as_str()),
+            &action,
+        )?;
+        Ok(action)
     }
 
     pub fn upsert_subagent_link(
         &self,
         link: SubAgentLinkRecord,
     ) -> Result<SubAgentLinkRecord, CoreError> {
-        self.mutate_state_and_persist(|state| Ok(state.upsert_subagent_link(link)))
+        let existing = self.store.subagent_link(&link.link_id)?;
+        let link = {
+            let mut state = self.state.write().expect("control plane lock");
+            if let Some(existing) = existing {
+                state.record_subagent_link_projection(existing);
+            }
+            state.upsert_subagent_link(link)
+        };
+        self.store.upsert_entity_state(
+            "subagent_link",
+            link.link_id.as_str(),
+            Some(link.workspace_id.as_str()),
+            &link,
+        )?;
+        Ok(link)
     }
 
     pub fn complete_command_for_policy(
@@ -3071,17 +3730,39 @@ impl LucarneCore {
         policy: CommandCompletionPolicy,
         result: serde_json::Value,
     ) -> Result<(), CoreError> {
-        self.mutate_state_and_persist(|state| {
-            state.complete_command_for_policy(command_id, policy, result)?;
-            Ok(())
-        })
+        let Some(command) = self.store.command(&command_id)? else {
+            return Err(ControlPlaneError::MissingCommand(command_id).into());
+        };
+        let updated = {
+            let mut state = self.state.write().expect("control plane lock");
+            state.record_command_projection(command);
+            state.complete_command_for_policy(command_id, policy, result)?
+        };
+        self.store.upsert_entity_state(
+            "command",
+            updated.command_id.as_str(),
+            Some(updated.workspace_id.as_str()),
+            &updated,
+        )?;
+        Ok(())
     }
 
     pub fn fail_command(&self, command_id: CommandId, error: &str) -> Result<(), CoreError> {
-        self.mutate_state_and_persist(|state| {
-            state.fail_command(command_id, error)?;
-            Ok(())
-        })
+        let Some(command) = self.store.command(&command_id)? else {
+            return Err(ControlPlaneError::MissingCommand(command_id).into());
+        };
+        let updated = {
+            let mut state = self.state.write().expect("control plane lock");
+            state.record_command_projection(command);
+            state.fail_command(command_id, error)?
+        };
+        self.store.upsert_entity_state(
+            "command",
+            updated.command_id.as_str(),
+            Some(updated.workspace_id.as_str()),
+            &updated,
+        )?;
+        Ok(())
     }
 
     pub fn runtime(&self) -> Arc<AgentRuntime> {
@@ -3118,25 +3799,6 @@ impl LucarneCore {
             project_path: Some(binding.project_path),
             revision: binding.revision,
         }
-    }
-
-    fn mutate_state_and_snapshot<T>(
-        &self,
-        mutate: impl FnOnce(&mut ControlPlaneState) -> Result<T, CoreError>,
-    ) -> Result<(T, Vec<ControlPlanePersistenceEntity>), CoreError> {
-        let mut state = self.state.write().expect("control plane lock");
-        let result = mutate(&mut state)?;
-        let entities = state.persistence_entities_without_timeline();
-        Ok((result, entities))
-    }
-
-    fn mutate_state_and_persist<T>(
-        &self,
-        mutate: impl FnOnce(&mut ControlPlaneState) -> Result<T, CoreError>,
-    ) -> Result<T, CoreError> {
-        let (result, entities) = self.mutate_state_and_snapshot(mutate)?;
-        self.persist_non_timeline_entities(entities)?;
-        Ok(result)
     }
 
     fn mutate_system_settings_and_persist<T>(
@@ -3186,20 +3848,23 @@ impl LucarneCore {
             WorkspaceId::new(format!("{}:{}", provider_id, uuid::Uuid::new_v4()))
         });
         let project_path = project_path.unwrap_or_else(default_project_path);
-        let (summary, entities) = {
+        let existing_workspace = self.store.workspace(&workspace_id)?;
+        let (summary, binding) = {
             let mut state = self.state.write().expect("control plane lock");
+            if let Some(existing_workspace) = existing_workspace {
+                state.record_workspace_projection(existing_workspace);
+            }
             let binding = state.upsert_workspace(WorkspaceBinding::new(
                 workspace_id.clone(),
                 title,
                 provider_id,
                 project_path,
             ));
-            (
-                self.summary_from_binding(binding),
-                state.persistence_entities_without_timeline(),
-            )
+            (self.summary_from_binding(binding.clone()), binding)
         };
-        self.persist_non_timeline_entities(entities)?;
+        self.upsert_persistence_entities(ControlPlaneState::persistence_entities_for_workspace(
+            &binding,
+        ))?;
         let _ = self.events.send(CoreEvent::WorkspaceChanged {
             workspace_id: workspace_id.clone(),
         });
@@ -3231,14 +3896,22 @@ impl LucarneCore {
         live_instance_id: &LiveInstanceId,
     ) -> Result<LiveWorkspace, CoreError> {
         let provider_session_id = provider_session_id(provider_id, native_resume_ref);
-        let entities = {
+        let existing_workspace = self.store.workspace(&workspace_id)?;
+        let existing_provider_session = self.store.provider_session(&provider_session_id)?;
+        let (workspace, provider_session, live) = {
             let mut state = self.state.write().expect("control plane lock");
-            state.upsert_provider_session(ProviderSessionRecord::new(
-                provider_session_id.clone(),
-                provider_id,
-                native_resume_ref,
-            ));
-            state.attach_live_instance(
+            if let Some(existing_workspace) = existing_workspace {
+                state.record_workspace_projection(existing_workspace);
+            }
+            let provider_session =
+                state.upsert_provider_session(existing_provider_session.unwrap_or_else(|| {
+                    ProviderSessionRecord::new(
+                        provider_session_id.clone(),
+                        provider_id,
+                        native_resume_ref,
+                    )
+                }));
+            let live = state.attach_live_instance(
                 workspace_id.clone(),
                 LiveInstanceRecord::new(
                     live_instance_id.clone(),
@@ -3247,9 +3920,23 @@ impl LucarneCore {
                     Option::<String>::None,
                 ),
             )?;
-            state.persistence_entities_without_timeline()
+            let workspace = state
+                .get_workspace(&workspace_id)
+                .ok_or_else(|| ControlPlaneError::MissingWorkspace(workspace_id.clone()))?
+                .clone();
+            (workspace, provider_session, live)
         };
-        self.persist_non_timeline_entities(entities)?;
+        self.upsert_persistence_entities(
+            [
+                ControlPlaneState::persistence_entities_for_workspace(&workspace),
+                ControlPlaneState::persistence_entities_for_provider_session(&provider_session),
+                ControlPlaneState::persistence_entities_for_live_instance(
+                    &live,
+                    Some(&workspace.workspace_id),
+                ),
+            ]
+            .concat(),
+        )?;
         let _ = self.events.send(CoreEvent::WorkspaceChanged {
             workspace_id: workspace_id.clone(),
         });
@@ -3258,6 +3945,43 @@ impl LucarneCore {
             provider_id,
             session_id: crate::agent_runtime::SessionId(SmolStr::new(native_resume_ref)),
         })
+    }
+
+    fn remove_runtime_workspace(
+        &self,
+        workspace_id: &WorkspaceId,
+    ) -> Option<Arc<dyn AgentSession>> {
+        let session = self
+            .live_sessions
+            .write()
+            .expect("live session registry lock")
+            .remove(workspace_id);
+        self.live_session_generations
+            .write()
+            .expect("live session generation lock")
+            .remove(workspace_id);
+        self.workspace_events
+            .write()
+            .expect("workspace event registry lock")
+            .remove(workspace_id);
+        self.notification_suppression
+            .write()
+            .expect("notification suppression lock")
+            .remove(workspace_id);
+        let removed_turns = self
+            .submitted_turns
+            .write()
+            .expect("submitted turn lock")
+            .remove(workspace_id)
+            .unwrap_or_default();
+        if !removed_turns.is_empty() {
+            let removed_turns = removed_turns.into_iter().collect::<HashSet<_>>();
+            self.submitted_turn_activity
+                .write()
+                .expect("submitted turn activity lock")
+                .retain(|turn_id, _| !removed_turns.contains(turn_id));
+        }
+        session
     }
 
     fn agent_resource_targets(
@@ -5044,6 +5768,773 @@ mod tests {
                 (first.turn_id, "reply: first".into()),
                 (second.turn_id, "reply: second".into())
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn register_subagent_callback_rejects_cross_workspace_link() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let core = LucarneCore::from_runtime_and_store(
+            Arc::new(AgentRuntime::new()),
+            ControlPlaneSqliteStore::open(temp.path().join("state.sqlite3")).expect("store"),
+        )
+        .expect("core");
+        let workspace_a = WorkspaceId::new("workspace-subagent-a");
+        let workspace_b = WorkspaceId::new("workspace-subagent-b");
+        for workspace_id in [workspace_a.clone(), workspace_b.clone()] {
+            core.upsert_workspace_binding(
+                workspace_id.clone(),
+                OpenWorkspaceRequest {
+                    provider_id: "codex",
+                    project_path: Some(temp.path().join(workspace_id.as_str())),
+                    title: workspace_id.as_str().into(),
+                },
+                Some(workspace_id.as_str()),
+            )
+            .expect("workspace binding");
+        }
+        let link_id = SubAgentLinkId::new("link-cross-workspace");
+        core.upsert_subagent_link(SubAgentLinkRecord::new_non_openable(
+            link_id.clone(),
+            workspace_a,
+            crate::control_plane::SubAgentActionId::new("action-cross-workspace"),
+            TurnId::new("turn-cross-workspace"),
+            provider_session_id("codex", "workspace-subagent-a"),
+            "child",
+        ))
+        .expect("subagent link");
+
+        assert!(core
+            .register_subagent_callback(workspace_b, link_id)
+            .expect("register callback")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn fork_projection_preserves_cold_provider_session_status_after_reload() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let db = temp.path().join("state.sqlite3");
+        let runtime = Arc::new(AgentRuntime::new());
+        runtime.register(Arc::new(CatalogProvider));
+        let core = LucarneCore::from_runtime_and_store(
+            Arc::clone(&runtime),
+            ControlPlaneSqliteStore::open(&db).expect("store"),
+        )
+        .expect("core");
+        let source_workspace_id = WorkspaceId::new("workspace-fork-source");
+        core.upsert_workspace_binding(
+            source_workspace_id.clone(),
+            OpenWorkspaceRequest {
+                provider_id: "codex",
+                project_path: Some(temp.path().join("project")),
+                title: "fork source".into(),
+            },
+            Some("thread-fork-source"),
+        )
+        .expect("source workspace");
+        core.record_provider_status(
+            &source_workspace_id,
+            &AgentStatus {
+                model: Some("gpt-5".into()),
+                ..Default::default()
+            },
+        )
+        .expect("provider status");
+        drop(core);
+
+        let reloaded = LucarneCore::from_runtime_and_store(
+            runtime,
+            ControlPlaneSqliteStore::open(&db).expect("reopen store"),
+        )
+        .expect("reloaded core");
+        reloaded
+            .record_fork_workspace_projection(
+                source_workspace_id,
+                WorkspaceId::new("workspace-fork-child"),
+                "fork child".into(),
+                "codex",
+                Some("thread-fork-source"),
+                None,
+            )
+            .expect("fork projection");
+
+        assert_eq!(
+            reloaded
+                .provider_session_record(&provider_session_id("codex", "thread-fork-source"))
+                .expect("provider session")
+                .model
+                .as_deref(),
+            Some("gpt-5")
+        );
+    }
+
+    #[tokio::test]
+    async fn cold_upserts_preserve_existing_metadata_after_lazy_reload() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let db = temp.path().join("state.sqlite3");
+        let store = ControlPlaneSqliteStore::open(&db).expect("store");
+        let workspace_id = WorkspaceId::new("workspace-cold-preserve");
+        let mut task = ScheduledTaskRecord::new(
+            ScheduledTaskId::new("task-cold-preserve"),
+            workspace_id.clone(),
+            "codex",
+            temp.path().join("project"),
+            "task before reload",
+            "prompt before reload",
+            10,
+        );
+        task.last_run_unix_ms = Some(77);
+        let task_created_at = task.created_at;
+        store
+            .upsert_entity_state(
+                "scheduled_task",
+                task.task_id.as_str(),
+                Some(task.workspace_id.as_str()),
+                &task,
+            )
+            .expect("seed task");
+        let binding = ChannelBinding::new(
+            ChannelBindingId::new("binding-cold-preserve"),
+            workspace_id.clone(),
+            "telegram",
+            "100",
+            Some("9"),
+        );
+        let binding_created_at = binding.created_at;
+        store
+            .upsert_entity_state(
+                "channel_binding",
+                binding.channel_binding_id.as_str(),
+                Some(binding.workspace_id.as_str()),
+                &binding,
+            )
+            .expect("seed binding");
+        let mut panel = PanelRenderRecord::new(
+            PanelRenderId::new("panel-cold-preserve"),
+            "telegram",
+            "100",
+            None::<&str>,
+            Revision::new(1),
+        );
+        panel.last_observed_stale_revision = Some(Revision::new(9));
+        let panel_created_at = panel.created_at;
+        store
+            .upsert_entity_state("panel_render", panel.panel_id.as_str(), None, &panel)
+            .expect("seed panel");
+        let mut link = SubAgentLinkRecord::new_non_openable(
+            SubAgentLinkId::new("link-cold-preserve"),
+            workspace_id.clone(),
+            crate::control_plane::SubAgentActionId::new("action-cold-preserve"),
+            TurnId::new("turn-cold-preserve"),
+            provider_session_id("codex", "thread-cold-preserve"),
+            "child",
+        );
+        link.revision = Revision::new(7);
+        let link_created_at = link.created_at;
+        store
+            .upsert_entity_state(
+                "subagent_link",
+                link.link_id.as_str(),
+                Some(link.workspace_id.as_str()),
+                &link,
+            )
+            .expect("seed link");
+        let runtime = Arc::new(AgentRuntime::new());
+        runtime.register(Arc::new(CatalogProvider));
+        let core = LucarneCore::from_runtime_and_store(runtime, store).expect("core");
+
+        let updated_task = core
+            .upsert_scheduled_task(UpsertScheduledTaskRequest {
+                task_id: ScheduledTaskId::new("task-cold-preserve"),
+                workspace_id: workspace_id.clone(),
+                provider_id: "codex",
+                project_path: temp.path().join("project"),
+                title: "task after reload".into(),
+                prompt: "prompt after reload".into(),
+                next_run_unix_ms: 20,
+                enabled: true,
+            })
+            .expect("upsert task");
+        assert_eq!(updated_task.last_run_unix_ms, Some(77));
+        assert_eq!(updated_task.created_at, task_created_at);
+
+        core.upsert_channel_binding(ChannelBinding::new(
+            ChannelBindingId::new("binding-cold-preserve"),
+            workspace_id.clone(),
+            "telegram",
+            "100",
+            Some("10"),
+        ))
+        .expect("upsert binding");
+        assert_eq!(
+            core.channel_binding(&ChannelBindingId::new("binding-cold-preserve"))
+                .expect("binding")
+                .created_at,
+            binding_created_at
+        );
+
+        core.upsert_panel_render(PanelRenderRecord::new(
+            PanelRenderId::new("panel-cold-preserve"),
+            "telegram",
+            "100",
+            None::<&str>,
+            Revision::new(2),
+        ))
+        .expect("upsert panel");
+        let updated_panel = core
+            .panel_render(&PanelRenderId::new("panel-cold-preserve"))
+            .expect("panel");
+        assert_eq!(
+            updated_panel.last_observed_stale_revision,
+            Some(Revision::new(9))
+        );
+        assert_eq!(updated_panel.created_at, panel_created_at);
+
+        let updated_link = core
+            .upsert_subagent_link(SubAgentLinkRecord::new_non_openable(
+                SubAgentLinkId::new("link-cold-preserve"),
+                workspace_id,
+                crate::control_plane::SubAgentActionId::new("action-cold-preserve"),
+                TurnId::new("turn-cold-preserve"),
+                provider_session_id("codex", "thread-cold-preserve"),
+                "child updated",
+            ))
+            .expect("upsert subagent link");
+        assert_eq!(updated_link.revision, Revision::new(8));
+        assert_eq!(updated_link.created_at, link_created_at);
+    }
+
+    #[tokio::test]
+    async fn remove_workspace_projection_clears_runtime_live_session() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let runtime = Arc::new(AgentRuntime::new());
+        runtime.register(Arc::new(RequestRecordingProvider::default()));
+        let core = LucarneCore::from_runtime_and_store(
+            runtime,
+            ControlPlaneSqliteStore::open(temp.path().join("state.sqlite3")).expect("store"),
+        )
+        .expect("core");
+        let workspace_id = WorkspaceId::new("workspace-remove-runtime");
+        core.upsert_workspace_binding(
+            workspace_id.clone(),
+            OpenWorkspaceRequest {
+                provider_id: "codex",
+                project_path: Some(temp.path().join("project")),
+                title: "remove runtime".into(),
+            },
+            Some("thread-remove-runtime"),
+        )
+        .expect("workspace binding");
+        core.resume_workspace_with_events(ResumeWorkspaceRequest {
+            workspace_id: workspace_id.clone(),
+            force_bypass_permissions: false,
+        })
+        .await
+        .expect("resume workspace");
+        assert!(core.has_live_session(&workspace_id));
+
+        core.remove_workspace_projection(&workspace_id)
+            .await
+            .expect("remove workspace");
+
+        assert!(!core.has_live_session(&workspace_id));
+    }
+
+    #[tokio::test]
+    async fn remove_workspace_projection_deletes_orphan_provider_session_and_message_bindings() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let core = LucarneCore::from_runtime_and_store(
+            Arc::new(AgentRuntime::new()),
+            ControlPlaneSqliteStore::open(temp.path().join("state.sqlite3")).expect("store"),
+        )
+        .expect("core");
+        let workspace_id = WorkspaceId::new("workspace-remove-orphan");
+        let provider_session_id = provider_session_id("codex", "thread-remove-orphan");
+        core.upsert_workspace_binding(
+            workspace_id.clone(),
+            OpenWorkspaceRequest {
+                provider_id: "codex",
+                project_path: Some(temp.path().join("project")),
+                title: "remove orphan".into(),
+            },
+            Some("thread-remove-orphan"),
+        )
+        .expect("workspace binding");
+        core.bind_message_to_provider_session(
+            "telegram",
+            "100",
+            "200",
+            provider_session_id.clone(),
+        )
+        .expect("message session binding");
+
+        core.remove_workspace_projection(&workspace_id)
+            .await
+            .expect("remove workspace");
+
+        assert!(core.workspace_binding(&workspace_id).is_none());
+        assert!(core.provider_session_record(&provider_session_id).is_none());
+        assert!(core
+            .message_session_binding("telegram", "100", "200")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn remove_workspace_projection_keeps_shared_provider_session() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let core = LucarneCore::from_runtime_and_store(
+            Arc::new(AgentRuntime::new()),
+            ControlPlaneSqliteStore::open(temp.path().join("state.sqlite3")).expect("store"),
+        )
+        .expect("core");
+        let provider_session_id = provider_session_id("codex", "thread-shared");
+        for workspace in ["workspace-shared-a", "workspace-shared-b"] {
+            core.upsert_workspace_binding(
+                WorkspaceId::new(workspace),
+                OpenWorkspaceRequest {
+                    provider_id: "codex",
+                    project_path: Some(temp.path().join(workspace)),
+                    title: workspace.into(),
+                },
+                Some("thread-shared"),
+            )
+            .expect("workspace binding");
+        }
+
+        core.remove_workspace_projection(&WorkspaceId::new("workspace-shared-a"))
+            .await
+            .expect("remove workspace");
+
+        assert!(core
+            .workspace_binding(&WorkspaceId::new("workspace-shared-a"))
+            .is_none());
+        assert!(core
+            .workspace_binding(&WorkspaceId::new("workspace-shared-b"))
+            .is_some());
+        assert!(core.provider_session_record(&provider_session_id).is_some());
+    }
+
+    #[tokio::test]
+    async fn record_reconcile_outcomes_batch_updates_cold_workspaces() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let db = temp.path().join("state.sqlite3");
+        let core = LucarneCore::from_runtime_and_store(
+            Arc::new(AgentRuntime::new()),
+            ControlPlaneSqliteStore::open(&db).expect("store"),
+        )
+        .expect("core");
+        for id in ["workspace-batch-a", "workspace-batch-b"] {
+            core.upsert_workspace_binding(
+                WorkspaceId::new(id),
+                OpenWorkspaceRequest {
+                    provider_id: "codex",
+                    project_path: Some(temp.path().join(id)),
+                    title: id.into(),
+                },
+                Some(id),
+            )
+            .expect("workspace binding");
+        }
+        drop(core);
+        let reloaded = LucarneCore::from_runtime_and_store(
+            Arc::new(AgentRuntime::new()),
+            ControlPlaneSqliteStore::open(&db).expect("reopen store"),
+        )
+        .expect("reload core");
+        assert!(reloaded
+            .state
+            .read()
+            .expect("control plane lock")
+            .workspace_bindings()
+            .is_empty());
+
+        reloaded
+            .record_reconcile_outcomes_batch(vec![
+                (WorkspaceId::new("workspace-batch-a"), ReconcileOutcome::Ok),
+                (
+                    WorkspaceId::new("workspace-batch-b"),
+                    ReconcileOutcome::StaleRevision,
+                ),
+            ])
+            .expect("record batch");
+
+        assert_eq!(
+            reloaded
+                .status_snapshot(&WorkspaceId::new("workspace-batch-b"))
+                .expect("status")
+                .last_reconcile_outcome,
+            Some(ReconcileOutcome::StaleRevision)
+        );
+    }
+
+    #[tokio::test]
+    async fn record_reconcile_outcomes_batch_rejects_missing_without_partial_write() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let core = LucarneCore::from_runtime_and_store(
+            Arc::new(AgentRuntime::new()),
+            ControlPlaneSqliteStore::open(temp.path().join("state.sqlite3")).expect("store"),
+        )
+        .expect("core");
+        let workspace_id = WorkspaceId::new("workspace-batch-present");
+        core.upsert_workspace_binding(
+            workspace_id.clone(),
+            OpenWorkspaceRequest {
+                provider_id: "codex",
+                project_path: Some(temp.path().join("project")),
+                title: "present".into(),
+            },
+            Some("thread-present"),
+        )
+        .expect("workspace binding");
+
+        let err = core
+            .record_reconcile_outcomes_batch(vec![
+                (workspace_id.clone(), ReconcileOutcome::StaleRevision),
+                (
+                    WorkspaceId::new("workspace-batch-missing"),
+                    ReconcileOutcome::Ok,
+                ),
+            ])
+            .expect_err("missing workspace rejects batch");
+        assert!(err.to_string().contains("MissingWorkspace"));
+        assert_eq!(
+            core.status_snapshot(&workspace_id)
+                .expect("status")
+                .last_reconcile_outcome,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_rebind_preserves_provider_session_status() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let core = LucarneCore::from_runtime_and_store(
+            Arc::new(AgentRuntime::new()),
+            ControlPlaneSqliteStore::open(temp.path().join("state.sqlite3")).expect("store"),
+        )
+        .expect("core");
+        let workspace_id = WorkspaceId::new("workspace-provider-status");
+        core.upsert_workspace_binding(
+            workspace_id.clone(),
+            OpenWorkspaceRequest {
+                provider_id: "codex",
+                project_path: Some(temp.path().join("project")),
+                title: "provider status".into(),
+            },
+            Some("thread-provider-status"),
+        )
+        .expect("workspace binding");
+        core.record_provider_status(
+            &workspace_id,
+            &AgentStatus {
+                model: Some("gpt-5".into()),
+                ..Default::default()
+            },
+        )
+        .expect("record status");
+
+        core.upsert_workspace_binding(
+            workspace_id.clone(),
+            OpenWorkspaceRequest {
+                provider_id: "codex",
+                project_path: Some(temp.path().join("project")),
+                title: "provider status renamed".into(),
+            },
+            Some("thread-provider-status"),
+        )
+        .expect("workspace rebind");
+
+        assert_eq!(
+            core.provider_session_record(&provider_session_id("codex", "thread-provider-status"))
+                .expect("provider session")
+                .model
+                .as_deref(),
+            Some("gpt-5")
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_cleanup_clears_cold_workspace_active_live_instance() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let db = temp.path().join("state.sqlite3");
+        let runtime = Arc::new(AgentRuntime::new());
+        runtime.register(Arc::new(CatalogProvider));
+        let core = LucarneCore::from_runtime_and_store(
+            runtime,
+            ControlPlaneSqliteStore::open(&db).expect("store"),
+        )
+        .expect("core");
+        let workspace_id = WorkspaceId::new("workspace-restart-cleanup");
+        core.upsert_workspace_binding(
+            workspace_id.clone(),
+            OpenWorkspaceRequest {
+                provider_id: "codex",
+                project_path: Some(temp.path().join("project")),
+                title: "restart cleanup".into(),
+            },
+            Some("thread-restart-cleanup"),
+        )
+        .expect("workspace binding");
+        let live_instance_id = live_instance_id("live-restart-cleanup");
+        core.attach_live_session_projection(
+            workspace_id.clone(),
+            "codex",
+            "thread-restart-cleanup",
+            &live_instance_id,
+        )
+        .expect("live projection");
+        core.start_turn(
+            workspace_id.clone(),
+            provider_session_id("codex", "thread-restart-cleanup"),
+            live_instance_id.clone(),
+            TurnSource::UserMessage,
+            "hello",
+            None,
+        )
+        .expect("running turn");
+        drop(core);
+
+        let reloaded = LucarneCore::from_runtime_and_store(
+            Arc::new(AgentRuntime::new()),
+            ControlPlaneSqliteStore::open(&db).expect("reopen store"),
+        )
+        .expect("reload core");
+        assert!(
+            reloaded
+                .state
+                .read()
+                .expect("control plane lock")
+                .get_workspace(&workspace_id)
+                .is_none(),
+            "workspace rows must stay cold after reload"
+        );
+        assert_eq!(
+            reloaded
+                .workspace_binding(&workspace_id)
+                .expect("workspace before cleanup")
+                .active_live_instance_id,
+            Some(live_instance_id.clone())
+        );
+
+        reloaded
+            .mark_live_instances_stale_after_restart("test restart")
+            .expect("restart cleanup");
+
+        let workspace = reloaded
+            .workspace_binding(&workspace_id)
+            .expect("workspace after cleanup");
+        assert_eq!(workspace.active_live_instance_id, None);
+        let live = reloaded
+            .live_instance_record(&live_instance_id)
+            .expect("live instance");
+        assert_eq!(live.state, LiveInstanceState::Stale);
+        assert_eq!(
+            reloaded
+                .status_snapshot(&workspace_id)
+                .expect("status")
+                .last_reconcile_outcome,
+            Some(ReconcileOutcome::LiveInstanceStale)
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_cleanup_clears_missing_active_live_without_live_row() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let db = temp.path().join("state.sqlite3");
+        let core = LucarneCore::from_runtime_and_store(
+            Arc::new(AgentRuntime::new()),
+            ControlPlaneSqliteStore::open(&db).expect("store"),
+        )
+        .expect("core");
+        let workspace_id = WorkspaceId::new("workspace-missing-live");
+        let provider_session_id = provider_session_id("codex", "thread-missing-live");
+        core.upsert_workspace_binding(
+            workspace_id.clone(),
+            OpenWorkspaceRequest {
+                provider_id: "codex",
+                project_path: Some(temp.path().join("project")),
+                title: "missing live".into(),
+            },
+            Some("thread-missing-live"),
+        )
+        .expect("workspace binding");
+        let mut workspace = core
+            .workspace_binding(&workspace_id)
+            .expect("workspace before patch");
+        workspace.active_provider_session_id = Some(provider_session_id);
+        workspace.active_live_instance_id = Some(live_instance_id("missing-live-row"));
+        core.control_plane_store()
+            .upsert_entities(ControlPlaneState::persistence_entities_for_workspace(
+                &workspace,
+            ))
+            .expect("persist patched workspace");
+        drop(core);
+
+        let reloaded = LucarneCore::from_runtime_and_store(
+            Arc::new(AgentRuntime::new()),
+            ControlPlaneSqliteStore::open(&db).expect("reopen store"),
+        )
+        .expect("reload core");
+        reloaded
+            .mark_live_instances_stale_after_restart("test restart")
+            .expect("restart cleanup");
+
+        assert_eq!(
+            reloaded
+                .workspace_binding(&workspace_id)
+                .expect("workspace after cleanup")
+                .active_live_instance_id,
+            None
+        );
+        assert_eq!(
+            reloaded
+                .status_snapshot(&workspace_id)
+                .expect("status")
+                .last_reconcile_outcome,
+            Some(ReconcileOutcome::LiveInstanceStale)
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_cleanup_clears_terminal_active_live() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let db = temp.path().join("state.sqlite3");
+        let core = LucarneCore::from_runtime_and_store(
+            Arc::new(AgentRuntime::new()),
+            ControlPlaneSqliteStore::open(&db).expect("store"),
+        )
+        .expect("core");
+        let workspace_id = WorkspaceId::new("workspace-terminal-live");
+        core.upsert_workspace_binding(
+            workspace_id.clone(),
+            OpenWorkspaceRequest {
+                provider_id: "codex",
+                project_path: Some(temp.path().join("project")),
+                title: "terminal live".into(),
+            },
+            Some("thread-terminal-live"),
+        )
+        .expect("workspace binding");
+        let live_instance_id = live_instance_id("live-terminal");
+        core.attach_live_session_projection(
+            workspace_id.clone(),
+            "codex",
+            "thread-terminal-live",
+            &live_instance_id,
+        )
+        .expect("live projection");
+        let mut live = core
+            .live_instance_record(&live_instance_id)
+            .expect("live before terminal patch");
+        live.state = LiveInstanceState::Closed;
+        core.control_plane_store()
+            .upsert_entities(ControlPlaneState::persistence_entities_for_live_instance(
+                &live,
+                Some(&workspace_id),
+            ))
+            .expect("persist terminal live");
+        drop(core);
+
+        let reloaded = LucarneCore::from_runtime_and_store(
+            Arc::new(AgentRuntime::new()),
+            ControlPlaneSqliteStore::open(&db).expect("reopen store"),
+        )
+        .expect("reload core");
+        reloaded
+            .mark_live_instances_stale_after_restart("test restart")
+            .expect("restart cleanup");
+
+        assert_eq!(
+            reloaded
+                .workspace_binding(&workspace_id)
+                .expect("workspace after cleanup")
+                .active_live_instance_id,
+            None
+        );
+        assert_eq!(
+            reloaded
+                .live_instance_record(&live_instance_id)
+                .expect("live after cleanup")
+                .state,
+            LiveInstanceState::Closed
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_turn_preserves_live_instance_store_owner_workspace() {
+        let store = ControlPlaneSqliteStore::open_in_memory().expect("store");
+        let core =
+            LucarneCore::from_runtime_and_store(Arc::new(AgentRuntime::new()), store.clone())
+                .expect("core");
+        let source_workspace_id = WorkspaceId::new("workspace-source");
+        let live_workspace_id = WorkspaceId::new("workspace-live-owner");
+        let provider_session_id = provider_session_id("codex", "thread-owner");
+        let live_instance_id = live_instance_id("live-owner");
+        let turn_id = TurnId::new("turn-owner");
+        let mut source_workspace = WorkspaceBinding::new(
+            source_workspace_id.clone(),
+            "source",
+            "codex",
+            "/tmp/source",
+        );
+        source_workspace.active_provider_session_id = Some(provider_session_id.clone());
+        let mut live_workspace = WorkspaceBinding::new(
+            live_workspace_id.clone(),
+            "live owner",
+            "codex",
+            "/tmp/live-owner",
+        );
+        live_workspace.active_provider_session_id = Some(provider_session_id.clone());
+        live_workspace.active_live_instance_id = Some(live_instance_id.clone());
+        let provider_session =
+            ProviderSessionRecord::new(provider_session_id.clone(), "codex", "thread-owner");
+        let mut live = LiveInstanceRecord::new(
+            live_instance_id.clone(),
+            "codex",
+            provider_session_id.clone(),
+            Option::<String>::None,
+        );
+        live.state = LiveInstanceState::Running;
+        live.active_turn_id = Some(turn_id.clone());
+        let turn = TurnRecord {
+            turn_id: turn_id.clone(),
+            workspace_id: source_workspace_id.clone(),
+            provider_session_id,
+            live_instance_id: live_instance_id.clone(),
+            source: TurnSource::UserMessage,
+            input: "hello".into(),
+            reply_to_channel_message_id: None,
+            state: TurnState::Running,
+            timeline_seq_start: None,
+            timeline_seq_end: None,
+            usage: serde_json::Value::Null,
+            created_at: SystemTime::now(),
+            completed_at: None,
+        };
+        store
+            .upsert_entities(
+                [
+                    ControlPlaneState::persistence_entities_for_workspace(&source_workspace),
+                    ControlPlaneState::persistence_entities_for_workspace(&live_workspace),
+                    ControlPlaneState::persistence_entities_for_provider_session(&provider_session),
+                    ControlPlaneState::persistence_entities_for_live_instance(
+                        &live,
+                        Some(&live_workspace_id),
+                    ),
+                    ControlPlaneState::persistence_entities_for_turn_record(&turn),
+                ]
+                .concat(),
+            )
+            .expect("seed cold rows");
+
+        core.complete_turn_with_usage_value(turn_id, None)
+            .expect("complete turn");
+
+        assert_eq!(
+            store
+                .workspace_id_for_live_instance(&live_instance_id)
+                .expect("live owner lookup"),
+            Some(live_workspace_id)
         );
     }
 

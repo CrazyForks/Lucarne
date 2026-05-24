@@ -77,12 +77,13 @@ async fn core_service_stress_open_submit_record_and_complete_many_workspaces() {
         );
     }
 
-    let reloaded = core
-        .control_plane_store()
+    let store = core.control_plane_store();
+    let reloaded = store
         .load_control_plane()
         .expect("load persisted control-plane")
         .expect("persisted control-plane");
-    assert_eq!(reloaded.workspace_bindings().len(), workspaces);
+    assert_eq!(reloaded.workspace_bindings().len(), 0);
+    assert_eq!(store.workspace_bindings().unwrap().len(), workspaces);
 }
 
 async fn exercise_workspace(
