@@ -522,14 +522,20 @@ fn open_core_from_config(
 fn apply_global_config_from_file(
     core: &LucarneCore,
     config: &LucarnedFileConfig,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let mut settings = core.system_settings();
+    let original = settings.clone();
     if let Some(enabled) = config.runtime_config.global.bypass {
-        core.set_force_bypass_permissions(enabled)?;
+        settings.session.force_bypass_permissions = enabled;
     }
     if let Some(enabled) = config.runtime_config.global.notifications {
-        core.set_global_notifications_enabled(enabled)?;
+        settings.notifications.enabled = enabled;
     }
-    Ok(())
+    if settings == original {
+        return Ok(false);
+    }
+    core.set_system_settings(settings)?;
+    Ok(true)
 }
 
 fn core_options_from_config(
@@ -1480,6 +1486,40 @@ config:
             .expect("parse missing runtime config");
         assert_eq!(missing.runtime_config.global.bypass, None);
         assert_eq!(missing.runtime_config.global.notifications, None);
+    }
+
+    #[tokio::test]
+    async fn apply_global_config_from_file_skips_unchanged_defaults() {
+        let temp_dir = tempfile::tempdir().expect("create temp state dir");
+        let core =
+            LucarneCore::open_sqlite(temp_dir.path().join("state.sqlite3")).expect("open core");
+        let config = LucarnedFileConfig::from_yaml_str(
+            r#"
+config:
+  global:
+    bypass: false
+    notifications: true
+"#,
+        )
+        .expect("parse default runtime config");
+
+        assert!(!apply_global_config_from_file(&core, &config).expect("apply default config"));
+        assert!(!core.system_settings().session.force_bypass_permissions);
+        assert!(core.system_settings().notifications.enabled);
+
+        let changed = LucarnedFileConfig::from_yaml_str(
+            r#"
+config:
+  global:
+    bypass: true
+    notifications: false
+"#,
+        )
+        .expect("parse changed runtime config");
+        assert!(apply_global_config_from_file(&core, &changed).expect("apply changed config"));
+        assert!(core.system_settings().session.force_bypass_permissions);
+        assert!(!core.system_settings().notifications.enabled);
+        assert!(!apply_global_config_from_file(&core, &changed).expect("reapply changed config"));
     }
 
     #[tokio::test]

@@ -198,6 +198,26 @@ impl ControlPlaneState {
         self.persistence_entities_for_snapshot()
     }
 
+    pub fn persistence_entities_for_system_settings(&self) -> Vec<ControlPlanePersistenceEntity> {
+        vec![persistence_entity(
+            "system_settings",
+            None,
+            SYSTEM_SETTINGS_ENTITY_ID,
+            &self.system_settings,
+        )]
+    }
+
+    pub fn persistence_entities_for_message_session_binding(
+        binding: &MessageSessionBinding,
+    ) -> Vec<ControlPlanePersistenceEntity> {
+        vec![persistence_entity(
+            "message_session_binding",
+            None,
+            binding.binding_id.as_str(),
+            binding,
+        )]
+    }
+
     fn persistence_meta_entity(&self) -> ControlPlanePersistenceEntity {
         persistence_entity(
             "meta",
@@ -247,14 +267,6 @@ impl ControlPlaneState {
                 None,
                 panel.panel_id.as_str(),
                 panel,
-            ));
-        }
-        for binding in self.message_session_bindings.values() {
-            entities.push(persistence_entity(
-                "message_session_binding",
-                None,
-                binding.binding_id.as_str(),
-                binding,
             ));
         }
         for session in self.provider_sessions.values() {

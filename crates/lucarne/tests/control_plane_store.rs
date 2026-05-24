@@ -1,7 +1,7 @@
 use lucarne::control_plane::{
     ControlPlaneSqliteStore, ControlPlaneState, LiveInstanceId, LiveInstanceRecord,
-    ProviderSessionId, ProviderSessionRecord, TimelineItem, TimelineItemKind, TurnSource,
-    WorkspaceBinding, WorkspaceId,
+    MessageSessionBinding, ProviderSessionId, ProviderSessionRecord, TimelineItem,
+    TimelineItemKind, TurnSource, WorkspaceBinding, WorkspaceId,
 };
 use rusqlite::Connection;
 
@@ -114,6 +114,61 @@ fn replace_non_timeline_entities_deletes_removed_rows() {
     let loaded = store.load_control_plane().unwrap().unwrap();
     assert!(loaded.get_workspace(&WorkspaceId::new("ws-1")).is_some());
     assert!(loaded.get_workspace(&WorkspaceId::new("ws-2")).is_none());
+}
+
+#[test]
+fn sqlite_store_defers_message_session_bindings_and_preserves_them_in_snapshots() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db = tmp.path().join("state.sqlite3");
+    let store = ControlPlaneSqliteStore::open(&db).unwrap();
+    let mut state = ControlPlaneState::default();
+    seed_workspace_session_and_live(&mut state);
+    store
+        .replace_non_timeline_entities(state.persistence_entities_without_timeline())
+        .unwrap();
+    let binding = state
+        .upsert_message_session_binding(MessageSessionBinding::new(
+            "telegram",
+            "100",
+            "200",
+            ProviderSessionId::new("session-a"),
+        ))
+        .unwrap();
+    store
+        .upsert_entities(
+            ControlPlaneState::persistence_entities_for_message_session_binding(&binding),
+        )
+        .unwrap();
+
+    let loaded = store.load_control_plane().unwrap().unwrap();
+    assert!(loaded
+        .message_session_binding("telegram", "100", "200")
+        .is_none());
+    assert_eq!(
+        store
+            .message_session_binding("telegram", "100", "200")
+            .unwrap()
+            .expect("lazy binding")
+            .provider_session_id,
+        ProviderSessionId::new("session-a")
+    );
+
+    install_entity_write_log(&db);
+    state
+        .rename_workspace(&WorkspaceId::new("workspace-a"), "Workspace A Renamed")
+        .unwrap();
+    store
+        .replace_non_timeline_entities(state.persistence_entities_without_timeline())
+        .unwrap();
+
+    assert!(store
+        .message_session_binding("telegram", "100", "200")
+        .unwrap()
+        .is_some());
+    assert!(
+        entity_write_log(&db, "message_session_binding", "telegram:100:200").is_empty(),
+        "snapshot persistence must not touch lazy message bindings"
+    );
 }
 
 #[test]

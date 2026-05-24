@@ -13,8 +13,8 @@ use serde::Deserialize;
 use smol_str::SmolStr;
 
 use super::{
-    ControlPlanePersistenceEntity, ControlPlaneState, TimelineItem, TimelineItemKind, TimelineSeq,
-    TurnId, WorkspaceId,
+    message_session_binding_id, ControlPlanePersistenceEntity, ControlPlaneState,
+    MessageSessionBinding, TimelineItem, TimelineItemKind, TimelineSeq, TurnId, WorkspaceId,
 };
 use tracing::{debug, info};
 
@@ -101,7 +101,7 @@ impl ControlPlaneSqliteStore {
         let mut stmt = conn.prepare(
             "SELECT kind, entity_id, workspace_id, state_json
              FROM control_plane_entities
-             WHERE kind != 'timeline'
+             WHERE kind NOT IN ('timeline', 'message_session_binding')
              ORDER BY kind, workspace_id, entity_id",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -128,11 +128,33 @@ impl ControlPlaneSqliteStore {
         debug!(
             target: "lucarne::control_plane::store",
             entity_count = entities.len(),
-            "control-plane entities loaded (timeline deferred)"
+            "control-plane entities loaded (timeline and message bindings deferred)"
         );
         let mut state = ControlPlaneState::from_persistence_entities(entities)?;
         state.set_timeline_store(Arc::clone(&self.conn));
         Ok(Some(state))
+    }
+
+    pub fn message_session_binding(
+        &self,
+        channel: &str,
+        chat_id: &str,
+        message_id: &str,
+    ) -> Result<Option<MessageSessionBinding>, ControlPlaneStoreError> {
+        let conn = self.conn.lock().unwrap();
+        let binding_id = message_session_binding_id(channel, chat_id, message_id);
+        let state_json = conn
+            .query_row(
+                "SELECT state_json
+                 FROM control_plane_entities
+                 WHERE kind = 'message_session_binding' AND entity_id = ?1",
+                params![binding_id.as_str()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        state_json
+            .map(|state_json| serde_json::from_str(&state_json).map_err(Into::into))
+            .transpose()
     }
 
     pub fn timeline_item(
@@ -191,8 +213,9 @@ impl ControlPlaneSqliteStore {
         Ok(())
     }
 
-    /// Replace non-timeline snapshot entities in one transaction while preserving
-    /// rows whose serialized state did not change.
+    /// Replace snapshot-owned entities in one transaction while preserving
+    /// rows whose serialized state did not change. Timeline and message-session
+    /// binding rows are lazy/on-demand records and are not owned by snapshots.
     pub fn replace_non_timeline_entities(
         &self,
         entities: Vec<ControlPlanePersistenceEntity>,
@@ -223,7 +246,7 @@ impl ControlPlaneSqliteStore {
             }
             tx.execute(
                 "DELETE FROM control_plane_entities
-                 WHERE kind != 'timeline'
+                 WHERE kind NOT IN ('timeline', 'message_session_binding')
                    AND NOT EXISTS (
                        SELECT 1
                        FROM control_plane_replace_keys keys

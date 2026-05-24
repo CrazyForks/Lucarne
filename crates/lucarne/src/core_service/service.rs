@@ -411,18 +411,36 @@ impl LucarneCore {
         &self,
         settings: SystemSettings,
     ) -> Result<SystemSettings, CoreError> {
-        self.mutate_state_and_persist(|state| Ok(state.set_system_settings(settings)))
+        self.mutate_system_settings_and_persist(|state| {
+            let current = state.system_settings();
+            if current == settings {
+                return Ok((current, false));
+            }
+            Ok((state.set_system_settings(settings), true))
+        })
     }
 
     pub fn set_force_bypass_permissions(&self, enabled: bool) -> Result<SystemSettings, CoreError> {
-        self.mutate_state_and_persist(|state| Ok(state.set_force_bypass_permissions(enabled)))
+        self.mutate_system_settings_and_persist(|state| {
+            let current = state.system_settings();
+            if current.session.force_bypass_permissions == enabled {
+                return Ok((current, false));
+            }
+            Ok((state.set_force_bypass_permissions(enabled), true))
+        })
     }
 
     pub fn set_global_notifications_enabled(
         &self,
         enabled: bool,
     ) -> Result<SystemSettings, CoreError> {
-        self.mutate_state_and_persist(|state| Ok(state.set_global_notifications_enabled(enabled)))
+        self.mutate_system_settings_and_persist(|state| {
+            let current = state.system_settings();
+            if current.notifications.enabled == enabled {
+                return Ok((current, false));
+            }
+            Ok((state.set_global_notifications_enabled(enabled), true))
+        })
     }
 
     pub fn set_workspace_notifications_enabled(
@@ -430,8 +448,20 @@ impl LucarneCore {
         project_path: &Path,
         enabled: bool,
     ) -> Result<SystemSettings, CoreError> {
-        self.mutate_state_and_persist(|state| {
-            Ok(state.set_workspace_notifications_enabled(project_path, enabled))
+        self.mutate_system_settings_and_persist(|state| {
+            let current = state.system_settings();
+            if current
+                .workspace
+                .get(project_path)
+                .and_then(|settings| settings.notifications_enabled)
+                == Some(enabled)
+            {
+                return Ok((current, false));
+            }
+            Ok((
+                state.set_workspace_notifications_enabled(project_path, enabled),
+                true,
+            ))
         })
     }
 
@@ -440,8 +470,20 @@ impl LucarneCore {
         provider_session_id: &ProviderSessionId,
         enabled: bool,
     ) -> Result<SystemSettings, CoreError> {
-        self.mutate_state_and_persist(|state| {
-            Ok(state.set_session_notifications_enabled(provider_session_id, enabled))
+        self.mutate_system_settings_and_persist(|state| {
+            let current = state.system_settings();
+            if current
+                .provider_session
+                .get(provider_session_id)
+                .and_then(|settings| settings.notifications_enabled)
+                == Some(enabled)
+            {
+                return Ok((current, false));
+            }
+            Ok((
+                state.set_session_notifications_enabled(provider_session_id, enabled),
+                true,
+            ))
         })
     }
 
@@ -450,8 +492,20 @@ impl LucarneCore {
         project_path: &Path,
         enabled: bool,
     ) -> Result<SystemSettings, CoreError> {
-        self.mutate_state_and_persist(|state| {
-            Ok(state.set_workspace_force_bypass_permissions(project_path, enabled))
+        self.mutate_system_settings_and_persist(|state| {
+            let current = state.system_settings();
+            if current
+                .workspace
+                .get(project_path)
+                .and_then(|settings| settings.force_bypass_permissions)
+                == Some(enabled)
+            {
+                return Ok((current, false));
+            }
+            Ok((
+                state.set_workspace_force_bypass_permissions(project_path, enabled),
+                true,
+            ))
         })
     }
 
@@ -460,8 +514,20 @@ impl LucarneCore {
         provider_session_id: &ProviderSessionId,
         enabled: bool,
     ) -> Result<SystemSettings, CoreError> {
-        self.mutate_state_and_persist(|state| {
-            Ok(state.set_session_force_bypass_permissions(provider_session_id, enabled))
+        self.mutate_system_settings_and_persist(|state| {
+            let current = state.system_settings();
+            if current
+                .provider_session
+                .get(provider_session_id)
+                .and_then(|settings| settings.force_bypass_permissions)
+                == Some(enabled)
+            {
+                return Ok((current, false));
+            }
+            Ok((
+                state.set_session_force_bypass_permissions(provider_session_id, enabled),
+                true,
+            ))
         })
     }
 
@@ -2271,16 +2337,28 @@ impl LucarneCore {
         message_id: &str,
         provider_session_id: ProviderSessionId,
     ) -> Result<MessageSessionBinding, CoreError> {
-        self.mutate_state_and_persist(|state| {
-            Ok(
-                state.upsert_message_session_binding(MessageSessionBinding::new(
-                    channel,
-                    chat_id,
-                    message_id,
-                    provider_session_id,
-                ))?,
-            )
-        })
+        let provider_exists = self
+            .state
+            .read()
+            .expect("control plane lock")
+            .get_provider_session(&provider_session_id)
+            .is_some();
+        if !provider_exists {
+            return Err(ControlPlaneError::MissingProviderSession(provider_session_id).into());
+        }
+
+        let existing = self
+            .store
+            .message_session_binding(channel, chat_id, message_id)?;
+        let mut binding =
+            MessageSessionBinding::new(channel, chat_id, message_id, provider_session_id);
+        if let Some(existing) = existing {
+            binding.created_at = existing.created_at;
+        }
+        self.upsert_persistence_entities(
+            ControlPlaneState::persistence_entities_for_message_session_binding(&binding),
+        )?;
+        Ok(binding)
     }
 
     pub fn message_session_binding(
@@ -2289,11 +2367,17 @@ impl LucarneCore {
         chat_id: &str,
         message_id: &str,
     ) -> Option<MessageSessionBinding> {
-        self.state
-            .read()
-            .expect("control plane lock")
+        self.store
             .message_session_binding(channel, chat_id, message_id)
-            .cloned()
+            .ok()
+            .flatten()
+            .or_else(|| {
+                self.state
+                    .read()
+                    .expect("control plane lock")
+                    .message_session_binding(channel, chat_id, message_id)
+                    .cloned()
+            })
     }
 
     pub fn workspace_for_provider_session(
@@ -3052,6 +3136,22 @@ impl LucarneCore {
     ) -> Result<T, CoreError> {
         let (result, entities) = self.mutate_state_and_snapshot(mutate)?;
         self.persist_non_timeline_entities(entities)?;
+        Ok(result)
+    }
+
+    fn mutate_system_settings_and_persist<T>(
+        &self,
+        mutate: impl FnOnce(&mut ControlPlaneState) -> Result<(T, bool), CoreError>,
+    ) -> Result<T, CoreError> {
+        let (result, entities) = {
+            let mut state = self.state.write().expect("control plane lock");
+            let (result, changed) = mutate(&mut state)?;
+            let entities = changed.then(|| state.persistence_entities_for_system_settings());
+            (result, entities)
+        };
+        if let Some(entities) = entities {
+            self.upsert_persistence_entities(entities)?;
+        }
         Ok(result)
     }
 
