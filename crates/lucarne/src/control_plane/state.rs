@@ -424,6 +424,128 @@ impl ControlPlaneState {
         entities
     }
 
+    pub(super) fn apply_persistence_entity_json(
+        &mut self,
+        kind: &str,
+        workspace_id: Option<&str>,
+        state_json: &[u8],
+    ) -> Result<(), serde_json::Error> {
+        match kind {
+            "meta" => {
+                let meta = serde_json::from_slice::<ControlPlanePersistenceMeta>(state_json)?;
+                self.apply_persistence_meta(meta);
+            }
+            "workspace" => {
+                let record = serde_json::from_slice::<WorkspaceBinding>(state_json)?;
+                self.workspaces.insert(record.workspace_id.clone(), record);
+            }
+            "system_settings" => {
+                self.system_settings = serde_json::from_slice::<SystemSettings>(state_json)?;
+            }
+            "channel_binding" => {
+                let record = serde_json::from_slice::<ChannelBinding>(state_json)?;
+                self.channel_bindings
+                    .insert(record.channel_binding_id.clone(), record);
+            }
+            "panel_render" => {
+                let record = serde_json::from_slice::<PanelRenderRecord>(state_json)?;
+                self.panel_renders.insert(record.panel_id.clone(), record);
+            }
+            "message_session_binding" => {
+                let record = serde_json::from_slice::<MessageSessionBinding>(state_json)?;
+                self.message_session_bindings
+                    .insert(record.binding_id.clone(), record);
+            }
+            "provider_session" => {
+                let record = serde_json::from_slice::<ProviderSessionRecord>(state_json)?;
+                self.provider_sessions
+                    .insert(record.provider_session_id.clone(), record);
+            }
+            "live_instance" => {
+                let record = serde_json::from_slice::<LiveInstanceRecord>(state_json)?;
+                self.live_instances
+                    .insert(record.live_instance_id.clone(), record);
+            }
+            "turn" => {
+                let record = serde_json::from_slice::<TurnRecord>(state_json)?;
+                self.turns.insert(record.turn_id.clone(), record);
+            }
+            "command" => {
+                let record = serde_json::from_slice::<CommandWorkflow>(state_json)?;
+                self.commands.insert(record.command_id.clone(), record);
+            }
+            "command_callback" => {
+                let record =
+                    serde_json::from_slice::<super::commands::CommandCallbackRecord>(state_json)?;
+                self.command_callbacks.insert(record.token.clone(), record);
+            }
+            "intervention_callback" => {
+                let record = serde_json::from_slice::<
+                    super::interventions::InterventionCallbackRecord,
+                >(state_json)?;
+                self.intervention_callbacks
+                    .insert(record.token.clone(), record);
+            }
+            "subagent_action" => {
+                let record =
+                    serde_json::from_slice::<super::subagents::SubAgentActionRecord>(state_json)?;
+                self.subagent_actions
+                    .insert(record.action_id.clone(), record);
+            }
+            "subagent_link" => {
+                let record =
+                    serde_json::from_slice::<super::subagents::SubAgentLinkRecord>(state_json)?;
+                self.subagent_links.insert(record.link_id.clone(), record);
+            }
+            "subagent_callback" => {
+                let record =
+                    serde_json::from_slice::<super::subagents::SubAgentCallbackRecord>(state_json)?;
+                self.subagent_callbacks.insert(record.token.clone(), record);
+            }
+            "scheduled_task" => {
+                let record = serde_json::from_slice::<ScheduledTaskRecord>(state_json)?;
+                self.scheduled_tasks.insert(record.task_id.clone(), record);
+            }
+            "history_replay" => {
+                let record = serde_json::from_slice::<super::history_replay::HistoryReplayRecord>(
+                    state_json,
+                )?;
+                self.history_replays
+                    .insert(record.workspace_id.clone(), record);
+            }
+            "history_older_callback" => {
+                let record = serde_json::from_slice::<
+                    super::history_replay::HistoryOlderCallbackRecord,
+                >(state_json)?;
+                self.history_older_callbacks
+                    .insert(record.token.clone(), record);
+            }
+            "reconcile_outcome" => {
+                if let Some(workspace_id) = workspace_id {
+                    let outcome = serde_json::from_slice::<ReconcileOutcome>(state_json)?;
+                    self.last_reconcile_by_workspace
+                        .insert(WorkspaceId::new(workspace_id), outcome);
+                }
+            }
+            "timeline" => {
+                // Timeline items are loaded lazily per workspace.
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn apply_persistence_meta(&mut self, meta: ControlPlanePersistenceMeta) {
+        self.next_turn = meta.next_turn;
+        self.next_command = meta.next_command;
+        self.next_command_callback = meta.next_command_callback;
+        self.next_intervention_callback = meta.next_intervention_callback;
+        self.next_subagent_action = meta.next_subagent_action;
+        self.next_subagent_callback = meta.next_subagent_callback;
+        self.next_history_older_callback = meta.next_history_older_callback;
+        self.next_timeline_by_workspace = meta.next_timeline_by_workspace;
+    }
+
     pub fn from_persistence_entities(
         entities: Vec<ControlPlanePersistenceEntity>,
     ) -> Result<Self, serde_json::Error> {

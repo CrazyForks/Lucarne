@@ -1,20 +1,13 @@
 use std::{
     path::Path,
     sync::{Arc, Mutex},
-    time::SystemTime,
 };
 
-use rusqlite::{
-    params,
-    types::{Type, ValueRef},
-    Connection, OptionalExtension,
-};
-use serde::Deserialize;
-use smol_str::SmolStr;
+use rusqlite::{params, types::ValueRef, Connection, OptionalExtension};
 
 use super::{
     message_session_binding_id, ControlPlanePersistenceEntity, ControlPlaneState,
-    MessageSessionBinding, TimelineItem, TimelineItemKind, TimelineSeq, TurnId, WorkspaceId,
+    MessageSessionBinding, TimelineItem, TimelineSeq, WorkspaceId,
 };
 use tracing::{debug, info};
 
@@ -33,17 +26,6 @@ struct SerializedEntity {
     entity_id: String,
     workspace_id: Option<String>,
     state_json: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct TimelineIndexState {
-    workspace_id: WorkspaceId,
-    turn_id: TurnId,
-    seq: TimelineSeq,
-    epoch: u64,
-    provider_item_id: Option<SmolStr>,
-    kind: TimelineItemKind,
-    created_at: SystemTime,
 }
 
 #[derive(Clone)]
@@ -104,21 +86,21 @@ impl ControlPlaneSqliteStore {
              WHERE kind NOT IN ('timeline', 'message_session_binding')
              ORDER BY kind, workspace_id, entity_id",
         )?;
-        let rows = stmt.query_map([], |row| {
+        let mut rows = stmt.query([])?;
+        let mut state = ControlPlaneState::default();
+        let mut entity_count = 0usize;
+        while let Some(row) = rows.next()? {
             let kind: String = row.get(0)?;
-            let state = decode_entity_state(kind.as_str(), row.get_ref(3)?)?;
-            Ok(ControlPlanePersistenceEntity {
-                kind,
-                entity_id: row.get(1)?,
-                workspace_id: row.get(2)?,
-                state,
-            })
-        })?;
-        let mut entities = Vec::new();
-        for row in rows {
-            entities.push(row?);
+            let workspace_id: Option<String> = row.get(2)?;
+            let state_json = state_json_bytes(row.get_ref(3)?)?;
+            state.apply_persistence_entity_json(
+                kind.as_str(),
+                workspace_id.as_deref(),
+                state_json,
+            )?;
+            entity_count += 1;
         }
-        if entities.is_empty() {
+        if entity_count == 0 {
             debug!(
                 target: "lucarne::control_plane::store",
                 "control-plane store empty"
@@ -127,10 +109,9 @@ impl ControlPlaneSqliteStore {
         }
         debug!(
             target: "lucarne::control_plane::store",
-            entity_count = entities.len(),
+            entity_count,
             "control-plane entities loaded (timeline and message bindings deferred)"
         );
-        let mut state = ControlPlaneState::from_persistence_entities(entities)?;
         state.set_timeline_store(Arc::clone(&self.conn));
         Ok(Some(state))
     }
@@ -335,41 +316,15 @@ impl ControlPlaneSqliteStore {
     }
 }
 
-fn decode_entity_state(
-    kind: &str,
-    state_json: ValueRef<'_>,
-) -> Result<serde_json::Value, rusqlite::Error> {
-    let bytes = match state_json {
-        ValueRef::Text(bytes) => bytes,
-        _ => {
-            return Err(rusqlite::Error::InvalidColumnType(
-                3,
-                "state_json".into(),
-                state_json.data_type(),
-            ));
-        }
-    };
-    let state = if kind == "timeline" {
-        let index = serde_json::from_slice::<TimelineIndexState>(bytes).map_err(json_error)?;
-        serde_json::to_value(TimelineItem {
-            workspace_id: index.workspace_id,
-            turn_id: index.turn_id,
-            seq: index.seq,
-            epoch: index.epoch,
-            provider_item_id: index.provider_item_id,
-            kind: index.kind,
-            payload: serde_json::Value::Null,
-            created_at: index.created_at,
-        })
-        .map_err(json_error)?
-    } else {
-        serde_json::from_slice(bytes).map_err(json_error)?
-    };
-    Ok(state)
-}
-
-fn json_error(err: serde_json::Error) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(3, Type::Text, Box::new(err))
+fn state_json_bytes(state_json: ValueRef<'_>) -> Result<&[u8], rusqlite::Error> {
+    match state_json {
+        ValueRef::Text(bytes) => Ok(bytes),
+        other => Err(rusqlite::Error::InvalidColumnType(
+            3,
+            "state_json".into(),
+            other.data_type(),
+        )),
+    }
 }
 
 fn serialize_entities(
