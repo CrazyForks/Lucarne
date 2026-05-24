@@ -524,7 +524,8 @@ fn parse_codex_response_item_entry<'a>(
                         commit
                             .preexisting_untracked_files
                             .iter()
-                            .map(|path| box_str(path))
+                            .cloned()
+                            .map(cow_to_box)
                             .collect::<Vec<_>>()
                             .into_boxed_slice()
                     })
@@ -536,7 +537,8 @@ fn parse_codex_response_item_entry<'a>(
                         commit
                             .preexisting_untracked_dirs
                             .iter()
-                            .map(|path| box_str(path))
+                            .cloned()
+                            .map(cow_to_box)
                             .collect::<Vec<_>>()
                             .into_boxed_slice()
                     })
@@ -783,8 +785,8 @@ fn map_event_msg_data(payload: &EventMsgPayload<'_>) -> EventMsgData {
                 call_id: opt_box_str(payload.call_id),
                 sender_thread_id: opt_box_str(payload.sender_thread_id),
                 new_thread_id: opt_box_str(payload.new_thread_id),
-                new_agent_nickname: opt_box_str(payload.new_agent_nickname),
-                new_agent_role: opt_box_str(payload.new_agent_role),
+                new_agent_nickname: opt_cow_box_str(payload.new_agent_nickname.clone()),
+                new_agent_role: opt_cow_box_str(payload.new_agent_role.clone()),
                 prompt: opt_cow_box_str(payload.prompt.clone()),
                 model: opt_box_str(payload.model),
                 reasoning_effort: opt_box_str(payload.reasoning_effort),
@@ -795,8 +797,8 @@ fn map_event_msg_data(payload: &EventMsgPayload<'_>) -> EventMsgData {
             call_id: opt_box_str(payload.call_id),
             sender_thread_id: opt_box_str(payload.sender_thread_id),
             receiver_thread_id: opt_box_str(payload.receiver_thread_id),
-            receiver_agent_nickname: opt_box_str(payload.receiver_agent_nickname),
-            receiver_agent_role: opt_box_str(payload.receiver_agent_role),
+            receiver_agent_nickname: opt_cow_box_str(payload.receiver_agent_nickname.clone()),
+            receiver_agent_role: opt_cow_box_str(payload.receiver_agent_role.clone()),
             status_json: opt_raw_json_box(payload.status),
         }),
         "collab_agent_interaction_end" => {
@@ -804,15 +806,15 @@ fn map_event_msg_data(payload: &EventMsgPayload<'_>) -> EventMsgData {
                 call_id: opt_box_str(payload.call_id),
                 sender_thread_id: opt_box_str(payload.sender_thread_id),
                 receiver_thread_id: opt_box_str(payload.receiver_thread_id),
-                receiver_agent_nickname: opt_box_str(payload.receiver_agent_nickname),
-                receiver_agent_role: opt_box_str(payload.receiver_agent_role),
+                receiver_agent_nickname: opt_cow_box_str(payload.receiver_agent_nickname.clone()),
+                receiver_agent_role: opt_cow_box_str(payload.receiver_agent_role.clone()),
                 prompt: opt_cow_box_str(payload.prompt.clone()),
                 status_json: opt_raw_json_box(payload.status),
             })
         }
         "error" => EventMsgData::Error(ErrorEventMsg {
             message: opt_cow_box_str(payload.message.clone()),
-            codex_error_info: opt_box_str(payload.codex_error_info),
+            codex_error_info: opt_cow_box_str(payload.codex_error_info.clone()),
         }),
         "entered_review_mode" => EventMsgData::EnteredReviewMode(EnteredReviewModeEventMsg {
             target_json: opt_raw_json_box(payload.target),
@@ -1093,9 +1095,9 @@ struct EventMsgPayload<'a> {
     #[serde(default)]
     new_thread_id: Option<&'a str>,
     #[serde(default)]
-    new_agent_nickname: Option<&'a str>,
+    new_agent_nickname: Option<Cow<'a, str>>,
     #[serde(default)]
-    new_agent_role: Option<&'a str>,
+    new_agent_role: Option<Cow<'a, str>>,
     #[serde(default)]
     prompt: Option<Cow<'a, str>>,
     #[serde(default)]
@@ -1105,11 +1107,11 @@ struct EventMsgPayload<'a> {
     #[serde(default)]
     receiver_thread_id: Option<&'a str>,
     #[serde(default)]
-    receiver_agent_nickname: Option<&'a str>,
+    receiver_agent_nickname: Option<Cow<'a, str>>,
     #[serde(default)]
-    receiver_agent_role: Option<&'a str>,
+    receiver_agent_role: Option<Cow<'a, str>>,
     #[serde(default)]
-    codex_error_info: Option<&'a str>,
+    codex_error_info: Option<Cow<'a, str>>,
     #[serde(default, borrow)]
     target: Option<&'a RawValue>,
     #[serde(default)]
@@ -1137,9 +1139,9 @@ struct GhostCommit<'a> {
     #[serde(default)]
     parent: Option<&'a str>,
     #[serde(default)]
-    preexisting_untracked_files: Vec<&'a str>,
+    preexisting_untracked_files: Vec<Cow<'a, str>>,
     #[serde(default)]
-    preexisting_untracked_dirs: Vec<&'a str>,
+    preexisting_untracked_dirs: Vec<Cow<'a, str>>,
 }
 
 #[derive(Deserialize)]
@@ -1257,6 +1259,29 @@ mod tests {
 
         assert_eq!(meta.session_id.as_deref(), Some("sess-windows"));
         assert_eq!(meta.cwd.as_deref(), Some(r"C:\Users\alice\project"));
+    }
+
+    #[test]
+    fn reader_accepts_escaped_windows_paths_in_ghost_snapshot() {
+        let bytes = concat!(
+            r#"{"timestamp":"2026-04-16T00:00:01.000Z","type":"response_item","payload":{"type":"ghost_snapshot","ghost_commit":{"id":"abc123","preexisting_untracked_files":["C:\\Users\\alice\\project\\file.txt"],"preexisting_untracked_dirs":["D:\\work\\scratch"]}}}"#,
+            "\n",
+        );
+
+        let (_version, body) =
+            super::parse_codex_reader(Cursor::new(bytes), crate::ParseSelection::full()).unwrap();
+
+        let [super::Entry::GhostSnapshot(snapshot)] = body.entries.as_ref() else {
+            panic!("expected ghost snapshot entry");
+        };
+        assert_eq!(
+            snapshot.preexisting_untracked_files.as_ref(),
+            &[SmolStr::from(r"C:\Users\alice\project\file.txt")]
+        );
+        assert_eq!(
+            snapshot.preexisting_untracked_dirs.as_ref(),
+            &[SmolStr::from(r"D:\work\scratch")]
+        );
     }
 
     #[cfg(feature = "agent_session")]
