@@ -20,6 +20,7 @@ tracing = { workspace = true }
 smol_str = { workspace = true }
 base64 = "0.22"
 reqwest = { workspace = true }
+rusqlite = { workspace = true }
 
 teloxide = { version = "0.17", default-features = false, features = ["native-tls"] }
 
@@ -28,4 +29,3 @@ agent-sessions = { path = "../../agent-sessions", features = ["discovery", "agen
 dotenvy = "0.15"
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
-rusqlite = { workspace = true }

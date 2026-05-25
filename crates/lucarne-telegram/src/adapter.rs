@@ -11,6 +11,9 @@ use tracing::{debug, info, warn};
 use crate::{
     bot::{telegram_menu_commands, Bot},
     channel::{TelegramChannel, TelegramConfig},
+    command_sync::{
+        telegram_command_hash, telegram_command_sync_cache_key, TelegramCommandSyncCache,
+    },
 };
 
 pub struct TelegramAdapterPlugin;
@@ -148,15 +151,11 @@ async fn run_telegram_adapter_with_client_and_global_config_persistence_and_syst
         entry_chat_id = config.entry_chat_id,
         "telegram adapter starting"
     );
+    let command_cache_key = telegram_command_sync_cache_key(&config.token);
+    let command_cache = TelegramCommandSyncCache::new(core.sqlite_connection());
     let channel = TelegramChannel::start_with_client(config, http_client);
     lucarne::memory_profile_snapshot!("lucarne_telegram.adapter.run.after_channel_start");
-    if let Err(err) = channel.sync_commands(telegram_menu_commands()).await {
-        warn!(
-            target: "lucarne_telegram::adapter",
-            error = %err,
-            "telegram bot command sync failed"
-        );
-    }
+    sync_telegram_commands_if_changed(&channel, &command_cache, command_cache_key.as_deref()).await;
     lucarne::memory_profile_snapshot!("lucarne_telegram.adapter.run.after_sync_commands");
     let entry = channel.entry_handle();
     let state = crate::state::BotState::new_with_core(Arc::clone(&core));
@@ -175,6 +174,62 @@ async fn run_telegram_adapter_with_client_and_global_config_persistence_and_syst
         .await;
     info!(target: "lucarne_telegram::adapter", "telegram adapter stopped");
     Ok(())
+}
+
+async fn sync_telegram_commands_if_changed(
+    channel: &TelegramChannel,
+    cache: &TelegramCommandSyncCache,
+    cache_key: Option<&str>,
+) {
+    let commands = telegram_menu_commands();
+    let Some(cache_key) = cache_key else {
+        sync_telegram_commands(channel, commands).await;
+        return;
+    };
+    let command_hash = telegram_command_hash(commands);
+
+    match cache.sync_needed(cache_key, &command_hash) {
+        Ok(false) => {
+            info!(
+                target: "lucarne_telegram::adapter",
+                "telegram bot command sync skipped; command hash unchanged"
+            );
+            return;
+        }
+        Ok(true) => {}
+        Err(err) => warn!(
+            target: "lucarne_telegram::adapter",
+            error = %err,
+            "telegram bot command sync cache read failed"
+        ),
+    }
+
+    if sync_telegram_commands(channel, commands).await {
+        if let Err(err) = cache.record_synced(cache_key, &command_hash) {
+            warn!(
+                target: "lucarne_telegram::adapter",
+                error = %err,
+                "telegram bot command sync cache write failed"
+            );
+        }
+    }
+}
+
+async fn sync_telegram_commands(
+    channel: &TelegramChannel,
+    commands: &[crate::channel::TelegramBotCommand],
+) -> bool {
+    match channel.sync_commands(commands).await {
+        Ok(()) => true,
+        Err(err) => {
+            warn!(
+                target: "lucarne_telegram::adapter",
+                error = %err,
+                "telegram bot command sync failed"
+            );
+            false
+        }
+    }
 }
 
 #[cfg(test)]
@@ -260,10 +315,22 @@ channels:
             .next()
             .expect("production source");
 
-        assert!(source.contains("channel.sync_commands(telegram_menu_commands()).await"));
+        assert!(source.contains("sync_telegram_commands_if_changed"));
+        assert!(source.contains("match channel.sync_commands(commands).await"));
         assert!(source.contains("telegram bot command sync failed"));
         assert!(!source.contains("sync_commands(telegram_menu_commands()).await?"));
         assert!(!source.contains("sync_telegram_commands_with_retry"));
+    }
+
+    #[test]
+    fn telegram_command_sync_cache_is_written_only_after_successful_sync() {
+        let source = include_str!("adapter.rs")
+            .split("\n#[cfg(test)]")
+            .next()
+            .expect("production source");
+
+        assert!(source.contains("if sync_telegram_commands(channel, commands).await {"));
+        assert!(source.contains("cache.record_synced(cache_key, &command_hash)"));
     }
 
     #[test]

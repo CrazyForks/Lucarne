@@ -13,6 +13,7 @@ pub mod adapter;
 pub mod agents;
 pub mod bot;
 pub mod channel;
+mod command_sync;
 pub mod history;
 pub mod onboarding;
 pub mod state;
