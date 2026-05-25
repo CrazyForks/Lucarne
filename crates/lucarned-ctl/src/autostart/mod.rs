@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{ffi::OsString, path::PathBuf};
 
 use super::process::{run, CommandResult, CommandSpec};
 
@@ -112,5 +112,69 @@ fn format_command_failure(spec: &CommandSpec, result: &CommandResult) -> String 
             result.code,
             stderr
         )
+    }
+}
+
+const POSIX_SYSTEM_PATH_ENTRIES: &[&str] = &["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+
+fn service_path_env() -> String {
+    service_path_env_from(std::env::var_os("PATH"))
+}
+
+fn service_path_env_from(path: Option<OsString>) -> String {
+    path.filter(|path| !path.is_empty())
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(default_path_env)
+}
+
+fn path_list_separator() -> &'static str {
+    if cfg!(windows) {
+        ";"
+    } else {
+        ":"
+    }
+}
+
+fn default_path_env() -> String {
+    POSIX_SYSTEM_PATH_ENTRIES.join(path_list_separator())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::service_path_env_from;
+    use std::ffi::OsString;
+
+    #[test]
+    #[cfg(not(windows))]
+    fn service_path_env_preserves_current_process_path() {
+        let path = service_path_env_from(Some(OsString::from("/custom/bin:/usr/bin")));
+        assert_eq!(path, "/custom/bin:/usr/bin");
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn service_path_env_uses_system_path_when_current_path_is_missing() {
+        let path = service_path_env_from(None);
+        assert_eq!(path, "/usr/bin:/bin:/usr/sbin:/sbin");
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn service_path_env_uses_system_path_when_current_path_is_empty() {
+        let path = service_path_env_from(Some(OsString::new()));
+        assert_eq!(path, "/usr/bin:/bin:/usr/sbin:/sbin");
+    }
+
+    #[test]
+    fn service_path_env_reads_requested_current_process_path() {
+        if std::env::var("LUCARNE_AUTOSTART_EXPECT_PATH")
+            .ok()
+            .as_deref()
+            != Some("1")
+        {
+            return;
+        }
+        let expected = std::env::var("PATH").expect("PATH should be set");
+        assert_eq!(super::service_path_env(), expected);
     }
 }

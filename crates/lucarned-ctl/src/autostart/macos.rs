@@ -83,6 +83,10 @@ fn uid() -> Result<String, String> {
 }
 
 fn render_plist(paths: &AutostartPaths) -> String {
+    render_plist_with_path(paths, &super::service_path_env())
+}
+
+fn render_plist_with_path(paths: &AutostartPaths, path_env: &str) -> String {
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
@@ -90,6 +94,10 @@ fn render_plist(paths: &AutostartPaths) -> String {
 <dict>\n\
   <key>Label</key><string>{}</string>\n\
   <key>ProgramArguments</key><array><string>{}</string></array>\n\
+  <key>EnvironmentVariables</key>\n\
+  <dict>\n\
+    <key>PATH</key><string>{}</string>\n\
+  </dict>\n\
   <key>RunAtLoad</key><true/>\n\
   <key>KeepAlive</key><false/>\n\
   <key>StandardOutPath</key><string>{}</string>\n\
@@ -98,6 +106,7 @@ fn render_plist(paths: &AutostartPaths) -> String {
 </plist>\n",
         LABEL,
         xml_escape(&paths.lucarned.display().to_string()),
+        xml_escape(path_env),
         xml_escape(&paths.log_dir.join("launchd.out.log").display().to_string()),
         xml_escape(&paths.log_dir.join("launchd.err.log").display().to_string()),
     )
@@ -126,5 +135,31 @@ mod tests {
         let plist = render_plist(&paths);
         assert!(plist.contains("/tmp/A&amp;B/lucarned"));
         assert!(plist.contains("com.tuchg.lucarned"));
+    }
+
+    #[test]
+    fn plist_sets_cli_lookup_path() {
+        let paths = AutostartPaths {
+            lucarned: PathBuf::from("/tmp/lucarned"),
+            config_dir: PathBuf::from("/tmp/config"),
+            log_dir: PathBuf::from("/tmp/logs"),
+        };
+        let plist = render_plist(&paths);
+        assert!(plist.contains("<key>EnvironmentVariables</key>"));
+        assert!(plist.contains("<key>PATH</key>"));
+        assert!(plist.contains("/usr/bin"));
+    }
+
+    #[test]
+    fn plist_persists_current_process_path_only() {
+        let paths = AutostartPaths {
+            lucarned: PathBuf::from("/tmp/lucarned"),
+            config_dir: PathBuf::from("/tmp/config"),
+            log_dir: PathBuf::from("/tmp/logs"),
+        };
+        let plist = render_plist_with_path(&paths, "/custom/bin:/usr/bin");
+        assert!(plist.contains("<key>PATH</key><string>/custom/bin:/usr/bin</string>"));
+        assert!(!plist.contains("HOMEBREW_PATH"));
+        assert!(!plist.contains("LUCARNE_TEST_ENV"));
     }
 }
