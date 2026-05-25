@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, OptionalExtension};
+use tracing::debug;
 
 use crate::channel::TelegramBotCommand;
 
@@ -32,7 +33,15 @@ impl TelegramCommandSyncCache {
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
-        Ok(stored.as_deref() != Some(command_hash))
+        let needed = stored.as_deref() != Some(command_hash);
+        debug!(
+            target: "lucarne_telegram::command_sync",
+            cache_key,
+            command_hash,
+            sync_needed = needed,
+            "telegram command sync cache read"
+        );
+        Ok(needed)
     }
 
     pub(crate) fn record_synced(
@@ -50,6 +59,12 @@ impl TelegramCommandSyncCache {
                 updated_unix_ms = excluded.updated_unix_ms",
             params![cache_key, command_hash, unix_ms_now()],
         )?;
+        debug!(
+            target: "lucarne_telegram::command_sync",
+            cache_key,
+            command_hash,
+            "telegram command sync cache written"
+        );
         Ok(())
     }
 }
