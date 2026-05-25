@@ -55,9 +55,14 @@ fn unit_path() -> Result<PathBuf, String> {
 }
 
 fn render_unit(paths: &AutostartPaths) -> String {
+    render_unit_with_path(paths, &super::service_path_env())
+}
+
+fn render_unit_with_path(paths: &AutostartPaths, path_env: &str) -> String {
     format!(
-        "[Unit]\nDescription=Lucarne daemon\n\n[Service]\nType=simple\nExecStart={}\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n",
-        systemd_quote(&paths.lucarned.display().to_string())
+        "[Unit]\nDescription=Lucarne daemon\n\n[Service]\nType=simple\nExecStart={}\nEnvironment=\"PATH={}\"\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n",
+        systemd_quote(&paths.lucarned.display().to_string()),
+        systemd_env_escape(path_env),
     )
 }
 
@@ -70,6 +75,13 @@ fn systemd_quote(input: &str) -> String {
     } else {
         format!("\"{}\"", input.replace('\\', "\\\\").replace('"', "\\\""))
     }
+}
+
+fn systemd_env_escape(input: &str) -> String {
+    input
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
 }
 
 #[cfg(test)]
@@ -85,8 +97,22 @@ mod tests {
         };
         let unit = render_unit(&paths);
         assert!(unit.contains("ExecStart=\"/home/me/My Apps/lucarned\""));
+        assert!(unit.contains("Environment=\"PATH="));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("RestartSec=5"));
         assert!(unit.contains("WantedBy=default.target"));
+    }
+
+    #[test]
+    fn unit_persists_current_process_path_only() {
+        let paths = AutostartPaths {
+            lucarned: PathBuf::from("/home/me/lucarned"),
+            config_dir: PathBuf::from("/home/me/.lucarned"),
+            log_dir: PathBuf::from("/home/me/.lucarned/logs"),
+        };
+        let unit = render_unit_with_path(&paths, "/custom/bin:/usr/bin");
+        assert!(unit.contains("Environment=\"PATH=/custom/bin:/usr/bin\""));
+        assert!(!unit.contains("HOMEBREW_PATH"));
+        assert!(!unit.contains("LUCARNE_TEST_ENV"));
     }
 }
