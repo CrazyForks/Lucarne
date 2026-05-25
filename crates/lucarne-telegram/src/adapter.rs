@@ -6,7 +6,7 @@ use lucarne_adapter::{
     AdapterConfig, AdapterContext, AdapterError, AdapterPlugin, AdapterResult, AdapterTask,
     SystemNotificationBus, SystemNotificationReceiver,
 };
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::{
     bot::{telegram_menu_commands, Bot},
@@ -150,7 +150,13 @@ async fn run_telegram_adapter_with_client_and_global_config_persistence_and_syst
     );
     let channel = TelegramChannel::start_with_client(config, http_client);
     lucarne::memory_profile_snapshot!("lucarne_telegram.adapter.run.after_channel_start");
-    channel.sync_commands(telegram_menu_commands()).await?;
+    if let Err(err) = channel.sync_commands(telegram_menu_commands()).await {
+        warn!(
+            target: "lucarne_telegram::adapter",
+            error = %err,
+            "telegram bot command sync failed"
+        );
+    }
     lucarne::memory_profile_snapshot!("lucarne_telegram.adapter.run.after_sync_commands");
     let entry = channel.entry_handle();
     let state = crate::state::BotState::new_with_core(Arc::clone(&core));
@@ -245,6 +251,19 @@ channels:
         );
         assert!(source.contains("run_telegram_adapter_with_client_and_global_config_persistence"));
         assert!(source.contains("TelegramChannel::start_with_client(config, http_client)"));
+    }
+
+    #[test]
+    fn telegram_command_sync_failure_is_warn_only() {
+        let source = include_str!("adapter.rs")
+            .split("\n#[cfg(test)]")
+            .next()
+            .expect("production source");
+
+        assert!(source.contains("channel.sync_commands(telegram_menu_commands()).await"));
+        assert!(source.contains("telegram bot command sync failed"));
+        assert!(!source.contains("sync_commands(telegram_menu_commands()).await?"));
+        assert!(!source.contains("sync_telegram_commands_with_retry"));
     }
 
     #[test]

@@ -90,6 +90,12 @@ pub struct TelegramBotCommand {
     pub description: &'static str,
 }
 
+impl Drop for TelegramChannel {
+    fn drop(&mut self) {
+        self._poll_task.abort();
+    }
+}
+
 impl TelegramChannel {
     pub fn start(cfg: TelegramConfig) -> Arc<Self> {
         let bot = Bot::new(cfg.token.clone());
@@ -811,6 +817,40 @@ mod tests {
             telegram_attachment_kind("application/pdf"),
             TelegramAttachmentKind::Document
         );
+    }
+
+    #[tokio::test]
+    async fn dropping_channel_aborts_poll_task() {
+        struct NotifyOnDrop(Option<tokio::sync::oneshot::Sender<()>>);
+
+        impl Drop for NotifyOnDrop {
+            fn drop(&mut self) {
+                if let Some(done) = self.0.take() {
+                    let _ = done.send(());
+                }
+            }
+        }
+
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let poll_task = tokio::spawn(async move {
+            let _notify = NotifyOnDrop(Some(done_tx));
+            std::future::pending::<()>().await;
+        });
+        let (_tx, rx) = tokio::sync::mpsc::channel(EVENT_QUEUE);
+        let channel = TelegramChannel {
+            bot: Bot::new("test"),
+            events_rx: Mutex::new(Some(rx)),
+            _poll_task: poll_task,
+            cfg: Arc::new(test_config()),
+        };
+        tokio::task::yield_now().await;
+
+        drop(channel);
+
+        tokio::time::timeout(Duration::from_secs(1), done_rx)
+            .await
+            .expect("poll task should be aborted when channel is dropped")
+            .expect("poll task drop notifier should fire");
     }
 
     #[test]
