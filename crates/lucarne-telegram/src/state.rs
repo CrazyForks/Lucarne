@@ -407,7 +407,7 @@ impl BotState {
         store: ControlPlaneSqliteStore,
         provider_ids: Vec<&'static str>,
     ) -> Result<Arc<Self>, StateStoreError> {
-        let has_control_snapshot = store.load_control_plane()?.is_some();
+        let has_control_snapshot = store.has_any_record()?;
         let core = test_core_with_provider_ids(store, &provider_ids)?;
         let mut inner = Inner::default();
         let max_panel_revision = core.max_panel_render_revision();
@@ -521,7 +521,7 @@ impl BotState {
         Ok(WorkspaceHandle::new(session.chat.clone(), topic))
     }
 
-    pub fn remove(&self, ws: &WorkspaceId) -> Result<Option<WorkSession>, StateStoreError> {
+    pub async fn remove(&self, ws: &WorkspaceId) -> Result<Option<WorkSession>, StateStoreError> {
         let (workspace, removed) = {
             let mut g = self.inner.write().unwrap();
             let removed = g.sessions.remove(ws);
@@ -540,6 +540,7 @@ impl BotState {
         if removed.is_some() {
             self.core
                 .remove_workspace_projection(&control_workspace_id(&workspace))
+                .await
                 .map_err(|err| StateStoreError::Core(err.to_string()))?;
         }
         Ok(removed)
@@ -2598,8 +2599,8 @@ mod tests {
         assert!(matches!(err, StateStoreError::UnknownProvider(provider) if provider == "copilot"));
     }
 
-    #[test]
-    fn sqlite_state_removes_workspace_binding() {
+    #[tokio::test]
+    async fn sqlite_state_removes_workspace_binding() {
         let tmp = TempDir::new().unwrap();
         let db = tmp.path().join("state.sqlite3");
         let workspace = WorkspaceId::new("2");
@@ -2616,7 +2617,7 @@ mod tests {
             })
             .expect("persist workspace");
 
-        let removed = state.remove(&workspace).expect("remove workspace");
+        let removed = state.remove(&workspace).await.expect("remove workspace");
 
         assert!(removed.is_some());
         assert!(state.get(&workspace).is_none());

@@ -1,7 +1,7 @@
 use super::state::{ControlPlaneError, ControlPlaneState};
 use super::types::{
-    ChannelBinding, LiveInstanceRecord, ProviderSessionRecord, ReconcileOutcome, WorkspaceBinding,
-    WorkspaceId,
+    ChannelBinding, LiveInstanceRecord, ProviderSessionRecord, ReconcileOutcome, TurnRecord,
+    WorkspaceBinding, WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
@@ -68,6 +68,15 @@ impl ControlPlaneState {
             .get(&request.workspace_id)
             .cloned()
             .ok_or_else(|| ControlPlaneError::MissingWorkspace(request.workspace_id.clone()))?;
+        let existing_binding = self
+            .channel_bindings
+            .values()
+            .find(|binding| {
+                binding.workspace_id == request.workspace_id
+                    && binding.channel == request.channel
+                    && binding.chat_id == request.chat_id
+            })
+            .cloned();
         let provider_session = workspace
             .active_provider_session_id
             .as_ref()
@@ -78,16 +87,25 @@ impl ControlPlaneState {
             .as_ref()
             .and_then(|id| self.live_instances.get(id))
             .cloned();
-        let existing_binding = self
-            .channel_bindings
-            .values()
-            .find(|binding| {
-                binding.workspace_id == request.workspace_id
-                    && binding.channel == request.channel
-                    && binding.chat_id == request.chat_id
-            })
-            .cloned();
+        let turns = self.turns.values().cloned().collect::<Vec<_>>();
+        Ok(Self::plan_activation_from_records(
+            request,
+            workspace,
+            existing_binding,
+            provider_session,
+            live_instance,
+            turns,
+        ))
+    }
 
+    pub fn plan_activation_from_records(
+        request: ActivationRequest,
+        workspace: WorkspaceBinding,
+        existing_binding: Option<ChannelBinding>,
+        provider_session: Option<ProviderSessionRecord>,
+        live_instance: Option<LiveInstanceRecord>,
+        turns: Vec<TurnRecord>,
+    ) -> ActivationPlan {
         let mut checks = Vec::new();
         if provider_session
             .as_ref()
@@ -107,8 +125,9 @@ impl ControlPlaneState {
                 checks.push(ActivationCheck::LiveInstanceStale);
             } else if live.state == super::types::LiveInstanceState::WaitingPermission {
                 let has_active_turn = live.active_turn_id.as_ref().is_some_and(|turn_id| {
-                    self.turns.get(turn_id).is_some_and(|turn| {
-                        turn.workspace_id == request.workspace_id
+                    turns.iter().any(|turn| {
+                        &turn.turn_id == turn_id
+                            && turn.workspace_id == request.workspace_id
                             && matches!(turn.state, super::types::TurnState::Running)
                     })
                 });
@@ -132,7 +151,7 @@ impl ControlPlaneState {
             None => checks.push(ActivationCheck::ChannelBindingMissing),
         }
 
-        if self.turns.values().any(|turn| {
+        if turns.iter().any(|turn| {
             turn.workspace_id == request.workspace_id
                 && matches!(turn.state, super::types::TurnState::Orphaned)
         }) {
@@ -160,13 +179,13 @@ impl ControlPlaneState {
             ReconcileOutcome::Ok
         };
 
-        Ok(ActivationPlan {
+        ActivationPlan {
             workspace,
             provider_session,
             live_instance,
             channel_binding: existing_binding,
             reconcile_outcome,
             checks,
-        })
+        }
     }
 }

@@ -388,26 +388,62 @@ fn control_plane_persistence_entities_round_trip_state_records_without_loading_t
             "hello",
         ))
         .unwrap();
-    state.complete_turn(turn.turn_id).unwrap();
+    state.complete_turn(turn.turn_id.clone()).unwrap();
     state
         .record_reconcile_outcome(WorkspaceId::new("workspace-a"), ReconcileOutcome::Ok)
         .unwrap();
 
     let entities = state.persistence_entities();
 
-    assert!(entities.iter().any(|entity| {
-        entity.kind == "workspace"
-            && entity.workspace_id.as_deref() == Some("workspace-a")
-            && entity.entity_id == "workspace-a"
-    }));
-    assert!(entities.iter().any(|entity| {
-        entity.kind == "channel_binding"
-            && entity.workspace_id.as_deref() == Some("workspace-a")
-            && entity.entity_id == "binding-a"
-    }));
+    assert!(entities.iter().any(|entity| entity.kind == "meta"));
+    assert!(entities
+        .iter()
+        .any(|entity| entity.kind == "system_settings"));
+    assert!(!entities.iter().any(|entity| entity.kind == "workspace"));
+    assert!(!entities
+        .iter()
+        .any(|entity| entity.kind == "channel_binding"));
     assert!(!entities.iter().any(|entity| entity.kind == "timeline"));
 
+    let workspace = state
+        .get_workspace(&WorkspaceId::new("workspace-a"))
+        .unwrap()
+        .clone();
+    let channel_binding = state
+        .get_channel_binding(&ChannelBindingId::new("binding-a"))
+        .unwrap()
+        .clone();
+    let provider_session = state
+        .get_provider_session(&ProviderSessionId::new("session-a"))
+        .unwrap()
+        .clone();
+    let live = state
+        .get_live_instance(&LiveInstanceId::new("live-a"))
+        .unwrap()
+        .clone();
+    let stored_turn = state.get_turn(&turn.turn_id).unwrap().clone();
     let mut restored_entities = entities;
+    restored_entities.extend(ControlPlaneState::persistence_entities_for_workspace(
+        &workspace,
+    ));
+    restored_entities.extend(ControlPlaneState::persistence_entities_for_channel_binding(
+        &channel_binding,
+    ));
+    restored_entities
+        .extend(ControlPlaneState::persistence_entities_for_provider_session(&provider_session));
+    restored_entities.extend(ControlPlaneState::persistence_entities_for_live_instance(
+        &live,
+        Some(&workspace.workspace_id),
+    ));
+    restored_entities.extend(ControlPlaneState::persistence_entities_for_turn_record(
+        &stored_turn,
+    ));
+    restored_entities.extend(
+        ControlPlaneState::persistence_entities_for_reconcile_outcome(
+            &workspace.workspace_id,
+            ReconcileOutcome::Ok,
+        ),
+    );
     restored_entities.extend(state.persistence_entities_for_timeline_item(&timeline_item));
     let restored = ControlPlaneState::from_persistence_entities(restored_entities).unwrap();
     let snapshot = restored
@@ -1463,14 +1499,20 @@ fn permission_wait_moves_live_instance_through_control_plane_state() {
         snapshot.live_instance_state,
         Some(LiveInstanceState::WaitingPermission)
     );
-    let restored = ControlPlaneState::from_persistence_entities(state.persistence_entities())
-        .expect("intervention callback persists");
-    let restored_callback = restored
+    let hot_restored = ControlPlaneState::from_persistence_entities(state.persistence_entities())
+        .expect("hot snapshot persists");
+    assert!(
+        hot_restored
+            .resolve_intervention_callback(&callback.token)
+            .is_none(),
+        "intervention callbacks are cold rows, not hot snapshot state"
+    );
+    let in_memory_callback = state
         .resolve_intervention_callback(&callback.token)
-        .expect("restored intervention callback");
-    assert_eq!(restored_callback.req_id.as_str(), "req-1");
+        .expect("in-memory intervention callback");
+    assert_eq!(in_memory_callback.req_id.as_str(), "req-1");
     assert_eq!(
-        restored_callback.live_instance_id,
+        in_memory_callback.live_instance_id,
         LiveInstanceId::new("live-a")
     );
 

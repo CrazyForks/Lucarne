@@ -63,6 +63,7 @@ pub struct ControlPlaneState {
     pub(super) message_session_bindings: HashMap<MessageSessionBindingId, MessageSessionBinding>,
     pub(super) provider_sessions: HashMap<ProviderSessionId, ProviderSessionRecord>,
     pub(super) live_instances: HashMap<LiveInstanceId, LiveInstanceRecord>,
+    live_instance_workspaces: HashMap<LiveInstanceId, WorkspaceId>,
     pub(super) turns: HashMap<TurnId, TurnRecord>,
     commands: HashMap<CommandId, CommandWorkflow>,
     pub(super) command_callbacks:
@@ -108,6 +109,7 @@ impl Default for ControlPlaneState {
             message_session_bindings: HashMap::default(),
             provider_sessions: HashMap::default(),
             live_instances: HashMap::default(),
+            live_instance_workspaces: HashMap::default(),
             turns: HashMap::default(),
             commands: HashMap::default(),
             command_callbacks: HashMap::default(),
@@ -183,10 +185,17 @@ fn workspace_for_live<'a>(
     live_instance_id: &LiveInstanceId,
 ) -> Option<&'a WorkspaceId> {
     state
-        .workspaces
-        .values()
-        .find(|workspace| workspace.active_live_instance_id.as_ref() == Some(live_instance_id))
-        .map(|workspace| &workspace.workspace_id)
+        .live_instance_workspaces
+        .get(live_instance_id)
+        .or_else(|| {
+            state
+                .workspaces
+                .values()
+                .find(|workspace| {
+                    workspace.active_live_instance_id.as_ref() == Some(live_instance_id)
+                })
+                .map(|workspace| &workspace.workspace_id)
+        })
 }
 
 impl ControlPlaneState {
@@ -218,6 +227,85 @@ impl ControlPlaneState {
         )]
     }
 
+    pub fn persistence_entities_for_workspace(
+        workspace: &WorkspaceBinding,
+    ) -> Vec<ControlPlanePersistenceEntity> {
+        vec![persistence_entity(
+            "workspace",
+            Some(workspace.workspace_id.as_str()),
+            workspace.workspace_id.as_str(),
+            workspace,
+        )]
+    }
+
+    pub fn persistence_entities_for_channel_binding(
+        binding: &ChannelBinding,
+    ) -> Vec<ControlPlanePersistenceEntity> {
+        vec![persistence_entity(
+            "channel_binding",
+            Some(binding.workspace_id.as_str()),
+            binding.channel_binding_id.as_str(),
+            binding,
+        )]
+    }
+
+    pub fn persistence_entities_for_provider_session(
+        session: &ProviderSessionRecord,
+    ) -> Vec<ControlPlanePersistenceEntity> {
+        vec![persistence_entity(
+            "provider_session",
+            None,
+            session.provider_session_id.as_str(),
+            session,
+        )]
+    }
+
+    pub fn persistence_entities_for_live_instance(
+        live: &LiveInstanceRecord,
+        workspace_id: Option<&WorkspaceId>,
+    ) -> Vec<ControlPlanePersistenceEntity> {
+        vec![persistence_entity(
+            "live_instance",
+            workspace_id.map(WorkspaceId::as_str),
+            live.live_instance_id.as_str(),
+            live,
+        )]
+    }
+
+    pub fn persistence_entities_for_turn_record(
+        turn: &TurnRecord,
+    ) -> Vec<ControlPlanePersistenceEntity> {
+        vec![persistence_entity(
+            "turn",
+            Some(turn.workspace_id.as_str()),
+            turn.turn_id.as_str(),
+            turn,
+        )]
+    }
+
+    pub fn persistence_entities_for_reconcile_outcome(
+        workspace_id: &WorkspaceId,
+        outcome: ReconcileOutcome,
+    ) -> Vec<ControlPlanePersistenceEntity> {
+        vec![persistence_entity(
+            "reconcile_outcome",
+            Some(workspace_id.as_str()),
+            workspace_id.as_str(),
+            outcome,
+        )]
+    }
+
+    pub fn persistence_entities_for_panel_render(
+        panel: &PanelRenderRecord,
+    ) -> Vec<ControlPlanePersistenceEntity> {
+        vec![persistence_entity(
+            "panel_render",
+            None,
+            panel.panel_id.as_str(),
+            panel,
+        )]
+    }
+
     fn persistence_meta_entity(&self) -> ControlPlanePersistenceEntity {
         persistence_entity(
             "meta",
@@ -237,143 +325,15 @@ impl ControlPlaneState {
     }
 
     fn persistence_entities_for_snapshot(&self) -> Vec<ControlPlanePersistenceEntity> {
-        let mut entities = Vec::new();
-        entities.push(self.persistence_meta_entity());
-        entities.push(persistence_entity(
-            "system_settings",
-            None,
-            SYSTEM_SETTINGS_ENTITY_ID,
-            &self.system_settings,
-        ));
-        for workspace in self.workspaces.values() {
-            entities.push(persistence_entity(
-                "workspace",
-                Some(workspace.workspace_id.as_str()),
-                workspace.workspace_id.as_str(),
-                workspace,
-            ));
-        }
-        for binding in self.channel_bindings.values() {
-            entities.push(persistence_entity(
-                "channel_binding",
-                Some(binding.workspace_id.as_str()),
-                binding.channel_binding_id.as_str(),
-                binding,
-            ));
-        }
-        for panel in self.panel_renders.values() {
-            entities.push(persistence_entity(
-                "panel_render",
+        vec![
+            self.persistence_meta_entity(),
+            persistence_entity(
+                "system_settings",
                 None,
-                panel.panel_id.as_str(),
-                panel,
-            ));
-        }
-        for session in self.provider_sessions.values() {
-            entities.push(persistence_entity(
-                "provider_session",
-                None,
-                session.provider_session_id.as_str(),
-                session,
-            ));
-        }
-        for live in self.live_instances.values() {
-            entities.push(persistence_entity(
-                "live_instance",
-                workspace_for_live(self, &live.live_instance_id).map(WorkspaceId::as_str),
-                live.live_instance_id.as_str(),
-                live,
-            ));
-        }
-        for turn in self.turns.values() {
-            entities.push(persistence_entity(
-                "turn",
-                Some(turn.workspace_id.as_str()),
-                turn.turn_id.as_str(),
-                turn,
-            ));
-        }
-        for command in self.commands.values() {
-            entities.push(persistence_entity(
-                "command",
-                Some(command.workspace_id.as_str()),
-                command.command_id.as_str(),
-                command,
-            ));
-        }
-        for callback in self.command_callbacks.values() {
-            entities.push(persistence_entity(
-                "command_callback",
-                Some(callback.workspace_id.as_str()),
-                callback.token.as_str(),
-                callback,
-            ));
-        }
-        for callback in self.intervention_callbacks.values() {
-            entities.push(persistence_entity(
-                "intervention_callback",
-                Some(callback.workspace_id.as_str()),
-                callback.token.as_str(),
-                callback,
-            ));
-        }
-        for action in self.subagent_actions.values() {
-            entities.push(persistence_entity(
-                "subagent_action",
-                Some(action.workspace_id.as_str()),
-                action.action_id.as_str(),
-                action,
-            ));
-        }
-        for link in self.subagent_links.values() {
-            entities.push(persistence_entity(
-                "subagent_link",
-                Some(link.workspace_id.as_str()),
-                link.link_id.as_str(),
-                link,
-            ));
-        }
-        for callback in self.subagent_callbacks.values() {
-            entities.push(persistence_entity(
-                "subagent_callback",
-                Some(callback.workspace_id.as_str()),
-                callback.token.as_str(),
-                callback,
-            ));
-        }
-        for task in self.scheduled_tasks.values() {
-            entities.push(persistence_entity(
-                "scheduled_task",
-                Some(task.workspace_id.as_str()),
-                task.task_id.as_str(),
-                task,
-            ));
-        }
-        for replay in self.history_replays.values() {
-            entities.push(persistence_entity(
-                "history_replay",
-                Some(replay.workspace_id.as_str()),
-                replay.workspace_id.as_str(),
-                replay,
-            ));
-        }
-        for callback in self.history_older_callbacks.values() {
-            entities.push(persistence_entity(
-                "history_older_callback",
-                Some(callback.workspace_id.as_str()),
-                callback.token.as_str(),
-                callback,
-            ));
-        }
-        for (workspace_id, outcome) in &self.last_reconcile_by_workspace {
-            entities.push(persistence_entity(
-                "reconcile_outcome",
-                Some(workspace_id.as_str()),
-                workspace_id.as_str(),
-                outcome,
-            ));
-        }
-        entities
+                SYSTEM_SETTINGS_ENTITY_ID,
+                &self.system_settings,
+            ),
+        ]
     }
 
     pub fn persistence_entities_for_timeline_item(
@@ -463,6 +423,12 @@ impl ControlPlaneState {
             }
             "live_instance" => {
                 let record = serde_json::from_slice::<LiveInstanceRecord>(state_json)?;
+                if let Some(workspace_id) = workspace_id {
+                    self.live_instance_workspaces.insert(
+                        record.live_instance_id.clone(),
+                        WorkspaceId::new(workspace_id),
+                    );
+                }
                 self.live_instances
                     .insert(record.live_instance_id.clone(), record);
             }
@@ -589,6 +555,12 @@ impl ControlPlaneState {
                 }
                 "live_instance" => {
                     let record = serde_json::from_value::<LiveInstanceRecord>(entity.state)?;
+                    if let Some(workspace_id) = entity.workspace_id {
+                        state.live_instance_workspaces.insert(
+                            record.live_instance_id.clone(),
+                            WorkspaceId::new(workspace_id),
+                        );
+                    }
                     state
                         .live_instances
                         .insert(record.live_instance_id.clone(), record);
@@ -830,69 +802,6 @@ impl ControlPlaneState {
         settings
     }
 
-    pub fn mark_live_instances_stale_after_restart(
-        &mut self,
-        reason: impl Into<SmolStr>,
-    ) -> Vec<WorkspaceId> {
-        let reason = reason.into();
-        let mut affected_workspaces = Vec::new();
-        let mut stale_live_instances = Vec::new();
-        let mut permission_orphaned_live_instances = Vec::new();
-        let now = SystemTime::now();
-
-        for live in self.live_instances.values_mut() {
-            if matches!(
-                live.state,
-                LiveInstanceState::Closed | LiveInstanceState::Failed | LiveInstanceState::Stale
-            ) {
-                continue;
-            }
-
-            if live.state == LiveInstanceState::WaitingPermission {
-                permission_orphaned_live_instances.push(live.live_instance_id.clone());
-            }
-            stale_live_instances.push(live.live_instance_id.clone());
-
-            if let Some(active_turn_id) = live.active_turn_id.take() {
-                if let Some(turn) = self.turns.get_mut(&active_turn_id) {
-                    turn.state = TurnState::Orphaned;
-                    turn.completed_at = Some(now);
-                }
-            }
-
-            live.state = LiveInstanceState::Stale;
-            live.close_reason = Some(reason.clone());
-            live.last_seen_at = now;
-        }
-
-        for workspace in self.workspaces.values_mut() {
-            if let Some(live_instance_id) = workspace.active_live_instance_id.clone() {
-                if self
-                    .live_instances
-                    .get(&live_instance_id)
-                    .is_some_and(|live| live.state == LiveInstanceState::Stale)
-                {
-                    let outcome = if permission_orphaned_live_instances.contains(&live_instance_id)
-                    {
-                        ReconcileOutcome::PermissionOrphaned
-                    } else {
-                        ReconcileOutcome::LiveInstanceStale
-                    };
-                    workspace.active_live_instance_id = None;
-                    workspace.updated_at = now;
-                    workspace.revision = workspace.revision.next();
-                    self.last_reconcile_by_workspace
-                        .insert(workspace.workspace_id.clone(), outcome);
-                    affected_workspaces.push(workspace.workspace_id.clone());
-                }
-            }
-        }
-        self.intervention_callbacks
-            .retain(|_, callback| !stale_live_instances.contains(&callback.live_instance_id));
-
-        affected_workspaces
-    }
-
     pub fn upsert_workspace(&mut self, mut workspace: WorkspaceBinding) -> WorkspaceBinding {
         let now = SystemTime::now();
         if let Some(existing) = self.workspaces.get(&workspace.workspace_id) {
@@ -902,6 +811,10 @@ impl ControlPlaneState {
             workspace.revision = Revision::new(1);
         }
         workspace.updated_at = now;
+        if let Some(live_instance_id) = &workspace.active_live_instance_id {
+            self.live_instance_workspaces
+                .insert(live_instance_id.clone(), workspace.workspace_id.clone());
+        }
         self.workspaces
             .insert(workspace.workspace_id.clone(), workspace.clone());
         debug!(
@@ -912,6 +825,15 @@ impl ControlPlaneState {
             "workspace upserted"
         );
         workspace
+    }
+
+    pub fn record_workspace_projection(&mut self, workspace: WorkspaceBinding) {
+        if let Some(live_instance_id) = &workspace.active_live_instance_id {
+            self.live_instance_workspaces
+                .insert(live_instance_id.clone(), workspace.workspace_id.clone());
+        }
+        self.workspaces
+            .insert(workspace.workspace_id.clone(), workspace);
     }
 
     pub fn get_workspace(&self, workspace_id: &WorkspaceId) -> Option<&WorkspaceBinding> {
@@ -954,11 +876,22 @@ impl ControlPlaneState {
             .retain(|_, task| &task.workspace_id != workspace_id);
         if let Some(workspace) = self.workspaces.remove(workspace_id) {
             if let Some(live_instance_id) = &workspace.active_live_instance_id {
+                self.live_instance_workspaces.remove(live_instance_id);
                 if let Some(live) = self.live_instances.get_mut(live_instance_id) {
                     live.state = LiveInstanceState::Stale;
                     live.active_turn_id = None;
                     live.close_reason = Some("workspace removed".into());
                     live.last_seen_at = SystemTime::now();
+                }
+            }
+            if let Some(provider_session_id) = &workspace.active_provider_session_id {
+                let still_referenced = self.workspaces.values().any(|other| {
+                    other.active_provider_session_id.as_ref() == Some(provider_session_id)
+                });
+                if !still_referenced {
+                    self.provider_sessions.remove(provider_session_id);
+                    self.message_session_bindings
+                        .retain(|_, binding| &binding.provider_session_id != provider_session_id);
                 }
             }
             Some(workspace)
@@ -979,6 +912,7 @@ impl ControlPlaneState {
         self.message_session_bindings.clear();
         self.provider_sessions.clear();
         self.live_instances.clear();
+        self.live_instance_workspaces.clear();
         self.turns.clear();
         self.commands.clear();
         self.command_callbacks.clear();
@@ -1346,6 +1280,8 @@ impl ControlPlaneState {
         }
 
         live.last_seen_at = SystemTime::now();
+        self.live_instance_workspaces
+            .insert(live.live_instance_id.clone(), workspace_id.clone());
         self.live_instances
             .insert(live.live_instance_id.clone(), live.clone());
 
@@ -1402,6 +1338,19 @@ impl ControlPlaneState {
         }
 
         Ok(live.clone())
+    }
+
+    pub fn record_live_instance_projection(
+        &mut self,
+        live: LiveInstanceRecord,
+        workspace_id: Option<WorkspaceId>,
+    ) {
+        if let Some(workspace_id) = workspace_id {
+            self.live_instance_workspaces
+                .insert(live.live_instance_id.clone(), workspace_id);
+        }
+        self.live_instances
+            .insert(live.live_instance_id.clone(), live);
     }
 
     pub fn get_live_instance(
@@ -1678,6 +1627,10 @@ impl ControlPlaneState {
             .any(|callback| callback.live_instance_id == turn.live_instance_id))
     }
 
+    pub fn record_turn_projection(&mut self, turn: TurnRecord) {
+        self.turns.insert(turn.turn_id.clone(), turn);
+    }
+
     pub fn get_turn(&self, turn_id: &TurnId) -> Option<&TurnRecord> {
         self.turns.get(turn_id)
     }
@@ -1756,6 +1709,10 @@ impl ControlPlaneState {
         workflow.error = Some(error.into());
         workflow.completed_at = Some(SystemTime::now());
         Ok(workflow.clone())
+    }
+
+    pub fn record_command_projection(&mut self, command: CommandWorkflow) {
+        self.commands.insert(command.command_id.clone(), command);
     }
 
     pub fn get_command(&self, command_id: &CommandId) -> Option<&CommandWorkflow> {

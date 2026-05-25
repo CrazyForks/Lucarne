@@ -229,6 +229,10 @@ impl ControlPlaneState {
         action
     }
 
+    pub fn record_subagent_link_projection(&mut self, link: SubAgentLinkRecord) {
+        self.subagent_links.insert(link.link_id.clone(), link);
+    }
+
     pub fn upsert_subagent_link(&mut self, mut link: SubAgentLinkRecord) -> SubAgentLinkRecord {
         if let Some(existing) = self.subagent_links.get(&link.link_id) {
             link.created_at = existing.created_at;
