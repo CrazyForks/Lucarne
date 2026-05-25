@@ -101,6 +101,7 @@ pub struct LucarneCore {
     live_runtime_turn_claims: Arc<RwLock<HashMap<LiveRuntimeTurnClaimKey, Instant>>>,
     next_submitted_turn: AtomicU64,
     notification_suppression: RwLock<HashMap<WorkspaceId, usize>>,
+    notification_suppression_grace: RwLock<HashMap<WorkspaceId, Instant>>,
     history_watch_started: AtomicBool,
     history_watch_start_count: AtomicU64,
     history_watch_status: RwLock<HistoryWatchStatus>,
@@ -150,6 +151,7 @@ enum HistoryWatchLoopExit {
 }
 
 const LIVE_RUNTIME_TURN_CLAIM_TTL: Duration = Duration::from_secs(30 * 60);
+const DIRECT_NOTIFICATION_SUPPRESSION_GRACE: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct LiveRuntimeTurnClaimKey {
@@ -313,6 +315,7 @@ impl LucarneCore {
             live_runtime_turn_claims: Arc::new(RwLock::new(HashMap::new())),
             next_submitted_turn: AtomicU64::new(0),
             notification_suppression: RwLock::new(HashMap::new()),
+            notification_suppression_grace: RwLock::new(HashMap::new()),
             history_watch_started: AtomicBool::new(false),
             history_watch_start_count: AtomicU64::new(0),
             history_watch_status: RwLock::new(HistoryWatchStatus::default()),
@@ -798,11 +801,17 @@ impl LucarneCore {
     }
 
     pub fn begin_direct_notification_suppression(&self, workspace_id: &WorkspaceId) {
-        let mut suppression = self
-            .notification_suppression
+        {
+            let mut suppression = self
+                .notification_suppression
+                .write()
+                .expect("notification suppression lock");
+            *suppression.entry(workspace_id.clone()).or_default() += 1;
+        }
+        self.notification_suppression_grace
             .write()
-            .expect("notification suppression lock");
-        *suppression.entry(workspace_id.clone()).or_default() += 1;
+            .expect("notification suppression grace lock")
+            .remove(workspace_id);
     }
 
     pub fn end_direct_notification_suppression(&self, workspace_id: &WorkspaceId) {
@@ -814,6 +823,17 @@ impl LucarneCore {
             *count = count.saturating_sub(1);
             if *count == 0 {
                 suppression.remove(workspace_id);
+                drop(suppression);
+                let now = Instant::now();
+                let mut grace = self
+                    .notification_suppression_grace
+                    .write()
+                    .expect("notification suppression grace lock");
+                grace.retain(|_, until| *until > now);
+                grace.insert(
+                    workspace_id.clone(),
+                    now + DIRECT_NOTIFICATION_SUPPRESSION_GRACE,
+                );
             }
         }
     }
@@ -824,6 +844,25 @@ impl LucarneCore {
             .expect("notification suppression lock")
             .get(workspace_id)
             .is_some_and(|count| *count > 0)
+    }
+
+    pub fn direct_notification_delivery_suppressed(&self, workspace_id: &WorkspaceId) -> bool {
+        if self.direct_notification_suppressed(workspace_id) {
+            return true;
+        }
+        let now = Instant::now();
+        let mut grace = self
+            .notification_suppression_grace
+            .write()
+            .expect("notification suppression grace lock");
+        match grace.get(workspace_id).copied() {
+            Some(until) if until > now => true,
+            Some(_) => {
+                grace.remove(workspace_id);
+                false
+            }
+            None => false,
+        }
     }
 
     fn watch_workspace_events(&self, workspace_id: WorkspaceId) -> CoreWorkspaceEventStream {
@@ -4836,13 +4875,20 @@ mod tests {
         let workspace_id = WorkspaceId::new("workspace-a");
 
         assert!(!core.direct_notification_suppressed(&workspace_id));
+        assert!(!core.direct_notification_delivery_suppressed(&workspace_id));
         core.begin_direct_notification_suppression(&workspace_id);
         core.begin_direct_notification_suppression(&workspace_id);
         assert!(core.direct_notification_suppressed(&workspace_id));
+        assert!(core.direct_notification_delivery_suppressed(&workspace_id));
         core.end_direct_notification_suppression(&workspace_id);
         assert!(core.direct_notification_suppressed(&workspace_id));
+        assert!(core.direct_notification_delivery_suppressed(&workspace_id));
         core.end_direct_notification_suppression(&workspace_id);
         assert!(!core.direct_notification_suppressed(&workspace_id));
+        assert!(
+            core.direct_notification_delivery_suppressed(&workspace_id),
+            "delivery suppression should keep a short grace window for late core events"
+        );
     }
 
     #[test]

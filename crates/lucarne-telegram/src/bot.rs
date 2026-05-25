@@ -685,6 +685,12 @@ impl Bot {
                 .send_watched_agent_message_to_session_topic(&session, text.as_ref())
                 .await;
         }
+        if self
+            .core
+            .direct_notification_delivery_suppressed(&workspace_id)
+        {
+            return Ok(());
+        }
         if !self.state.notifications_enabled_for_session(&session) {
             return Ok(());
         }
@@ -11177,6 +11183,74 @@ done
         assert_eq!(sent.len(), 1);
         assert!(sent[0].body.contains("assistant reply"));
         assert!(sent[0].body.contains("session: `thread-live`"));
+    }
+
+    #[tokio::test]
+    async fn late_workspace_turn_echo_after_live_clear_does_not_enter_notifications() {
+        let channel = Arc::new(RecordingChannel::default());
+        let runtime = Arc::new(AgentRuntime::new());
+        runtime.register(Arc::new(RecordingProvider::new(Arc::new(StdMutex::new(
+            Vec::new(),
+        )))));
+        let core = core_with_runtime(runtime);
+        let bot = Arc::new(Bot::new(
+            Arc::clone(&channel) as Arc<dyn Channel>,
+            Arc::clone(&core),
+            WorkspaceHandle::new(ChatId::new("100"), WorkspaceId::new("")),
+        ));
+        let workspace = WorkspaceId::new("workspace-a");
+        let session = WorkSession {
+            workspace: workspace.clone(),
+            chat: ChatId::new("100"),
+            provider_id: "codex",
+            project_path: Some(PathBuf::from("/tmp/workspace-a")),
+            title: "codex workspace-a".into(),
+            live: None,
+            resume_ref: Some("thread-1".into()),
+        };
+        bot.state
+            .upsert_with_topic(session, WorkspaceId::new("9"))
+            .expect("bind workspace topic");
+        let (_tx, rx) = tokio::sync::broadcast::channel(1);
+        let live = Arc::new(LiveSession {
+            session: Arc::new(ClosedSession::with_ids("thread-1", "instance-1")),
+            events: AsyncMutex::new(CoreWorkspaceEventStream::new(
+                ControlWorkspaceId::new(workspace.as_str()),
+                rx,
+            )),
+            pending_intv: StdMutex::new(HashMap::new()),
+        });
+        bot.state
+            .bind_live(&workspace, live, Some("thread-1".into()))
+            .expect("bind active live session");
+
+        let guard = DirectNotificationGuard::new(Arc::clone(&core), workspace.clone());
+        drop(guard);
+        bot.state
+            .mark_live_dead(&workspace, Some("thread-1".into()))
+            .expect("live cleared before delayed core event is handled");
+
+        Arc::clone(&bot)
+            .handle_core_event(CoreEvent::TimelineEvent {
+                workspace_id: ControlWorkspaceId::new(workspace.as_str()),
+                turn_id: None,
+                event: AgentEvent::Message(MessageEvent {
+                    role: MessageRole::Assistant,
+                    text: "late workspace answer".into(),
+                    streaming: false,
+                }),
+            })
+            .await
+            .expect("late direct echo should be suppressed");
+
+        assert!(
+            channel.created_workspaces.lock().unwrap().is_empty(),
+            "late workspace turn echo must not create the notification topic"
+        );
+        assert!(
+            channel.sent.lock().unwrap().is_empty(),
+            "late workspace turn echo must not be delivered as a notification"
+        );
     }
 
     #[tokio::test]
