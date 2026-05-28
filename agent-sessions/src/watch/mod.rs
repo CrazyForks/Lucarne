@@ -77,6 +77,8 @@ pub struct SessionWatcher {
     pending_updates: VecDeque<Box<[WatchUpdate]>>,
     quiet_until: Option<Instant>,
     quiet_sleep: Option<Pin<Box<tokio::time::Sleep>>>,
+    retention_scan_at: Option<Instant>,
+    retention_sleep: Option<Pin<Box<tokio::time::Sleep>>>,
     disconnected: bool,
 }
 
@@ -159,6 +161,7 @@ impl SessionWatcher {
         }
         crate::memory_profile_snapshot!("agent_sessions.watch.after_roots");
 
+        let retention_scan_at = Some(Instant::now() + retention_scan_interval(&config));
         let mut this = Self {
             config,
             raw_rx,
@@ -172,6 +175,8 @@ impl SessionWatcher {
             pending_updates: VecDeque::new(),
             quiet_until: None,
             quiet_sleep: None,
+            retention_scan_at,
+            retention_sleep: None,
             disconnected: false,
         };
         this.initialize_baselines();
@@ -331,6 +336,156 @@ impl SessionWatcher {
             "processed debounced session paths"
         );
         updates
+    }
+
+    fn downgrade_stale_session_targets(&mut self) {
+        let paths = self.baselines.keys().cloned().collect::<Vec<_>>();
+        let mut downgraded = 0usize;
+        for path in paths {
+            if self.downgrade_session_target_if_stale(path) {
+                downgraded += 1;
+            }
+        }
+        if downgraded > 0 {
+            debug!(
+                target: "agent_sessions::watch",
+                downgraded,
+                baselines = self.baselines.len(),
+                watched_paths = self.watched_paths.len(),
+                "downgraded stale session watch targets"
+            );
+        }
+    }
+
+    fn downgrade_session_target_if_stale(&mut self, path: PathBuf) -> bool {
+        if self.pending_paths.contains(&path)
+            || self.is_explicit_session_file_root(&path)
+            || self.should_watch_session_file_target(&path)
+        {
+            return false;
+        }
+        if self
+            .baselines
+            .get(&path)
+            .is_some_and(|snapshot| !snapshot.pending_partial.is_empty())
+        {
+            trace!(
+                target: "agent_sessions::watch",
+                path = %path.display(),
+                "retaining stale session baseline with pending partial record"
+            );
+            return false;
+        }
+        let removed_file = if self.session_has_parent_or_root_coverage(&path) {
+            self.unwatch_session_file_target(&path)
+        } else {
+            false
+        };
+        let removed_parent = self.unwatch_stale_parent_directory_target(&path);
+        if removed_file || removed_parent {
+            trace!(
+                target: "agent_sessions::watch",
+                path = %path.display(),
+                removed_file,
+                removed_parent,
+                "downgraded stale session target to parent/root watch"
+            );
+        }
+        removed_file || removed_parent
+    }
+
+    fn is_explicit_session_file_root(&self, path: &Path) -> bool {
+        self.providers_by_path
+            .iter()
+            .any(|(root, _provider)| root == path && root.is_file())
+    }
+
+    fn unwatch_session_file_target(&mut self, path: &Path) -> bool {
+        let watch_path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        if !self.watched_paths.remove(&watch_path) {
+            return false;
+        }
+        let Some(watcher) = self._watcher.as_mut() else {
+            return true;
+        };
+        if let Err(error) = watcher.unwatch(&watch_path) {
+            warn!(
+                target: "agent_sessions::watch",
+                watch_path = %watch_path.display(),
+                error = %error,
+                "failed to unwatch stale session file"
+            );
+        }
+        true
+    }
+
+    fn session_has_parent_or_root_coverage(&self, path: &Path) -> bool {
+        self.has_recursive_root_for_path(path)
+            || path.parent().is_some_and(|parent| {
+                let parent = fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+                self.watched_paths.contains(&parent)
+            })
+    }
+
+    fn unwatch_stale_parent_directory_target(&mut self, path: &Path) -> bool {
+        if self.has_recursive_root_for_path(path) {
+            return false;
+        }
+        let Some(parent) = path.parent() else {
+            return false;
+        };
+        let parent = fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+        if !self.watched_paths.contains(&parent)
+            || self.should_watch_directory_for_current_state(&parent)
+            || self.parent_directory_has_retained_session_target(&parent)
+        {
+            return false;
+        }
+        if !self.watched_paths.remove(&parent) {
+            return false;
+        }
+        let Some(watcher) = self._watcher.as_mut() else {
+            return true;
+        };
+        if let Err(error) = watcher.unwatch(&parent) {
+            warn!(
+                target: "agent_sessions::watch",
+                watch_path = %parent.display(),
+                error = %error,
+                "failed to unwatch stale session directory"
+            );
+        }
+        true
+    }
+
+    fn parent_directory_has_retained_session_target(&self, parent: &Path) -> bool {
+        self.baselines.keys().any(|candidate| {
+            session_parent_matches(candidate, parent)
+                && self.session_path_requires_direct_target(candidate)
+        }) || self
+            .pending_paths
+            .iter()
+            .any(|candidate| session_parent_matches(candidate, parent))
+    }
+
+    fn session_path_requires_direct_target(&self, path: &Path) -> bool {
+        self.pending_paths.contains(path)
+            || self.is_explicit_session_file_root(path)
+            || self.should_watch_session_file_target(path)
+            || self
+                .baselines
+                .get(path)
+                .is_some_and(|snapshot| !snapshot.pending_partial.is_empty())
+    }
+
+    fn should_watch_directory_for_current_state(&self, path: &Path) -> bool {
+        self.provider_root_for_path(path)
+            .is_some_and(|(root, provider)| self.should_watch_directory(provider, root, path))
+    }
+
+    fn schedule_next_retention_scan(&mut self) {
+        self.retention_scan_at = Some(Instant::now() + retention_scan_interval(&self.config));
+        self.retention_sleep = None;
     }
 
     fn watch_target(&mut self, target: WatchTarget) -> std::result::Result<(), WatchError> {
@@ -1481,6 +1636,24 @@ impl Stream for SessionWatcher {
                 this.quiet_sleep = None;
             }
 
+            if let Some(retention_scan_at) = this.retention_scan_at {
+                let now = Instant::now();
+                if now >= retention_scan_at {
+                    this.downgrade_stale_session_targets();
+                    this.schedule_next_retention_scan();
+                    continue;
+                }
+
+                let delay = retention_scan_at.saturating_duration_since(now);
+                if poll_sleep(&mut this.retention_sleep, delay, cx).is_ready() {
+                    this.downgrade_stale_session_targets();
+                    this.schedule_next_retention_scan();
+                    continue;
+                }
+            } else {
+                this.retention_sleep = None;
+            }
+
             if this.disconnected {
                 return Poll::Ready(Some(Err(WatchError::Disconnected)));
             }
@@ -1508,6 +1681,22 @@ fn poll_sleep(
         }
         Poll::Pending => Poll::Pending,
     }
+}
+
+fn retention_scan_interval(config: &WatchConfig) -> Duration {
+    if config.scan_interval.is_zero() {
+        Duration::from_millis(1)
+    } else {
+        config.scan_interval
+    }
+}
+
+fn session_parent_matches(path: &Path, parent: &Path) -> bool {
+    path.parent().is_some_and(|candidate_parent| {
+        let candidate_parent =
+            fs::canonicalize(candidate_parent).unwrap_or_else(|_| candidate_parent.to_path_buf());
+        candidate_parent == parent
+    })
 }
 
 fn has_complete_jsonl_record_after_leading_boundary(bytes: &[u8]) -> bool {

@@ -1,6 +1,7 @@
 use super::*;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+use std::time::Instant;
 #[cfg(any(
     feature = "codex",
     all(feature = "claude", any(target_os = "macos", windows))
@@ -104,6 +105,8 @@ fn test_watcher_for(
         pending_updates: std::collections::VecDeque::new(),
         quiet_until: None,
         quiet_sleep: None,
+        retention_scan_at: Some(Instant::now() + WatchConfig::new().scan_interval),
+        retention_sleep: None,
         disconnected: false,
     };
     watcher.initialize_baselines();
@@ -136,10 +139,12 @@ fn watcher_start_debug_log_avoids_formatting_full_provider_descriptors() {
 }
 
 #[test]
-fn watch_config_scan_interval_available_for_backward_compat() {
-    // scan_interval is kept in the config for backward compat but no
-    // longer drives a periodic scan loop.
+fn watch_config_scan_interval_defaults_to_runtime_retention_interval() {
     assert_eq!(WatchConfig::new().scan_interval, Duration::from_secs(60));
+    assert_eq!(
+        retention_scan_interval(&WatchConfig::new().scan_interval(Duration::ZERO)),
+        Duration::from_millis(1)
+    );
 }
 
 #[test]
@@ -282,6 +287,86 @@ async fn baselines_existing_codex_session_without_emitting() {
         updates.is_empty(),
         "existing messages must not be emitted on startup"
     );
+}
+
+#[cfg(feature = "codex")]
+#[tokio::test]
+async fn scan_interval_downgrades_stale_session_file_targets_while_running() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = codex_root(temp.path());
+    let session_path = codex_session_path(&root);
+    write_initial_codex_session(&session_path);
+    let canonical_session_path = fs::canonicalize(&session_path).unwrap();
+    let parent = fs::canonicalize(session_path.parent().unwrap()).unwrap();
+
+    let (mut watcher, _tx) = test_watcher(&root, Duration::from_millis(10));
+    watcher.config.scan_interval = Duration::from_millis(10);
+    watcher.retention_scan_at = Some(Instant::now() + watcher.config.scan_interval);
+    watcher.retention_sleep = None;
+    watcher.watched_paths.insert(parent);
+    watcher.watched_paths.insert(canonical_session_path.clone());
+    set_modified(
+        &session_path,
+        SystemTime::now() - Duration::from_secs(3 * 24 * 60 * 60),
+    );
+
+    let updates = recv_timeout(&mut watcher, Duration::from_millis(80))
+        .await
+        .unwrap();
+
+    assert!(updates.is_empty());
+    assert!(watcher.baselines.contains_key(&canonical_session_path));
+    assert!(!watcher.watched_paths.contains(&canonical_session_path));
+}
+
+#[cfg(feature = "codex")]
+#[tokio::test]
+async fn runtime_downgrade_keeps_pending_stale_session_targets() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = codex_root(temp.path());
+    let session_path = codex_session_path(&root);
+    write_initial_codex_session(&session_path);
+    let canonical_session_path = fs::canonicalize(&session_path).unwrap();
+
+    let (mut watcher, _tx) = test_watcher(&root, Duration::from_millis(10));
+    watcher.watched_paths.insert(canonical_session_path.clone());
+    watcher.pending_paths.insert(canonical_session_path.clone());
+    set_modified(
+        &session_path,
+        SystemTime::now() - Duration::from_secs(3 * 24 * 60 * 60),
+    );
+
+    watcher.downgrade_stale_session_targets();
+
+    assert!(watcher.baselines.contains_key(&canonical_session_path));
+    assert!(watcher.watched_paths.contains(&canonical_session_path));
+}
+
+#[cfg(all(feature = "codex", target_os = "linux"))]
+#[tokio::test]
+async fn linux_runtime_downgrade_releases_stale_recent_directory_target() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = codex_root(temp.path());
+    let session_path = codex_session_path(&root);
+    write_initial_codex_session(&session_path);
+    let canonical_session_path = fs::canonicalize(&session_path).unwrap();
+    let parent = fs::canonicalize(session_path.parent().unwrap()).unwrap();
+
+    let (mut watcher, _tx) = test_watcher(&root, Duration::from_millis(10));
+    watcher.watched_paths.insert(parent.clone());
+    set_modified(
+        &session_path,
+        SystemTime::now() - Duration::from_secs(3 * 24 * 60 * 60),
+    );
+    set_modified(
+        &parent,
+        SystemTime::now() - Duration::from_secs(3 * 24 * 60 * 60),
+    );
+
+    watcher.downgrade_stale_session_targets();
+
+    assert!(watcher.baselines.contains_key(&canonical_session_path));
+    assert!(!watcher.watched_paths.contains(&parent));
 }
 
 #[cfg(feature = "codex")]
@@ -710,6 +795,8 @@ async fn configured_unsubscribed_codex_path_skips_initial_state_seed_and_delta_p
         pending_updates: std::collections::VecDeque::new(),
         quiet_until: None,
         quiet_sleep: None,
+        retention_scan_at: Some(Instant::now() + Duration::from_secs(30)),
+        retention_sleep: None,
         disconnected: false,
     };
     watcher.initialize_baselines();
