@@ -5275,7 +5275,9 @@ fn history_upload_from_bytes(
     caption: Option<String>,
     reply_to: MessageId,
 ) -> FileUpload {
-    let mut upload = FileUpload::new(format!("history-image.{ext}"), bytes).reply_to(reply_to);
+    let mut upload = FileUpload::new(format!("history-image.{ext}"), bytes)
+        .reply_to(reply_to)
+        .silent();
     if let Some(caption) = caption.filter(|caption| !caption.trim().is_empty()) {
         upload = upload.with_caption(caption);
     }
@@ -7222,7 +7224,10 @@ mod tests {
         assert_eq!(sent[0].format, lucarne_channel::TextFormat::Markdown);
         assert!(sent[0].body.contains("Lucarne update available"));
         assert!(sent[0].reply_to.is_none());
-        assert!(!sent[0].silent);
+        assert_eq!(
+            sent[0].notification,
+            lucarne_channel::NotificationPolicy::Notify
+        );
         drop(sent);
 
         assert_eq!(
@@ -11444,6 +11449,15 @@ done
                 &notification_topic.chat,
                 &MessageId::new("sent-3"),
             ),
+            None,
+            "deleted silent preview should not route replies"
+        );
+        assert_eq!(
+            bot.state.resolve_message_session_binding(
+                channel.name(),
+                &notification_topic.chat,
+                &MessageId::new("sent-4"),
+            ),
             Some(provider_session_id),
             "final assistant message must route replies"
         );
@@ -11453,7 +11467,7 @@ done
                 message_id: MessageId::new("user-2"),
                 chat: notification_topic.chat.clone(),
                 workspace: Some(notification_topic.workspace.clone()),
-                reply_to: Some(MessageId::new("sent-3")),
+                reply_to: Some(MessageId::new("sent-4")),
                 user: "alice".into(),
                 text: Some("second follow-up".into()),
                 attachments: Vec::new(),
