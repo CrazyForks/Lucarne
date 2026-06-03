@@ -3096,16 +3096,7 @@ impl LucarneCore {
         scope: AgentResourceScope,
     ) -> Result<AgentResourceSnapshot, CoreError> {
         let mut observed_sessions = self.observed_recent_sessions_for_scope(&scope);
-        let mut targets = self.agent_resource_targets(scope)?;
-        for target in &mut targets {
-            if let Some(observed) = observed_sessions
-                .iter()
-                .find(|session| session.provider_session_id == target.provider_session_id)
-            {
-                target.last_active_unix = observed.last_active_unix;
-                target.last_active_display = observed.last_active_display.clone();
-            }
-        }
+        let targets = self.agent_resource_targets(scope)?;
         let managed_session_ids = targets
             .iter()
             .map(|target| target.provider_session_id.clone())
@@ -5121,7 +5112,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_resource_snapshot_hides_managed_sessions_from_observed_and_uses_observed_activity(
+    async fn agent_resource_snapshot_hides_managed_sessions_from_observed_and_uses_live_activity(
     ) {
         let process_id = std::process::id() as i32;
         let runtime = Arc::new(AgentRuntime::new());
@@ -5139,17 +5130,28 @@ mod tests {
             })
             .await
             .expect("open workspace");
-        let provider_session_id = core
+        let workspace = core
             .workspace_binding(&opened.workspace.workspace_id)
-            .and_then(|workspace| workspace.active_provider_session_id)
+            .expect("workspace binding");
+        let provider_session_id = workspace
+            .active_provider_session_id
+            .clone()
             .expect("active provider session");
+        let live_instance_id = workspace
+            .active_live_instance_id
+            .clone()
+            .expect("active live instance");
+        let live = core
+            .live_instance_record(&live_instance_id)
+            .expect("live instance record");
+        let (_, expected_live_last_active) = live_instance_last_active(&live);
         {
             let mut observed = observed_session_for_test("session-pid", Some(process_id));
             observed.workspace_id = opened.workspace.workspace_id.clone();
             observed.provider_session_id = provider_session_id.clone();
             observed.native_resume_ref = "session-pid".into();
             observed.last_active_unix = 1_776_960_000;
-            observed.last_active_display = "05-01 00:00:00".into();
+            observed.last_active_display = "jsonl-observed".into();
             core.observed_sessions
                 .write()
                 .expect("observed session registry lock")
@@ -5166,11 +5168,18 @@ mod tests {
             snapshot.observed_sessions.is_empty(),
             "managed live session must not also render as observed"
         );
-        assert_eq!(snapshot.agents[0].last_active_display, "05-01 00:00:00");
+        assert_eq!(
+            snapshot.agents[0].last_active_display,
+            expected_live_last_active
+        );
         let rendered = crate::core_service::render_agent_resource_snapshot(&snapshot);
         assert!(rendered.contains("observed recent: `0`"));
         assert!(!rendered.contains("\n\nobserved recent\n\n"));
-        assert!(rendered.contains("last active: `05-01 00:00:00`"));
+        assert!(rendered.contains(&format!("last active: `{expected_live_last_active}`")));
+        assert!(
+            !rendered.contains("jsonl-observed"),
+            "managed resource status must not take last activity from provider history JSONL"
+        );
     }
 
     #[tokio::test]

@@ -230,7 +230,7 @@ pub fn render_agent_resource_snapshot(snapshot: &AgentResourceSnapshot) -> Strin
         body.push_str("\n\n");
         body.push_str(agent.identity.as_deref().unwrap_or("unidentified"));
         body.push('\n');
-        let last_active_display = agent_last_active_display(snapshot, agent);
+        let last_active_display = agent_last_active_display(agent);
         body.push_str(&format!(
             "workspace: `{}`\nprovider: `{}`\nsession: `{}`\nlast active: `{}`\npid: `{}`\nprocesses: `{}`\ncpu: `{}`\nmemory: `{}`",
             agent.workspace_id.as_str(),
@@ -289,20 +289,11 @@ pub fn render_kill_agent_report(report: &KillAgentReport) -> String {
     body
 }
 
-fn agent_last_active_display<'a>(
-    snapshot: &'a AgentResourceSnapshot,
-    agent: &'a AgentResourceEntry,
-) -> &'a str {
+fn agent_last_active_display(agent: &AgentResourceEntry) -> &str {
     if !agent.last_active_display.trim().is_empty() {
         return agent.last_active_display.as_str();
     }
-    snapshot
-        .observed_sessions
-        .iter()
-        .find(|session| session.provider_session_id == agent.provider_session_id)
-        .map(|session| session.last_active_display.as_str())
-        .filter(|display| !display.trim().is_empty())
-        .unwrap_or("unknown")
+    "unknown"
 }
 
 fn format_cpu(value: f32) -> String {
@@ -330,7 +321,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resource_snapshot_renderer_shows_managed_last_active_from_observed_watch() {
+    fn resource_snapshot_renderer_keeps_managed_last_active_from_agent_entry() {
         let snapshot = AgentResourceSnapshot {
             managed_agent_count: 1,
             process_count: 2,
@@ -361,7 +352,7 @@ mod tests {
                     cwd: Some(PathBuf::from("/tmp/lucarnex")),
                     session_path: PathBuf::from("/tmp/rollout-observed-thread.jsonl"),
                     last_active_unix: 1_776_960_000,
-                    last_active_display: "05-01 00:00:00".into(),
+                    last_active_display: "jsonl-observed".into(),
                     observed_pid: None,
                 },
                 ObservedAgentSession {
@@ -393,6 +384,7 @@ mod tests {
         assert!(rendered.contains("observed recent: `2`"));
         assert!(managed_block.contains("observed-thread:98844"));
         assert!(managed_block.contains("last active: `05-01 00:00:00`"));
+        assert!(!managed_block.contains("jsonl-observed"));
         assert!(observed_block.contains("fix checkout bug"));
         assert!(
             observed_block.contains("cwd: `/tmp/lucarnex`\n\nreview spacing"),
@@ -400,7 +392,7 @@ mod tests {
         );
         assert!(observed_block.contains("provider: `codex`"));
         assert!(observed_block.contains("session: `observed-thread`"));
-        assert!(observed_block.contains("last active: `05-01 00:00:00`"));
+        assert!(observed_block.contains("last active: `jsonl-observed`"));
         assert!(observed_block.contains("cwd: `/tmp/lucarnex`"));
         assert!(!observed_block.contains("pid:"));
     }
