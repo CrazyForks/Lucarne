@@ -79,6 +79,20 @@ async fn start_file_watcher(provider: WatchProvider, path: &Path) -> SessionWatc
     watcher
 }
 
+fn event_carries_channel_body(event: &WatchEvent, expected: &str) -> bool {
+    match event {
+        // Peer providers may emit intermediate/final phases; match body text.
+        WatchEvent::AssistantMessage(message) if message.text.as_deref() == Some(expected) => true,
+        // Grok surfaces the final body on turn complete after mid-turn filtering.
+        WatchEvent::TurnCompleted(completed)
+            if completed.last_agent_message.as_deref() == Some(expected) =>
+        {
+            true
+        }
+        _ => false,
+    }
+}
+
 async fn wait_for_assistant_response(watcher: &mut SessionWatcher, expected: &str) -> WatchUpdate {
     let deadline = Instant::now() + Duration::from_secs(6);
     let mut seen_updates = Vec::new();
@@ -87,13 +101,11 @@ async fn wait_for_assistant_response(watcher: &mut SessionWatcher, expected: &st
             .await
             .unwrap();
         for update in updates {
-            if update.events.iter().any(|event| {
-                matches!(
-                    event,
-                    WatchEvent::AssistantMessage(message)
-                        if message.text.as_deref() == Some(expected)
-                )
-            }) {
+            if update
+                .events
+                .iter()
+                .any(|event| event_carries_channel_body(event, expected))
+            {
                 return update;
             }
             seen_updates.push(update);
@@ -349,6 +361,32 @@ fn grok_assistant_line(session_id: &str, ts: &str, text: &str) -> String {
     .to_string()
 }
 
+#[cfg(feature = "grok")]
+fn grok_turn_completed_line(session_id: &str, ts: &str) -> String {
+    serde_json::json!({
+        "timestamp": ts,
+        "method": "session/update",
+        "params": {
+            "sessionId": session_id,
+            "update": {
+                "sessionUpdate": "turn_completed",
+                "stop_reason": "end_turn"
+            }
+        }
+    })
+    .to_string()
+}
+
+/// Real Grok turns end with turn_completed; channel notify uses last_agent_message.
+#[cfg(feature = "grok")]
+fn grok_assistant_turn(session_id: &str, ts: &str, text: &str) -> String {
+    format!(
+        "{}\n{}",
+        grok_assistant_line(session_id, ts, text),
+        grok_turn_completed_line(session_id, ts)
+    )
+}
+
 /// Direct file append: incremental tail only (Codex/Claude parity).
 #[cfg(feature = "grok")]
 #[tokio::test]
@@ -368,14 +406,15 @@ async fn live_grok_watch_emits_appended_assistant_response() {
     );
     let mut watcher = start_file_watcher(watch_provider("grok"), &path).await;
 
-    append_line(
-        &path,
-        &grok_assistant_line(
-            "019f4f1c-live-append-000000000001",
-            "2026-05-03T00:02:06.000Z",
-            "grok pong",
-        ),
-    );
+    for line in grok_assistant_turn(
+        "019f4f1c-live-append-000000000001",
+        "2026-05-03T00:02:06.000Z",
+        "grok pong",
+    )
+    .lines()
+    {
+        append_line(&path, line);
+    }
 
     let update = wait_for_assistant_response(&mut watcher, "grok pong").await;
     assert_eq!(update.provider, watch_provider("grok"));
@@ -405,10 +444,10 @@ async fn live_grok_watch_emits_nested_session_append() {
     // Drain Created/discovery noise before the assistant append under test.
     let _ = recv_timeout(&mut watcher, Duration::from_millis(400)).await;
 
-    append_line(
-        &path,
-        &grok_assistant_line(sid, "2026-05-03T00:02:06.000Z", "grok nested pong"),
-    );
+    for line in grok_assistant_turn(sid, "2026-05-03T00:02:06.000Z", "grok nested pong").lines()
+    {
+        append_line(&path, line);
+    }
 
     let update = wait_for_assistant_response(&mut watcher, "grok nested pong").await;
     assert_eq!(update.provider, watch_provider("grok"));
@@ -436,7 +475,7 @@ async fn live_grok_watch_emits_nested_created_session_response() {
         &format!(
             "{}\n{}\n",
             grok_user_line(sid, "2026-05-03T00:00:01.000Z", "ping"),
-            grok_assistant_line(sid, "2026-05-03T00:02:06.000Z", "grok created pong"),
+            grok_assistant_turn(sid, "2026-05-03T00:02:06.000Z", "grok created pong"),
         ),
     );
 
@@ -467,24 +506,30 @@ async fn live_grok_watch_large_baseline_append_only_emits_delta() {
     write_parent(&path, &baseline);
     let mut watcher = start_file_watcher(watch_provider("grok"), &path).await;
 
-    append_line(
-        &path,
-        &grok_assistant_line(sid, "2026-05-03T00:02:06.000Z", "grok large-delta pong"),
-    );
+    for line in
+        grok_assistant_turn(sid, "2026-05-03T00:02:06.000Z", "grok large-delta pong").lines()
+    {
+        append_line(&path, line);
+    }
 
     let update = wait_for_assistant_response(&mut watcher, "grok large-delta pong").await;
     assert_eq!(update.provider, watch_provider("grok"));
     // Delta window must not replay earlier noise blobs as separate expected hits;
     // the wait already required exact text match. Also assert no full baseline reparse
-    // by ensuring we did not get hundreds of assistant events in this update.
-    let assistant_count = update
+    // by ensuring we did not get hundreds of channel-facing body events in this update.
+    let body_count = update
         .events
         .iter()
-        .filter(|e| matches!(e, WatchEvent::AssistantMessage(_)))
+        .filter(|e| {
+            matches!(
+                e,
+                WatchEvent::AssistantMessage(_) | WatchEvent::TurnCompleted(_)
+            )
+        })
         .count();
     assert!(
-        assistant_count <= 4,
-        "expected bounded delta events, got {assistant_count} assistant events in {:?}",
+        body_count <= 4,
+        "expected bounded delta events, got {body_count} body events in {:?}",
         update.events
     );
 }
