@@ -1766,6 +1766,13 @@ where
             SlashCommand::Help => {
                 self.transport.reply(message, render_wechat_help()).await?;
             }
+            SlashCommand::Latest => {
+                // Rate limiter already cleared in handle_incoming. Flush queued
+                // agent traffic so the user sees the latest without waiting for
+                // the periodic retry tick. Do not reply with the help menu.
+                self.retry_pending_notifications().await?;
+                self.retry_completed_pending_replies().await?;
+            }
             SlashCommand::New => {
                 let Some(scope) = self.slash_scope(message)? else {
                     self.transport
@@ -3003,6 +3010,7 @@ enum ConfigCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SlashCommand {
     Help,
+    Latest,
     New,
     Status,
     Kill(KillAgentTarget),
@@ -3046,6 +3054,7 @@ fn parse_slash_command(text: &str) -> Option<SlashCommand> {
         .to_ascii_lowercase();
     match name.as_str() {
         "help" => Some(SlashCommand::Help),
+        "latest" => Some(SlashCommand::Latest),
         "new" => Some(SlashCommand::New),
         "status" => Some(SlashCommand::Status),
         "kill" => {
@@ -3122,6 +3131,7 @@ fn render_wechat_help() -> &'static str {
 | 命令 | 说明 |\n\
 |---|---|\n\
 | `/help` | 显示帮助 |\n\
+| `/latest` | 清除限流并立即推送积压的 agent 通知（无菜单回复） |\n\
 | `/config` | 查看全局配置 |\n\
 | `/config global bypass on/off` | 开关全局权限绕过 |\n\
 | `/config global notifications on/off` | 开关全局通知 |\n\
@@ -3129,7 +3139,7 @@ fn render_wechat_help() -> &'static str {
 | `/new` | 引用通知后开启该工作区的新会话 |\n\
 | `/kill all / <session_id:pid>` | 终止 agent 进程 |\n\
 \n⚠️\n\
-微信主动通知有频率和会话时效限制（可在配置文件配置）。如果长时间没收到 agent 消息，可以随便发一条消息刷新维持会话。\n"
+微信主动通知有频率和会话时效限制（可在配置文件配置）。长时间没收到 agent 消息时，发送 `/latest` 可立即把积压通知推到最新。\n"
 }
 
 #[cfg(test)]
@@ -4061,8 +4071,107 @@ mod tests {
         assert!(replies[0].text.contains("`/config global bypass on/off`"));
         assert!(replies[0].text.contains("`/status`"));
         assert!(replies[0].text.contains("`/new`"));
+        assert!(replies[0].text.contains("`/latest`"));
         assert!(replies[0].text.contains("微信主动通知有频率和会话时效限制"));
         assert!(!replies[0].text.contains(WECHAT_REPLY_REQUIRED));
+    }
+
+    #[tokio::test]
+    async fn slash_latest_does_not_reply_with_help_menu() {
+        let provider = Arc::new(FakeProvider::default());
+        let core = test_core(provider);
+        let transport = Arc::new(FakeTransport::default());
+        let service = WechatNotificationService::new(
+            Arc::clone(&core),
+            Arc::clone(&transport),
+            WechatServiceOptions::default(),
+        );
+
+        service
+            .handle_incoming(WechatIncoming::new(
+                "latest-1",
+                "user-1",
+                "/latest",
+                Option::<String>::None,
+            ))
+            .await
+            .expect("handle latest");
+
+        assert!(
+            transport.replies().is_empty(),
+            " /latest must not send menu/help reply: {:?}",
+            transport.replies()
+        );
+        assert!(
+            transport.sends().is_empty(),
+            " /latest with empty queue must not push menu: {:?}",
+            transport.sends()
+        );
+    }
+
+    #[tokio::test]
+    async fn slash_latest_clears_rate_limit_and_flushes_pending_notifications() {
+        let provider = Arc::new(FakeProvider::default());
+        let core = test_core(Arc::clone(&provider));
+        core.open_workspace_with_events(OpenWorkspaceRequest {
+            provider_id: "codex",
+            project_path: Some("/tmp/workspace-latest-flush".into()),
+            title: "workspace-latest-flush".into(),
+        })
+        .await
+        .expect("open workspace");
+        let mut events = core.watch_events();
+        let transport = Arc::new(FakeTransport::default());
+        transport.fail_sends("rate limited");
+        let service = WechatNotificationService::new(
+            Arc::clone(&core),
+            Arc::clone(&transport),
+            WechatServiceOptions {
+                initial_user_ids: vec!["user-1".into()],
+                ..WechatServiceOptions::default()
+            },
+        );
+
+        provider.emit_assistant("thread-1", "latest pending agent output");
+        service
+            .handle_core_event(next_timeline_event(&mut events).await)
+            .await
+            .expect("queue notification under transport failure");
+        assert_eq!(service.pending_notification_count(), 1);
+        assert!(transport.sends().is_empty());
+
+        // Simulate active rate limit that would block periodic retry.
+        service.rate_limiter.defer(Duration::from_secs(60));
+        assert!(service.rate_limit_remaining().is_some());
+
+        transport.clear_send_failures();
+        service
+            .handle_incoming(WechatIncoming::new(
+                "latest-flush-1",
+                "user-1",
+                "/latest",
+                Option::<String>::None,
+            ))
+            .await
+            .expect("handle latest flush");
+
+        assert!(
+            service.rate_limit_remaining().is_none(),
+            " /latest must clear rate limit"
+        );
+        assert_eq!(service.pending_notification_count(), 0);
+        let sends = transport.sends();
+        assert_eq!(sends.len(), 1, "expected flushed agent notification: {sends:?}");
+        assert!(
+            sends[0].text.contains("latest pending agent output"),
+            "flushed body: {}",
+            sends[0].text
+        );
+        assert!(
+            transport.replies().is_empty(),
+            " /latest must not reply with menu: {:?}",
+            transport.replies()
+        );
     }
 
     #[tokio::test]
