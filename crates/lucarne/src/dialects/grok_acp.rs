@@ -1,12 +1,16 @@
 //! Grok Build ACP dialect — `grok agent stdio` JSON-RPC 2.0.
 //!
+//! Lucarne is a **relay** only (same posture as Gemini ACP): spawn agent, translate
+//! wire events, forward permission prompts. It does **not** host the workspace —
+//! no client-side `fs/*` or `terminal/*` execution. Those capabilities are
+//! advertised `false` so Grok uses its own tools (like Codex/Claude/Pi).
+//!
 //! Wire lifecycle:
-//! 1. `initialize` (advertise `clientCapabilities.fs.readTextFile/writeTextFile`)
+//! 1. `initialize` (`clientCapabilities.fs/terminal = false`, align gemini)
 //! 2. `session/new` or `session/load` (resume UUID)
 //! 3. `session/prompt` for each user turn
 //! 4. `session/update` notifications stream chunks/tools
-//! 5. reverse client RPCs: `fs/read_text_file`, `fs/write_text_file`,
-//!    optional `session/request_permission`
+//! 5. reverse client RPCs we answer: `session/request_permission` only
 //! 6. `session/cancel` for interrupt
 
 use crate::{
@@ -209,77 +213,6 @@ impl GrokAcp {
         None
     }
 
-    /// ACP reverse: `fs/read_text_file` → `{ content }`.
-    fn handle_fs_read_text_file(&mut self, id: i64, params: &Value) {
-        let path = match params.get("path").and_then(|v| v.as_str()) {
-            Some(p) if !p.is_empty() => p,
-            _ => {
-                self.enqueue_error(id, -32602, "fs/read_text_file: missing path");
-                return;
-            }
-        };
-        let line = params
-            .get("line")
-            .and_then(|v| v.as_u64())
-            .map(|n| n as usize);
-        let limit = params
-            .get("limit")
-            .and_then(|v| v.as_u64())
-            .map(|n| n as usize);
-
-        match std::fs::read_to_string(path) {
-            Ok(full) => {
-                let content = apply_line_window(&full, line, limit);
-                self.enqueue_result(id, json!({ "content": content }));
-            }
-            Err(err) => {
-                self.enqueue_error(
-                    id,
-                    -32000,
-                    format!("fs/read_text_file: {path}: {err}"),
-                );
-            }
-        }
-    }
-
-    /// ACP reverse: `fs/write_text_file` → empty object result.
-    fn handle_fs_write_text_file(&mut self, id: i64, params: &Value) {
-        let path = match params.get("path").and_then(|v| v.as_str()) {
-            Some(p) if !p.is_empty() => p,
-            _ => {
-                self.enqueue_error(id, -32602, "fs/write_text_file: missing path");
-                return;
-            }
-        };
-        let content = match params.get("content").and_then(|v| v.as_str()) {
-            Some(c) => c,
-            None => {
-                self.enqueue_error(id, -32602, "fs/write_text_file: missing content");
-                return;
-            }
-        };
-        if let Some(parent) = std::path::Path::new(path).parent() {
-            if !parent.as_os_str().is_empty() {
-                if let Err(err) = std::fs::create_dir_all(parent) {
-                    self.enqueue_error(
-                        id,
-                        -32000,
-                        format!("fs/write_text_file: create parent {parent:?}: {err}"),
-                    );
-                    return;
-                }
-            }
-        }
-        match std::fs::write(path, content) {
-            Ok(()) => self.enqueue_result(id, json!({})),
-            Err(err) => self.enqueue_error(
-                id,
-                -32000,
-                format!("fs/write_text_file: {path}: {err}"),
-            ),
-        }
-    }
-
     fn resume_uuid(&self) -> Option<String> {
         if let Some(h) = &self.cfg.resume {
             if let Some(Value::String(id)) = h.data.get("session_id") {
@@ -376,6 +309,31 @@ impl GrokAcp {
             .get("sessionUpdate")
             .and_then(|v| v.as_str())
             .unwrap_or("");
+
+        // Grok ACP session/load replays prior turns with `_meta.isReplay: true`.
+        // Treating those as live TimelineEvents floods the workspace bus (1k+
+        // events), lags Telegram/WeChat, and kills the agent mid-turn.
+        // Control/catalog updates may still apply during replay.
+        if is_grok_replay_params(params) && is_grok_transcript_session_update(kind) {
+            debug!(
+                target: "lucarne::dialects::grok_acp",
+                kind,
+                "ignoring replay session update after session/load"
+            );
+            return events;
+        }
+
+        // Outside an active prompt turn, ignore transcript noise (history
+        // residual, background agent chatter). Catalog/model updates still flow.
+        if !self.turn_active && is_grok_transcript_session_update(kind) {
+            debug!(
+                target: "lucarne::dialects::grok_acp",
+                kind,
+                "ignoring idle transcript session update"
+            );
+            return events;
+        }
+
         let turn = self.current_turn_id();
 
         match kind {
@@ -1000,6 +958,31 @@ impl GrokAcp {
     }
 }
 
+/// True when Grok marks this `session/update` as history replay (post `session/load`).
+fn is_grok_replay_params(params: &Value) -> bool {
+    params
+        .pointer("/_meta/isReplay")
+        .and_then(|v| v.as_bool())
+        .or_else(|| {
+            params
+                .pointer("/update/_meta/isReplay")
+                .and_then(|v| v.as_bool())
+        })
+        .unwrap_or(false)
+}
+
+fn is_grok_transcript_session_update(kind: &str) -> bool {
+    matches!(
+        kind,
+        "agent_thought_chunk"
+            | "agent_message_chunk"
+            | "user_message_chunk"
+            | "tool_call"
+            | "tool_call_update"
+            | "turn_completed"
+    )
+}
+
 impl Dialect for GrokAcp {
     fn name(&self) -> &'static str {
         "grok"
@@ -1018,9 +1001,10 @@ impl Dialect for GrokAcp {
             "initialize",
             json!({
                 "protocolVersion": 1,
+                // Relay only — same as gemini: agent owns tools/env, lucarne does not host fs/terminal.
                 "clientCapabilities": {
-                    "fs": { "readTextFile": true, "writeTextFile": true },
-                    "terminal": true
+                    "fs": { "readTextFile": false, "writeTextFile": false },
+                    "terminal": false
                 },
                 "clientInfo": { "name": "lucarne", "version": env!("CARGO_PKG_VERSION") }
             }),
@@ -1061,25 +1045,18 @@ impl Dialect for GrokAcp {
             }
             if let Some(id) = Self::rpc_id(&obj) {
                 match method {
+                    // Permission is relay (user decision), not environment hosting.
                     "session/request_permission" | "request_permission" => {
                         return self.handle_permission_request(id, &params);
                     }
-                    "fs/read_text_file" => {
-                        self.handle_fs_read_text_file(id, &params);
-                        return Vec::new();
-                    }
-                    "fs/write_text_file" => {
-                        self.handle_fs_write_text_file(id, &params);
-                        return Vec::new();
-                    }
-                    // Unknown reverse RPC with id — reply method-not-found so
-                    // the agent does not hang waiting forever.
+                    // Environment reverse RPCs (fs/*, terminal/*) are unsupported:
+                    // we advertise them false; still answer method-not-found if called.
                     other => {
                         warn!(
                             target: "lucarne::dialects::grok_acp",
                             method = other,
                             id,
-                            "unknown reverse acp request"
+                            "unsupported reverse acp request (lucarne is relay-only)"
                         );
                         self.enqueue_error(
                             id,
@@ -1593,25 +1570,6 @@ fn build_native_slash_command(
     }
 }
 
-/// Optional 1-based line window used by ACP `fs/read_text_file`.
-fn apply_line_window(full: &str, line: Option<usize>, limit: Option<usize>) -> String {
-    match (line, limit) {
-        (None, None) => full.to_string(),
-        (start, lim) => {
-            let start_idx = start.unwrap_or(1).saturating_sub(1);
-            let lines: Vec<&str> = full.lines().collect();
-            let end = match lim {
-                Some(n) => start_idx.saturating_add(n).min(lines.len()),
-                None => lines.len(),
-            };
-            if start_idx >= lines.len() {
-                return String::new();
-            }
-            lines[start_idx..end].join("\n")
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1712,6 +1670,98 @@ mod tests {
     }
 
     #[test]
+    fn session_load_replay_updates_do_not_emit_timeline() {
+        let mut d = GrokAcp::new();
+        d.session_id = Some("sid-load".into());
+        d.state = SessionState::Ready;
+        d.session_started = true;
+        // Even with turn_active, replay must never enter the bus.
+        d.turn_active = true;
+        let events = d.translate(
+            br#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sid-load","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"old user"}},"_meta":{"isReplay":true}}}"#,
+        );
+        assert!(
+            events.is_empty(),
+            "replay user chunk must be dropped: {events:?}"
+        );
+        let events = d.translate(
+            br#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sid-load","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"old assistant"},"_meta":{"isReplay":true}}}}"#,
+        );
+        assert!(events.is_empty(), "replay assistant must be dropped: {events:?}");
+        let events = d.translate(
+            br#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sid-load","update":{"sessionUpdate":"tool_call","toolCallId":"t1","title":"read"},"_meta":{"isReplay":true}}}"#,
+        );
+        assert!(events.is_empty(), "replay tool_call must be dropped: {events:?}");
+        // Non-replay live chunk during active turn still flows.
+        let events = d.translate(
+            br#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sid-load","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"live"}}}}"#,
+        );
+        assert!(
+            events.iter().any(|e| matches!(&e.payload, Payload::Timeline(_))),
+            "live non-replay must emit: {events:?}"
+        );
+    }
+
+    /// Volume bar matching the production failure mode (1300+ lag on a 256 bus).
+    #[test]
+    fn session_load_replay_volume_stays_off_the_event_bus() {
+        let mut d = GrokAcp::new();
+        d.session_id = Some("sid-vol".into());
+        d.state = SessionState::Ready;
+        d.session_started = true;
+        d.turn_active = true;
+        let mut total = 0usize;
+        for i in 0..1500 {
+            let kinds = [
+                "user_message_chunk",
+                "agent_thought_chunk",
+                "agent_message_chunk",
+                "tool_call",
+                "tool_call_update",
+                "turn_completed",
+            ];
+            let kind = kinds[i % kinds.len()];
+            let line = format!(
+                r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"sid-vol","update":{{"sessionUpdate":"{kind}","content":{{"type":"text","text":"x{i}"}},"toolCallId":"t{i}","title":"tool","status":"completed"}},"_meta":{{"isReplay":true}}}}}}"#
+            );
+            total += d.translate(line.as_bytes()).len();
+        }
+        assert_eq!(
+            total, 0,
+            "1500 isReplay updates must not emit any public events (bus capacity is 256)"
+        );
+        let live = d.translate(
+            br#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sid-vol","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"only-live"}}}}"#,
+        );
+        assert_eq!(live.len(), 1, "exactly one live timeline event expected: {live:?}");
+    }
+
+    #[test]
+    fn idle_transcript_updates_suppressed_until_turn_active() {
+        let mut d = GrokAcp::new();
+        d.session_id = Some("sid-idle".into());
+        d.state = SessionState::Ready;
+        d.session_started = true;
+        d.turn_active = false;
+        let events = d.translate(
+            br#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sid-idle","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"noise"}}}}"#,
+        );
+        assert!(events.is_empty(), "idle transcript must be dropped: {events:?}");
+        // Catalog updates still apply while idle.
+        let events = d.translate(
+            br#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sid-idle","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"compact","description":"c"}]}}}"#,
+        );
+        assert!(events.is_empty()); // catalog is side-effect only, no public events
+        assert!(
+            d.command_catalog
+                .commands
+                .iter()
+                .any(|c| c.name == "compact"),
+            "idle available_commands_update must still update catalog"
+        );
+    }
+
+    #[test]
     fn resume_uses_session_load() {
         let mut d = GrokAcp::new();
         let mut data = BTreeMap::new();
@@ -1785,81 +1835,55 @@ mod tests {
     }
 
     #[test]
-    fn fs_read_text_file_returns_content() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("note.txt");
-        std::fs::write(&path, "hello fs\n").unwrap();
+    fn initialize_advertises_no_client_environment_hosting() {
         let mut d = GrokAcp::new();
-        let req = json!({
-            "jsonrpc": "2.0",
-            "id": 0,
-            "method": "fs/read_text_file",
-            "params": { "sessionId": "s", "path": path.to_string_lossy() }
+        let frames = d.init(&SessionParams {
+            cwd: "/tmp/project".into(),
+            ..Default::default()
         });
-        let events = d.translate(serde_json::to_string(&req).unwrap().as_bytes());
-        assert!(events.is_empty());
-        let out = d.drain_out_frames();
-        assert_eq!(out.len(), 1);
-        let line = String::from_utf8_lossy(match &out[0] {
-            OutFrame::Stdin(b) => b,
-            _ => panic!("expected stdin response"),
-        });
-        let resp: Value = serde_json::from_str(line.trim()).unwrap();
-        assert_eq!(resp["id"], 0);
-        assert_eq!(resp["result"]["content"], "hello fs\n");
+        let init_line = match &frames[0] {
+            OutFrame::Stdin(b) => String::from_utf8_lossy(b).into_owned(),
+            _ => panic!("expected stdin"),
+        };
+        let msg: Value = serde_json::from_str(init_line.trim()).unwrap();
+        let caps = &msg["params"]["clientCapabilities"];
+        assert_eq!(caps["terminal"], false);
+        assert_eq!(caps["fs"]["readTextFile"], false);
+        assert_eq!(caps["fs"]["writeTextFile"], false);
     }
 
     #[test]
-    fn fs_write_text_file_writes_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("out.txt");
+    fn environment_reverse_rpcs_return_method_not_found() {
         let mut d = GrokAcp::new();
-        let req = json!({
-            "jsonrpc": "2.0",
-            "id": 7,
-            "method": "fs/write_text_file",
-            "params": {
-                "sessionId": "s",
-                "path": path.to_string_lossy(),
-                "content": "written\n"
-            }
-        });
-        let _ = d.translate(serde_json::to_string(&req).unwrap().as_bytes());
-        let out = d.drain_out_frames();
-        let line = String::from_utf8_lossy(match &out[0] {
-            OutFrame::Stdin(b) => b,
-            _ => panic!(),
-        });
-        let resp: Value = serde_json::from_str(line.trim()).unwrap();
-        assert_eq!(resp["id"], 7);
-        assert!(resp.get("result").is_some());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "written\n");
+        for (id, method) in [
+            (1, "fs/read_text_file"),
+            (2, "fs/write_text_file"),
+            (3, "terminal/create"),
+            (4, "terminal/output"),
+            (5, "terminal/wait_for_exit"),
+            (6, "terminal/kill"),
+            (7, "terminal/release"),
+            (8, "not/a/real/method"),
+        ] {
+            let req = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": method,
+                "params": {}
+            });
+            let events = d.translate(serde_json::to_string(&req).unwrap().as_bytes());
+            assert!(events.is_empty(), "{method}");
+            let out = d.drain_out_frames();
+            let line = String::from_utf8_lossy(match &out[0] {
+                OutFrame::Stdin(b) => b,
+                _ => panic!("{method}"),
+            });
+            let resp: Value = serde_json::from_str(line.trim()).unwrap();
+            assert_eq!(resp["id"], id, "{method}");
+            assert_eq!(resp["error"]["code"], -32601, "{method}: {resp}");
+        }
     }
 
-    #[test]
-    fn unknown_reverse_rpc_returns_method_not_found() {
-        let mut d = GrokAcp::new();
-        let events = d.translate(
-            br#"{"jsonrpc":"2.0","id":9,"method":"terminal/create","params":{}}"#,
-        );
-        assert!(events.is_empty());
-        let out = d.drain_out_frames();
-        let line = String::from_utf8_lossy(match &out[0] {
-            OutFrame::Stdin(b) => b,
-            _ => panic!(),
-        });
-        let resp: Value = serde_json::from_str(line.trim()).unwrap();
-        assert_eq!(resp["id"], 9);
-        assert_eq!(resp["error"]["code"], -32601);
-    }
-
-    #[test]
-    fn apply_line_window_slices_1_based() {
-        let full = "a\nb\nc\nd";
-        assert_eq!(apply_line_window(full, Some(2), Some(2)), "b\nc");
-        assert_eq!(apply_line_window(full, Some(4), None), "d");
-        assert_eq!(apply_line_window(full, None, None), full);
-    }
 
     fn ready_session(d: &mut GrokAcp) {
         d.init(&SessionParams {

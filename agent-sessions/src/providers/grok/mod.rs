@@ -142,6 +142,8 @@ fn parse_summary_bytes(bytes: &[u8]) -> Result<Option<crate::agent_session::Sess
         cwd,
         title,
         created_at: raw.created_at.map(SmolStr::from),
+        // Keep product updated_at for watch/seed consumers; history list probe
+        // may clear it so ranking/display align on transcript mtime (peer path).
         updated_at: raw.updated_at.map(SmolStr::from),
         models: model
             .map(|m| {
@@ -151,6 +153,157 @@ fn parse_summary_bytes(bytes: &[u8]) -> Result<Option<crate::agent_session::Sess
         source_kind: Some("grok-v1".into()),
         ..Default::default()
     }))
+}
+
+/// Probe history-list meta the same way Codex/Pi do:
+/// session header (summary.json) + first usable user title from the transcript.
+///
+/// Title priority (peer-aligned):
+/// 1. Non-preamble `generated_title` / `session_summary` (like Pi session name)
+/// 2. First non-preamble `user_message_chunk` from `updates.jsonl` (like Codex/Pi)
+/// 3. Preamble user text / junk generated title as last-resort fallback
+///
+/// Reading stops once a preferred title is resolved so large rollouts stay cheap.
+#[cfg(feature = "agent_session")]
+impl Grok {
+    pub(crate) fn probe_agent_session_meta_with_title<R>(
+        summary_meta: Option<crate::agent_session::SessionMeta>,
+        updates: R,
+    ) -> Result<crate::agent_session::SessionMeta>
+    where
+        R: BufRead,
+    {
+        let mut meta = summary_meta.unwrap_or_else(|| crate::agent_session::SessionMeta {
+            source_kind: Some("grok-v1".into()),
+            ..Default::default()
+        });
+        if meta.source_kind.is_none() {
+            meta.source_kind = Some("grok-v1".into());
+        }
+
+        // Peer list rows rank/display on the primary session file mtime. Grok's
+        // summary.updated_at is often refreshed by sidecars without transcript
+        // growth — omit it so history falls through to updates.jsonl mtime.
+        meta.updated_at = None;
+
+        let header_title = meta.title.clone();
+        let header_is_preferred = header_title
+            .as_deref()
+            .is_some_and(|t| !is_grok_instruction_preamble(t));
+        if header_is_preferred {
+            // Pi: session name/title wins when already set and usable.
+            if let Some(title) = header_title {
+                meta.title = Some(first_line_snippet(title.as_str(), 80).into());
+            }
+            return Ok(meta);
+        }
+
+        // Header title missing or junk — scan transcript like Codex/Pi.
+        let (title_candidate, fallback_title) = Self::probe_updates_title(updates)?;
+        meta.title = title_candidate
+            .or(fallback_title)
+            .or_else(|| {
+                header_title
+                    .map(|t| first_line_snippet(t.as_str(), 80).into())
+            });
+        Ok(meta)
+    }
+
+    /// Bounded scan of updates.jsonl for the first usable user title.
+    fn probe_updates_title<R>(
+        mut reader: R,
+    ) -> Result<(Option<SmolStr>, Option<SmolStr>)>
+    where
+        R: BufRead,
+    {
+        let mut line = Vec::new();
+        let mut title_candidate: Option<SmolStr> = None;
+        let mut fallback_title: Option<SmolStr> = None;
+        let mut lines_seen = 0usize;
+        // Cap scan so multi-MB harness sessions stay list-cheap (Codex stops early).
+        const MAX_PROBE_LINES: usize = 400;
+
+        loop {
+            line.clear();
+            let n = reader
+                .read_until(b'\n', &mut line)
+                .map_err(|err| Error::Message(err.to_string().into()))?;
+            if n == 0 {
+                break;
+            }
+            lines_seen += 1;
+            if lines_seen > MAX_PROBE_LINES {
+                break;
+            }
+            if line.iter().all(|b| b.is_ascii_whitespace()) {
+                continue;
+            }
+            let Ok(text) = std::str::from_utf8(&line) else {
+                continue;
+            };
+            let Ok(raw) = serde_json::from_str::<RawUpdateLine>(text.trim()) else {
+                // Best-effort past seed: do not fail the whole list entry.
+                continue;
+            };
+            let method = raw.method.as_deref().unwrap_or("");
+            if method != "session/update" && method != "_x.ai/session/update" {
+                continue;
+            }
+            let Some(params) = raw.params.as_ref() else {
+                continue;
+            };
+            let Some(update) = params.update.as_ref() else {
+                continue;
+            };
+            if update.session_update.as_deref() != Some("user_message_chunk") {
+                continue;
+            }
+            let Some(chunk) = content_text(update.content.as_ref()) else {
+                continue;
+            };
+            let title = first_line_snippet(&chunk, 80);
+            if title.is_empty() {
+                continue;
+            }
+            if is_grok_instruction_preamble(&chunk) {
+                if fallback_title.is_none() {
+                    fallback_title = Some(title.into());
+                }
+                continue;
+            }
+            title_candidate = Some(title.into());
+            break;
+        }
+        Ok((title_candidate, fallback_title))
+    }
+}
+
+pub(crate) fn first_line_snippet(text: &str, max: usize) -> String {
+    let first = text.lines().next().unwrap_or(text).trim();
+    // Strip light markdown emphasis for list readability (peer UIs show plain text).
+    let first = first.replace("**", "");
+    if first.chars().count() > max {
+        let mut iter = first.chars();
+        let truncated: String = iter.by_ref().take(max).collect();
+        format!("{truncated}…")
+    } else {
+        first
+    }
+}
+
+/// Instruction / harness role dumps that must not win list titles (Codex/Pi preamble gate).
+pub(crate) fn is_grok_instruction_preamble(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    let first = trimmed.lines().next().unwrap_or("").trim();
+    let first_plain = first.replace("**", "");
+    first_plain.starts_with("You are an ")
+        || first_plain.starts_with("You are the ")
+        || first_plain.starts_with("You are a ")
+        || first_plain.starts_with("You are an**")
+        || first.starts_with("Task: You are a delegated subagent")
+        || trimmed.starts_with("<INSTRUCTIONS>")
+        || trimmed.contains("\n<INSTRUCTIONS>")
+        || first.starts_with("# AGENTS.md instructions")
 }
 
 #[cfg(any(test, feature = "watch", feature = "agent_session"))]
@@ -442,4 +595,64 @@ pub(crate) fn is_updates_jsonl(path: &Path) -> bool {
     path.file_name()
         .and_then(|n| n.to_str())
         .is_some_and(|n| n == "updates.jsonl")
+}
+
+#[cfg(all(test, feature = "agent_session"))]
+mod title_probe_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn preferred_generated_title_wins_without_scanning_preamble_user() {
+        let summary = crate::agent_session::SessionMeta {
+            session_id: Some("sid".into()),
+            cwd: Some("/tmp/p".into()),
+            title: Some("Codex/Pi Full Alignment Goal Summarizer".into()),
+            created_at: Some("2026-07-11T05:00:00Z".into()),
+            updated_at: Some("2026-07-11T06:00:00Z".into()),
+            source_kind: Some("grok-v1".into()),
+            ..Default::default()
+        };
+        let updates = r#"{"method":"session/update","params":{"sessionId":"sid","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"You are the Goal Summarizer for the xAI Grok Build harness."}}}}
+"#;
+        let meta =
+            Grok::probe_agent_session_meta_with_title(Some(summary), Cursor::new(updates.as_bytes()))
+                .unwrap();
+        assert_eq!(
+            meta.title.as_deref(),
+            Some("Codex/Pi Full Alignment Goal Summarizer")
+        );
+        assert!(meta.updated_at.is_none(), "list meta must not prefer sidecar updated_at");
+        assert_eq!(meta.session_id.as_deref(), Some("sid"));
+    }
+
+    #[test]
+    fn junk_generated_title_falls_back_to_first_real_user_message() {
+        let summary = crate::agent_session::SessionMeta {
+            session_id: Some("sid".into()),
+            title: Some("You are an **adversarial verifier** for the xAI Grok Build".into()),
+            source_kind: Some("grok-v1".into()),
+            ..Default::default()
+        };
+        let updates = r#"{"method":"session/update","params":{"sessionId":"sid","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"You are an **adversarial verifier** for the harness."}}}}
+{"method":"session/update","params":{"sessionId":"sid","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"/setup-matt-pocock-skills"}}}}
+"#;
+        let meta =
+            Grok::probe_agent_session_meta_with_title(Some(summary), Cursor::new(updates.as_bytes()))
+                .unwrap();
+        assert_eq!(meta.title.as_deref(), Some("/setup-matt-pocock-skills"));
+    }
+
+    #[test]
+    fn preamble_only_users_keep_fallback_snippet() {
+        let updates = r#"{"method":"session/update","params":{"sessionId":"sid","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"You are an adversarial verifier for the harness. Long body."}}}}
+"#;
+        let meta =
+            Grok::probe_agent_session_meta_with_title(None, Cursor::new(updates.as_bytes()))
+                .unwrap();
+        assert_eq!(
+            meta.title.as_deref(),
+            Some("You are an adversarial verifier for the harness. Long body.")
+        );
+    }
 }

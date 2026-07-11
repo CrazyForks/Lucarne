@@ -196,9 +196,10 @@ Replay without live flags uses fixtures only.
 | F4.11 | watch append / nested / large delta / created | `agent-sessions` `watch_live` | **Done** |
 | F4.12 | core history watch → TimelineEvent | `lucarne` core_service (macos) | **Done** |
 
-**Note:** tool flows require dialect handling of reverse `fs/read_text_file` and
-`fs/write_text_file` (client capabilities advertised at `initialize`). Covered by
-unit tests, `tool_fs.fixture` smoke, and live recordings.
+**Note:** Lucarne is **relay-only** for Grok ACP (same posture as Gemini):
+`clientCapabilities.fs` / `terminal` are advertised **false**. Grok owns shell
+and file tools in-process; Lucarne does **not** execute `fs/*` or `terminal/*`
+reverse RPCs (only `session/request_permission` is answered).
 
 **Note:** external session watch is incremental (`supports_incremental_watch_events`),
 seeded from `summary.json` + bounded lookback, with depth-3 roots under
@@ -215,6 +216,7 @@ seeded from `summary.json` + bounded lookback, with depth-3 roots under
 | G3 | Headless `-p` as primary Dialogue | multi-turn/permissions weaker |
 | G4 | Implementing Grok's full x.ai/* IDE extension surface in Lucarne | only what maps to Lucarne commands/events |
 | G5 | Manual GitHub Release / process changes | unrelated |
+| G6 | Hosting ACP client environment (`fs/*`, `terminal/*`) | Lucarned is channel/session relay, not an IDE workspace host |
 
 ---
 

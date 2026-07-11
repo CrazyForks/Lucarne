@@ -326,6 +326,74 @@ async fn resume_load_error_closes_session() {
     );
 }
 
+/// High-frequency production failure: session/load dumps hundreds of
+/// `_meta.isReplay` history updates. The workspace bus is only 256 slots;
+/// emitting those as live TimelineEvents lags Telegram/WeChat and kills the
+/// agent. Fixture smoke must prove the flood never reaches the adapter bus.
+#[tokio::test]
+async fn resume_with_replay_flood_does_not_surface_history_as_live_events() {
+    let mut sc = base_scenario("resume_with_replay_flood.fixture");
+    let mut data = BTreeMap::new();
+    data.insert(
+        "session_id".into(),
+        serde_json::Value::String("uuid-resume-flood".into()),
+    );
+    sc.resume = Some(ResumeHandle {
+        version: 1,
+        data,
+    });
+    sc.first_prompt = "continue after load".into();
+    // Flood is large; allow a bit more wall time for fakeagent I/O.
+    sc.timeout = Duration::from_secs(30);
+    let r = run_scenario(sc).await;
+    assert!(r.closed, "kinds = {:?}", kinds(&r.events));
+
+    let timeline_count = r
+        .events
+        .iter()
+        .filter(|e| matches!(e.payload, Payload::Timeline(_)))
+        .count();
+    // 80 replay turns × multi updates would be 400+ timelines if unfiltered.
+    // Live bus capacity is 256 — anything near that is a product-breaking bug.
+    assert!(
+        timeline_count < 32,
+        "resume replay flood leaked into live events: timeline_count={timeline_count}, kinds={:?}",
+        kinds(&r.events)
+    );
+
+    let assistant = collect_timelines(&r.events, TimelineType::AssistantMessage);
+    let transcript = assistant
+        .iter()
+        .filter_map(|item| item.assistant_message.as_ref().map(|m| m.text.as_str()))
+        .collect::<Vec<_>>()
+        .join("");
+    assert!(
+        transcript.contains("LIVE_AFTER_REPLAY_OK"),
+        "missing live post-replay assistant text: {transcript:?}"
+    );
+    assert!(
+        !transcript.contains("replay-assistant-"),
+        "history replay assistant text must not surface as live: {transcript:?}"
+    );
+    assert!(
+        !transcript.contains("replay-user-"),
+        "history replay user text must not surface as live: {transcript:?}"
+    );
+
+    let tool_calls = collect_timelines(&r.events, TimelineType::ToolCall);
+    assert!(
+        tool_calls.is_empty(),
+        "replay tool_call must not surface as live: {tool_calls:?}"
+    );
+    assert!(
+        r.events
+            .iter()
+            .any(|e| matches!(e.payload, Payload::TurnCompleted(_))),
+        "live turn must still complete: kinds={:?}",
+        kinds(&r.events)
+    );
+}
+
 /// Empty sessionId on successful session/load keeps the requested resume UUID.
 #[tokio::test]
 async fn resume_empty_session_id_keeps_requested_uuid() {

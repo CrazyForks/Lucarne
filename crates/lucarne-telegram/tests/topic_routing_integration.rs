@@ -1246,6 +1246,159 @@ async fn watch_notification_topic_receives_agent_message_and_reply_routes_to_ses
         .expect("watch notification task should join");
 }
 
+/// Real **Grok ACP** + mocked Telegram channel only.
+///
+/// Journey: bind notification → reply in agent-notifications topic → Core
+/// resume (session/load with dense isReplay fixture via LUCARNE_FIXTURE) →
+/// submit → assistant reply without lag / "no longer routable".
+#[tokio::test(flavor = "current_thread")]
+async fn notification_reply_real_grok_resume_flood_fixture_stays_usable() {
+    let _test_lock = test_lock();
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    ensure_default_history_env();
+
+    // crates/lucarne-telegram -> crates -> repo root
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root")
+        .to_path_buf();
+    let fixture = repo_root.join("tests/data/grok/resume_with_replay_flood.fixture");
+    assert!(
+        fixture.is_file(),
+        "missing flood fixture at {}",
+        fixture.display()
+    );
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let mut fakeagent = PathBuf::from(
+        std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| repo_root.join("target").into()),
+    );
+    fakeagent.push("debug");
+    fakeagent.push(if cfg!(windows) {
+        "lucarne-fakeagent.exe"
+    } else {
+        "lucarne-fakeagent"
+    });
+    if !fakeagent.is_file() {
+        let mut path = std::env::var_os("PATH").unwrap_or_default();
+        let cargo_bin = PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cargo/bin");
+        if path.is_empty() {
+            path = cargo_bin.into_os_string();
+        } else {
+            let mut p = cargo_bin.into_os_string();
+            p.push(":");
+            p.push(&path);
+            path = p;
+        }
+        let status = std::process::Command::new(cargo)
+            .args(["build", "-p", "lucarne-fakeagent", "--quiet"])
+            .current_dir(&repo_root)
+            .env("PATH", path)
+            .status()
+            .expect("spawn cargo build lucarne-fakeagent");
+        assert!(status.success(), "cargo build lucarne-fakeagent failed");
+    }
+    assert!(
+        fakeagent.is_file(),
+        "fakeagent missing at {} — run: cargo build -p lucarne-fakeagent",
+        fakeagent.display()
+    );
+    let prev_fixture = std::env::var_os("LUCARNE_FIXTURE");
+    // SAFETY: serialized by ENV_LOCK in this test file.
+    unsafe {
+        std::env::set_var("LUCARNE_FIXTURE", &fixture);
+    }
+
+    let adapter = lucarne::adapters::grok::new(lucarne::adapters::grok::Options {
+        binary: fakeagent.to_string_lossy().into_owned(),
+    });
+    let runtime = Arc::new(lucarne::agent_runtime::AgentRuntime::new());
+    runtime.register(Arc::new(
+        lucarne::agent_runtime::ProtocolProvider::new(adapter).expect("grok provider"),
+    ));
+    let core = LucarneCore::from_runtime_and_store(
+        runtime,
+        ControlPlaneSqliteStore::open_in_memory().expect("store"),
+    )
+    .expect("core");
+
+    let workspace_id = ControlWorkspaceId::new("grok:resume:tg-flood");
+    core.upsert_workspace_binding(
+        workspace_id.clone(),
+        OpenWorkspaceRequest {
+            provider_id: "grok",
+            project_path: Some(PathBuf::from("/tmp/tg-grok-flood")),
+            title: "tg grok flood".into(),
+        },
+        Some("uuid-resume-flood"),
+    )
+    .expect("workspace");
+    let provider_session_id =
+        lucarne::control_plane::ProviderSessionId::new("grok:uuid-resume-flood");
+
+    let channel = Arc::new(RecordingChannel::streaming());
+    let state = BotState::new_with_core(Arc::clone(&core));
+    let notification = WorkspaceHandle::new(ChatId::new("100"), WorkspaceId::new("77"));
+    state
+        .set_notification_handle(&notification)
+        .expect("notification handle");
+    // Pre-bind as send_agent_notification would after a successful push.
+    state
+        .register_message_session_binding(
+            channel.name(),
+            &notification.chat,
+            &MessageId::new("tg-notif-bound"),
+            provider_session_id,
+        )
+        .expect("bind notification message");
+
+    let bot = bot_with_existing_state(Arc::clone(&channel), Arc::clone(&core), Arc::clone(&state));
+    let run = tokio::spawn(Arc::clone(&bot).run());
+    wait_for_channel_subscription(&channel).await;
+
+    // User replies on notification topic (product path).
+    channel.push_event(ChannelEvent::Message(IncomingMessage {
+        message_id: MessageId::new("m-tg-continue"),
+        chat: notification.chat.clone(),
+        workspace: Some(notification.workspace.clone()),
+        reply_to: Some(MessageId::new("tg-notif-bound")),
+        user: "alice".into(),
+        text: Some("continue after load".into()),
+        attachments: Vec::new(),
+    }));
+
+    // Real Grok spawn + isReplay flood filter needs more headroom than unit mocks.
+    let reply = eventually_topic_message_with_timeout(
+        &channel,
+        notification.workspace.as_str(),
+        Duration::from_secs(30),
+        |message| {
+            message.body.contains("LIVE_AFTER_REPLAY_OK")
+                && !message.body.contains("no longer routable")
+                && !message.body.contains("lagged")
+        },
+    )
+    .await;
+    assert!(
+        reply
+            .reply_to
+            .as_ref()
+            .is_some_and(|r| r.as_str() == "m-tg-continue"),
+        "reply must anchor to user message: {:?}",
+        reply.reply_to
+    );
+
+    channel.close_events();
+    let _ = timeout(Duration::from_secs(5), run).await;
+
+    unsafe {
+        match prev_fixture {
+            Some(v) => std::env::set_var("LUCARNE_FIXTURE", v),
+            None => std::env::remove_var("LUCARNE_FIXTURE"),
+        }
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn notification_topic_reply_status_uses_workspace_command_path_not_agent_text() {
     let _test_lock = test_lock();
@@ -7064,7 +7217,9 @@ impl RecordingSession {
         auto_complete_turn: bool,
         resolved_interventions: Arc<StdMutex<Vec<(String, InterventionResponse)>>>,
     ) -> Self {
-        let (tx, rx) = mpsc::channel(16);
+        // Dense tool streams (resume/history-style floods) need headroom so the
+        // producer does not stall while the turn drain catches up.
+        let (tx, rx) = mpsc::channel(512);
         session_txs
             .lock()
             .unwrap()

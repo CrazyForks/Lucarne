@@ -575,6 +575,16 @@ async fn assert_live_resume_round_trip(provider_name: &str) {
         resumed_closed,
         "expected live runtime resumed session to close"
     );
+    // High-frequency bar (Grok session/load isReplay floods were 1k+ events on a
+    // 256-slot bus). A short resume-quote turn must stay well under capacity for
+    // every provider — CI must catch this without manual Telegram poking.
+    const MAX_RESUME_TURN_EVENTS: usize = 128;
+    assert!(
+        resumed_events.len() <= MAX_RESUME_TURN_EVENTS,
+        "resume turn event flood for {provider_name}: {} events (limit {MAX_RESUME_TURN_EVENTS}); events: {}",
+        resumed_events.len(),
+        summarize_runtime_events(&resumed_events)
+    );
 }
 
 async fn assert_live_resume_round_trip_with_retry(provider_name: &'static str, attempts: usize) {

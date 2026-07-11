@@ -466,14 +466,65 @@ impl crate::watch::provider::ProviderWatchEvents for super::Grok {
         Some(3)
     }
 
+    fn includes_watch_directory(
+        root: &std::path::Path,
+        path: &std::path::Path,
+        is_recent: bool,
+    ) -> bool {
+        if super::is_subagent_path(path) {
+            return false;
+        }
+        // Session dirs hold noise trees (terminal/compaction/goal/…). Only watch
+        // the layout roots and the session uuid directory itself.
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if matches!(
+                name,
+                "subagents"
+                    | "terminal"
+                    | "compaction"
+                    | "compaction_checkpoints"
+                    | "compaction_requests"
+                    | "goal"
+            ) {
+                return false;
+            }
+        }
+        let depth = path
+            .strip_prefix(root)
+            .map(|relative| relative.components().count())
+            .unwrap_or(0);
+        // 0=sessions root, 1=encoded-cwd, 2=uuid
+        depth <= 2 || is_recent
+    }
+
     fn normalize_watch_events(
         events: Box<[crate::watch::WatchEvent]>,
         state: &mut crate::watch::state::ProviderWatchState,
     ) -> Box<[crate::watch::WatchEvent]> {
-        crate::watch::provider::synthesize_task_complete_from_terminal_responses(
+        let events = crate::watch::provider::synthesize_task_complete_from_terminal_responses(
             events,
             state,
             |response| response.phase.is_none(),
-        )
+        );
+        // Grok sessions emit dense tool_call/tool_result streams. History watch
+        // only needs user prompts + terminal assistant (+ synthesized
+        // turn_completed) for channel notifications. Forwarding every tool
+        // event saturates the core broadcast bus and lags Telegram/WeChat.
+        events
+            .into_vec()
+            .into_iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    crate::watch::WatchEvent::UserMessage(_)
+                        | crate::watch::WatchEvent::AssistantMessage(_)
+                        | crate::watch::WatchEvent::TurnCompleted(_)
+                        | crate::watch::WatchEvent::TurnFailed(_)
+                        | crate::watch::WatchEvent::Attachment(_)
+                        | crate::watch::WatchEvent::State(_)
+                )
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
     }
 }

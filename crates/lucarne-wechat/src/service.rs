@@ -35,7 +35,7 @@ use lucarne_channel::{
     robust::retry_attachment_delivery,
 };
 use tokio::{sync::oneshot, time::MissedTickBehavior};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use wechat_ilink::{UserInteractionReason, WechatContext};
 
 const DEFAULT_TYPING_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(4);
@@ -217,6 +217,12 @@ struct WechatState {
     pending_interventions: HashMap<SmolStr, WechatPendingIntervention>,
     pending_intervention_order: VecDeque<SmolStr>,
     typing_cancellations: HashMap<WorkspaceId, oneshot::Sender<()>>,
+    /// Most recent outbound agent session per WeChat user.
+    ///
+    /// Production quotes often carry only a **server** numeric message_id (not our
+    /// client UUID) and empty quoted_text. When that id was never bound, fall back
+    /// to this session so basic quote-continue still works.
+    last_provider_session_by_user: HashMap<String, ProviderSessionId>,
 }
 
 #[derive(Default)]
@@ -321,6 +327,7 @@ where
                 pending_interventions: HashMap::new(),
                 pending_intervention_order: VecDeque::new(),
                 typing_cancellations: HashMap::new(),
+                last_provider_session_by_user: HashMap::new(),
             }),
             rate_limiter: Arc::new(WechatRateLimiter::default()),
             typing_keepalive_interval: options.typing_keepalive_interval,
@@ -663,6 +670,9 @@ where
         }
         let has_quote = message.quoted_message_id.is_some() || message.quoted_text.is_some();
         let Some(binding) = self.resolve_quoted_binding(&message) else {
+            if has_quote {
+                self.warn_quote_unroutable(&message, "binding_miss");
+            }
             let body = if has_quote {
                 WECHAT_STALE_NOTIFICATION.to_string()
             } else {
@@ -675,11 +685,25 @@ where
             .core
             .workspace_for_provider_session(&binding.provider_session_id)
         else {
+            self.warn_quote_unroutable(
+                &message,
+                &format!(
+                    "workspace_miss provider_session={}",
+                    binding.provider_session_id.as_str()
+                ),
+            );
             self.transport
                 .reply(&message, WECHAT_STALE_NOTIFICATION)
                 .await?;
             return Ok(());
         };
+        debug!(
+            target: "lucarne_wechat::service",
+            user_id = %message.user_id,
+            provider_session_id = %binding.provider_session_id.as_str(),
+            workspace_id = %workspace.workspace_id.as_str(),
+            "wechat quote routed"
+        );
         self.continue_session(workspace.workspace_id, message).await
     }
 
@@ -797,7 +821,13 @@ where
         let text = bounded_agent_notification_text(text);
         let body = render_agent_message(text.as_ref(), &workspace, &session_ref, None);
 
-        if self.core.direct_notification_suppressed(workspace_id) {
+        // Use delivery_suppressed (includes post-turn grace), matching Telegram.
+        // After pending-reply delivery ends active suppression, late live/history
+        // assistant events would otherwise re-push the same text as a notification.
+        if self
+            .core
+            .direct_notification_delivery_suppressed(workspace_id)
+        {
             debug!(
                 target: "lucarne_wechat::service",
                 workspace_id = %workspace_id.as_str(),
@@ -852,7 +882,10 @@ where
             .core
             .active_provider_session_id(workspace_id)
             .map_err(|err| WechatError::Core(err.to_string()))?;
-        if self.core.direct_notification_suppressed(workspace_id) {
+        if self
+            .core
+            .direct_notification_delivery_suppressed(workspace_id)
+        {
             debug!(
                 target: "lucarne_wechat::service",
                 workspace_id = %workspace_id.as_str(),
@@ -1902,54 +1935,220 @@ where
         body: &str,
         provider_session_id: ProviderSessionId,
     ) -> Result<(), WechatError> {
-        for message_id in receipt.message_ids {
+        let mut key_count = 0usize;
+        for message_id in &receipt.message_ids {
             self.core
                 .bind_message_to_provider_session(
                     "wechat",
                     user_id,
-                    &message_id,
+                    message_id,
                     provider_session_id.clone(),
                 )
                 .map_err(|err| WechatError::Core(err.to_string()))?;
+            key_count += 1;
         }
-        for visible_text in receipt.visible_texts {
+        for visible_text in &receipt.visible_texts {
+            key_count += self.bind_quote_text_keys(user_id, visible_text, provider_session_id.clone())?;
+        }
+        key_count += self.bind_quote_text_keys(user_id, body, provider_session_id.clone())?;
+        // Durable session-ref key: quote previews often keep the 会话：UUID footer.
+        if let Some(session_ref) = provider_session_native_ref(&provider_session_id) {
             self.core
                 .bind_message_to_provider_session(
                     "wechat",
                     user_id,
-                    &sent_quote_binding_id(&visible_text),
+                    &session_ref_binding_id(session_ref),
                     provider_session_id.clone(),
                 )
                 .map_err(|err| WechatError::Core(err.to_string()))?;
+            key_count += 1;
         }
-        self.core
-            .bind_message_to_provider_session(
-                "wechat",
-                user_id,
-                &sent_quote_binding_id(body),
-                provider_session_id,
-            )
-            .map_err(|err| WechatError::Core(err.to_string()))?;
+        self.state
+            .lock()
+            .expect("wechat service state lock")
+            .last_provider_session_by_user
+            .insert(user_id.to_string(), provider_session_id.clone());
+        info!(
+            target: "lucarne_wechat::service",
+            user_id = %user_id,
+            provider_session_id = %provider_session_id.as_str(),
+            outbound_ids = ?receipt.message_ids,
+            body_chars = body.chars().count(),
+            body_fp = %truncate_for_log(&normalize_for_quote_match(body), 96),
+            binding_keys = key_count,
+            "wechat outbound bound for quote routing"
+        );
         Ok(())
     }
 
+    /// Bind full text + prefix hashes so truncated WeChat quote previews still resolve.
+    fn bind_quote_text_keys(
+        &self,
+        user_id: &str,
+        text: &str,
+        provider_session_id: ProviderSessionId,
+    ) -> Result<usize, WechatError> {
+        let keys = quote_binding_keys(text);
+        let n = keys.len();
+        for key in keys {
+            self.core
+                .bind_message_to_provider_session(
+                    "wechat",
+                    user_id,
+                    &key,
+                    provider_session_id.clone(),
+                )
+                .map_err(|err| WechatError::Core(err.to_string()))?;
+        }
+        Ok(n)
+    }
+
     fn resolve_quoted_binding(&self, message: &WechatIncoming) -> Option<MessageSessionBinding> {
-        message
+        if let Some(message_id) = message.quoted_message_id.as_deref() {
+            if let Some(binding) = self.core.message_session_binding(
+                "wechat",
+                &message.user_id,
+                message_id,
+            ) {
+                debug!(
+                    target: "lucarne_wechat::service",
+                    user_id = %message.user_id,
+                    quoted_message_id = %message_id,
+                    provider_session_id = %binding.provider_session_id.as_str(),
+                    "wechat quote resolved by message id"
+                );
+                return Some(binding);
+            }
+        }
+        if let Some(text) = message.quoted_text.as_deref() {
+            if let Some(session_ref) = extract_session_ref_from_quote(text) {
+                if let Some(binding) = self.core.message_session_binding(
+                    "wechat",
+                    &message.user_id,
+                    &session_ref_binding_id(session_ref),
+                ) {
+                    debug!(
+                        target: "lucarne_wechat::service",
+                        user_id = %message.user_id,
+                        session_ref = %session_ref,
+                        provider_session_id = %binding.provider_session_id.as_str(),
+                        "wechat quote resolved by session-ref footer"
+                    );
+                    return Some(binding);
+                }
+            }
+            let keys = quote_resolve_keys(text);
+            for key in &keys {
+                if let Some(binding) =
+                    self.core
+                        .message_session_binding("wechat", &message.user_id, key)
+                {
+                    debug!(
+                        target: "lucarne_wechat::service",
+                        user_id = %message.user_id,
+                        matched_key = %key,
+                        provider_session_id = %binding.provider_session_id.as_str(),
+                        "wechat quote resolved by text fingerprint"
+                    );
+                    return Some(binding);
+                }
+            }
+        }
+        // Production log 2026-07-11:
+        //   quoted_message_id=Some("748161…")  (server wire id)
+        //   quoted_text=""                     (empty)
+        //   outbound bound only client UUID
+        // Fall back to the last outbound session for this user and learn the server id.
+        if message.quoted_message_id.is_some() {
+            if let Some(provider_session_id) = self
+                .state
+                .lock()
+                .expect("wechat service state lock")
+                .last_provider_session_by_user
+                .get(&message.user_id)
+                .cloned()
+            {
+                let quote_id = message.quoted_message_id.as_deref().unwrap_or("");
+                if let Err(err) = self.core.bind_message_to_provider_session(
+                    "wechat",
+                    &message.user_id,
+                    quote_id,
+                    provider_session_id.clone(),
+                ) {
+                    warn!(
+                        target: "lucarne_wechat::service",
+                        user_id = %message.user_id,
+                        quote_id = %quote_id,
+                        error = %err,
+                        "failed to learn server quote message id"
+                    );
+                }
+                warn!(
+                    target: "lucarne_wechat::service",
+                    user_id = %message.user_id,
+                    quote_id = %quote_id,
+                    provider_session_id = %provider_session_id.as_str(),
+                    "wechat quote resolved via last outbound session fallback (server id ≠ client id)"
+                );
+                return Some(MessageSessionBinding::new(
+                    "wechat",
+                    message.user_id.as_str(),
+                    quote_id,
+                    provider_session_id,
+                ));
+            }
+        }
+        None
+    }
+
+    /// Always-on (WARN) diagnostics for production 无法路由 — default log filter is info.
+    fn warn_quote_unroutable(&self, message: &WechatIncoming, reason: &str) {
+        let quoted_text = message.quoted_text.as_deref().unwrap_or("");
+        let fp = normalize_for_quote_match(quoted_text);
+        let keys = if quoted_text.is_empty() {
+            Vec::new()
+        } else {
+            quote_resolve_keys(quoted_text)
+        };
+        let key_sample: Vec<&str> = keys.iter().take(8).map(String::as_str).collect();
+        let id_hit = message
             .quoted_message_id
             .as_deref()
-            .and_then(|message_id| {
+            .map(|id| {
                 self.core
-                    .message_session_binding("wechat", &message.user_id, message_id)
+                    .message_session_binding("wechat", &message.user_id, id)
+                    .is_some()
             })
-            .or_else(|| {
-                message.quoted_text.as_deref().and_then(|text| {
-                    self.core.message_session_binding(
+            .unwrap_or(false);
+        let session_ref = extract_session_ref_from_quote(quoted_text);
+        let session_ref_hit = session_ref
+            .map(|r| {
+                self.core
+                    .message_session_binding(
                         "wechat",
                         &message.user_id,
-                        &visible_quote_binding_id(text),
+                        &session_ref_binding_id(r),
                     )
-                })
+                    .is_some()
             })
+            .unwrap_or(false);
+        warn!(
+            target: "lucarne_wechat::service",
+            reason = %reason,
+            user_id = %message.user_id,
+            inbound_message_id = %message.message_id,
+            inbound_text = %truncate_for_log(message.text.trim(), 80),
+            quoted_message_id = ?message.quoted_message_id,
+            quoted_message_id_bound = id_hit,
+            quoted_text = %truncate_for_log(quoted_text, 200),
+            quoted_text_chars = quoted_text.chars().count(),
+            quote_fingerprint = %truncate_for_log(&fp, 120),
+            session_ref = ?session_ref,
+            session_ref_bound = session_ref_hit,
+            resolve_key_count = keys.len(),
+            resolve_key_sample = ?key_sample,
+            "wechat quote unroutable (无法路由)"
+        );
     }
 
     fn remember_user(&self, user_id: &str) {
@@ -2251,8 +2450,8 @@ where
         let req_id = intervention_request_id(&request).clone();
         let quote_ids = visible_texts
             .iter()
-            .map(|text| visible_quote_binding_id(text))
-            .collect::<Vec<_>>();
+            .flat_map(|text| quote_binding_keys(text))
+            .collect::<BTreeSet<_>>();
         let mut state = self.state.lock().expect("wechat service state lock");
         if !state.pending_interventions.contains_key(&req_id) {
             while state.pending_interventions.len() >= MAX_PENDING_INTERVENTIONS {
@@ -2293,13 +2492,14 @@ where
             }
         }
         if let Some(quoted_text) = message.quoted_text.as_deref() {
-            let quote_id = visible_quote_binding_id(quoted_text);
-            if let Some(pending) = state
-                .pending_interventions
-                .values()
-                .find(|pending| pending.prompt_quote_ids.contains(&quote_id))
-            {
-                return PendingInterventionLookup::One(pending.clone());
+            for quote_id in quote_resolve_keys(quoted_text) {
+                if let Some(pending) = state
+                    .pending_interventions
+                    .values()
+                    .find(|pending| pending.prompt_quote_ids.contains(&quote_id))
+                {
+                    return PendingInterventionLookup::One(pending.clone());
+                }
             }
         }
         let matches = state
@@ -2983,14 +3183,17 @@ fn trim_number(value: f64, suffix: &str) -> String {
     )
 }
 
+#[cfg(test)]
 fn sent_quote_binding_id(text: &str) -> String {
     quote_binding_id(text)
 }
 
+#[cfg(test)]
 fn visible_quote_binding_id(text: &str) -> String {
     quote_binding_id(text)
 }
 
+// Production quote keys go through quote_binding_keys / quote_resolve_keys.
 fn quote_binding_id(text: &str) -> String {
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in text.trim().as_bytes() {
@@ -2998,6 +3201,241 @@ fn quote_binding_id(text: &str) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("quote:{hash:016x}")
+}
+
+/// WeChat quote previews are transformed relative to the sent body:
+/// contact name prefix (`Lucarne:`), markdown markers, fullwidth punctuation,
+/// collapsed newlines, trailing ellipsis. Bind/resolve on a shared normalized
+/// fingerprint so truncated previews still hit.
+const QUOTE_PREFIX_BIND_MIN: usize = 12;
+const QUOTE_PREFIX_BIND_MAX: usize = 240;
+
+fn normalize_wechat_quote_preview(text: &str) -> String {
+    let mut t = text.trim().to_string();
+    // UI/SDK previews commonly append ellipsis variants.
+    loop {
+        let before = t.len();
+        for suffix in ["……", "…", "...", "‥", "⋯"] {
+            if let Some(stripped) = t.strip_suffix(suffix) {
+                t = stripped.trim_end().to_string();
+            }
+        }
+        if t.len() == before {
+            break;
+        }
+    }
+    t
+}
+
+/// Shared fingerprint for bind + resolve. Must stay pure / order-stable.
+fn normalize_for_quote_match(text: &str) -> String {
+    let mut t = normalize_wechat_quote_preview(text);
+
+    // Strip leading bot/contact labels WeChat attaches to quote previews.
+    // e.g. "Lucarne: 现在是 …" / "Lucarne：现在是 …"
+    for _ in 0..3 {
+        let trimmed = t.trim_start();
+        let stripped = if let Some(rest) = trimmed.strip_prefix("Lucarne:") {
+            Some(rest)
+        } else if let Some(rest) = trimmed.strip_prefix("Lucarne：") {
+            Some(rest)
+        } else if let Some((head, rest)) = trimmed.split_once(':') {
+            // Generic "Name: body" when name is a short latin/CJK token without spaces.
+            let name = head.trim();
+            let ok_name = !name.is_empty()
+                && name.chars().count() <= 32
+                && !name.contains('\n')
+                && name
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || ('\u{4e00}'..='\u{9fff}').contains(&c));
+            if ok_name && !rest.is_empty() {
+                Some(rest)
+            } else {
+                None
+            }
+        } else if let Some((head, rest)) = trimmed.split_once('：') {
+            let name = head.trim();
+            let ok_name = !name.is_empty()
+                && name.chars().count() <= 32
+                && !name.contains('\n')
+                && name
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || ('\u{4e00}'..='\u{9fff}').contains(&c));
+            if ok_name && !rest.is_empty() {
+                Some(rest)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        match stripped {
+            Some(rest) => t = rest.trim_start().to_string(),
+            None => break,
+        }
+    }
+
+    // Drop common markdown emphasis / code markers that appear in agent text
+    // but may be added/kept inconsistently in quote previews.
+    t = t
+        .chars()
+        .filter(|c| !matches!(c, '*' | '`' | '_' | '#'))
+        .collect();
+
+    // Fullwidth punctuation → ASCII (screenshot: （CST） vs (CST)).
+    let mut mapped = String::with_capacity(t.len());
+    for c in t.chars() {
+        let out = match c {
+            '（' => '(',
+            '）' => ')',
+            '【' => '[',
+            '】' => ']',
+            '，' => ',',
+            '。' => '.',
+            '：' => ':',
+            '；' => ';',
+            '！' => '!',
+            '？' => '?',
+            '—' | '–' | '−' => '-',
+            '\u{00a0}' | '\u{3000}' => ' ',
+            other => other,
+        };
+        mapped.push(out);
+    }
+
+    // Collapse all whitespace (incl. newlines) to a single space.
+    let mut out = String::with_capacity(mapped.len());
+    let mut prev_space = false;
+    for c in mapped.chars() {
+        if c.is_whitespace() {
+            if !prev_space {
+                out.push(' ');
+                prev_space = true;
+            }
+        } else {
+            out.push(c);
+            prev_space = false;
+        }
+    }
+    out.trim().to_string()
+}
+
+fn quote_binding_keys(text: &str) -> Vec<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let mut keys = Vec::new();
+    let mut push_unique = |s: &str| {
+        if s.is_empty() {
+            return;
+        }
+        let key = quote_binding_id(s);
+        if !keys.iter().any(|k| k == &key) {
+            keys.push(key);
+        }
+    };
+    // Legacy exact full-body key (pre-normalization callers / older clients).
+    push_unique(trimmed);
+
+    let fingerprint = normalize_for_quote_match(trimmed);
+    if fingerprint.is_empty() {
+        return keys;
+    }
+    push_unique(&fingerprint);
+    let chars: Vec<char> = fingerprint.chars().collect();
+    let max = chars.len().min(QUOTE_PREFIX_BIND_MAX);
+    let min = QUOTE_PREFIX_BIND_MIN.min(max);
+    for n in min..=max {
+        let prefix: String = chars[..n].iter().collect();
+        push_unique(&prefix);
+    }
+    keys
+}
+
+fn quote_resolve_keys(quoted_text: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut push_unique = |s: &str| {
+        if s.is_empty() {
+            return;
+        }
+        let key = quote_binding_id(s);
+        if !keys.iter().any(|k| k == &key) {
+            keys.push(key);
+        }
+    };
+    // Raw payload first (legacy exact match).
+    push_unique(quoted_text);
+    push_unique(quoted_text.trim());
+
+    let fingerprint = normalize_for_quote_match(quoted_text);
+    if fingerprint.is_empty() {
+        return keys;
+    }
+    push_unique(&fingerprint);
+    let chars: Vec<char> = fingerprint.chars().collect();
+    // Prefer longest prefixes first so a longer unique match wins over short collisions.
+    let max = chars.len().min(QUOTE_PREFIX_BIND_MAX);
+    let min = QUOTE_PREFIX_BIND_MIN.min(max);
+    for n in (min..=max).rev() {
+        let prefix: String = chars[..n].iter().collect();
+        push_unique(&prefix);
+    }
+    keys
+}
+
+fn provider_session_native_ref(provider_session_id: &ProviderSessionId) -> Option<&str> {
+    let raw = provider_session_id.as_str();
+    // Opaque ids are "provider:native_ref" at the control-plane boundary.
+    raw.split_once(':')
+        .map(|(_, native)| native)
+        .filter(|native| !native.is_empty())
+}
+
+fn session_ref_binding_id(session_ref: &str) -> String {
+    format!("session-ref:{session_ref}")
+}
+
+/// Pull a full UUID session ref from WeChat quote previews that keep the 会话 footer.
+fn extract_session_ref_from_quote(text: &str) -> Option<&str> {
+    const UUID_LEN: usize = 36; // 8-4-4-4-12
+    let markers = ["会话：", "会话:", "session:", "session："];
+    for marker in markers {
+        let Some(marker_at) = text.find(marker) else {
+            continue;
+        };
+        let after = &text[marker_at + marker.len()..];
+        let Some(rel) = after.find(|c: char| c.is_ascii_hexdigit()) else {
+            continue;
+        };
+        let start = marker_at + marker.len() + rel;
+        let end = start + UUID_LEN;
+        if end > text.len() || !text.is_char_boundary(end) {
+            continue;
+        }
+        let candidate = &text[start..end];
+        let ok = candidate.as_bytes().get(8) == Some(&b'-')
+            && candidate.as_bytes().get(13) == Some(&b'-')
+            && candidate.as_bytes().get(18) == Some(&b'-')
+            && candidate.as_bytes().get(23) == Some(&b'-')
+            && candidate
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() || c == '-');
+        if ok {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn truncate_for_log(text: &str, max_chars: usize) -> String {
+    let mut it = text.chars();
+    let head: String = it.by_ref().take(max_chars).collect();
+    if it.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3312,6 +3750,187 @@ mod tests {
             "assistant reply text should be bound for continued quoted replies"
         );
         assert!(!core.direct_notification_suppressed(&workspace_id));
+        // Active suppression is off, but delivery grace must still block a late
+        // duplicate assistant event from being re-pushed as a notification.
+        assert!(
+            core.direct_notification_delivery_suppressed(&workspace_id),
+            "post-reply grace must cover late core/history events"
+        );
+        let sends_before = transport.sends().len();
+        service
+            .handle_core_event(CoreEvent::TimelineEvent {
+                workspace_id: workspace_id.clone(),
+                turn_id: None,
+                event: AgentEvent::Message(MessageEvent {
+                    role: MessageRole::Assistant,
+                    text: "reply: please continue".into(),
+                    streaming: false,
+                }),
+            })
+            .await
+            .expect("late duplicate event");
+        assert_eq!(
+            transport.sends().len(),
+            sends_before,
+            "late assistant event must not re-notify during delivery grace"
+        );
+        assert_eq!(
+            transport.replies().len(),
+            1,
+            "must keep a single reply (no second push)"
+        );
+    }
+
+    /// Real **Grok ACP** + mocked WeChat transport only.
+    /// Quote a bound notification → resume with isReplay flood fixture → final reply.
+    #[tokio::test]
+    async fn quoted_notification_reply_real_grok_resume_flood_without_stale_route() {
+        static FIXTURE_ENV_LOCK: StdMutex<()> = StdMutex::new(());
+        let _env_lock = FIXTURE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("repo root")
+            .to_path_buf();
+        let fixture = repo_root.join("tests/data/grok/resume_with_replay_flood.fixture");
+        assert!(fixture.is_file(), "missing {}", fixture.display());
+        let mut fakeagent = PathBuf::from(
+            std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| repo_root.join("target").into()),
+        );
+        fakeagent.push("debug");
+        fakeagent.push(if cfg!(windows) {
+            "lucarne-fakeagent.exe"
+        } else {
+            "lucarne-fakeagent"
+        });
+        if !fakeagent.is_file() {
+            let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+            let status = std::process::Command::new(cargo)
+                .args(["build", "-p", "lucarne-fakeagent", "--quiet"])
+                .current_dir(&repo_root)
+                .status()
+                .expect("spawn cargo build lucarne-fakeagent");
+            assert!(status.success(), "cargo build lucarne-fakeagent failed");
+        }
+        assert!(
+            fakeagent.is_file(),
+            "fakeagent missing at {} — run: cargo build -p lucarne-fakeagent",
+            fakeagent.display()
+        );
+        let prev = std::env::var_os("LUCARNE_FIXTURE");
+        // SAFETY: serialized by FIXTURE_ENV_LOCK for this process-wide env var.
+        unsafe {
+            std::env::set_var("LUCARNE_FIXTURE", &fixture);
+        }
+
+        let adapter = lucarne::adapters::grok::new(lucarne::adapters::grok::Options {
+            binary: fakeagent.to_string_lossy().into_owned(),
+        });
+        let runtime = Arc::new(lucarne::agent_runtime::AgentRuntime::new());
+        runtime.register(Arc::new(
+            lucarne::agent_runtime::ProtocolProvider::new(adapter).expect("grok"),
+        ));
+        let core = LucarneCore::from_runtime_and_store(
+            runtime,
+            ControlPlaneSqliteStore::open_in_memory().expect("store"),
+        )
+        .expect("core");
+
+        let workspace_id = WorkspaceId::new("grok:resume:wx-flood");
+        core.upsert_workspace_binding(
+            workspace_id.clone(),
+            OpenWorkspaceRequest {
+                provider_id: "grok",
+                project_path: Some("/tmp/wx-grok-flood".into()),
+                title: "wx grok flood".into(),
+            },
+            Some("uuid-resume-flood"),
+        )
+        .expect("workspace");
+        let provider_session_id = ProviderSessionId::new("grok:uuid-resume-flood");
+
+        let mut events = core.watch_events();
+        let transport = Arc::new(FakeTransport::default());
+        let service = WechatNotificationService::new(
+            Arc::clone(&core),
+            Arc::clone(&transport),
+            WechatServiceOptions {
+                initial_user_ids: vec!["user-1".into()],
+                ..WechatServiceOptions::default()
+            },
+        );
+
+        // Deliver a notification without a live agent (watch-style), bind like product.
+        service
+            .handle_core_event(CoreEvent::TimelineEvent {
+                workspace_id: workspace_id.clone(),
+                turn_id: None,
+                event: AgentEvent::Message(MessageEvent {
+                    role: MessageRole::Assistant,
+                    text: "wx notif ready".into(),
+                    streaming: false,
+                }),
+            })
+            .await
+            .expect("deliver notification");
+        let sends = transport.sends();
+        assert_eq!(sends.len(), 1);
+        // Bind notification to the Grok resume ref used by the flood fixture.
+        core.bind_message_to_provider_session(
+            "wechat",
+            "user-1",
+            &sends[0].message_id,
+            provider_session_id.clone(),
+        )
+        .expect("bind notif to grok session");
+
+        service
+            .handle_incoming(WechatIncoming::new(
+                "user-reply-wx-flood",
+                "user-1",
+                "continue after load",
+                Some(sends[0].message_id.clone()),
+            ))
+            .await
+            .expect("quoted reply must not be 无法路由");
+
+        let deliver = tokio::time::timeout(
+            Duration::from_secs(30),
+            deliver_until_reply_count(&service, &mut events, &transport, 1),
+        )
+        .await;
+        assert!(
+            deliver.is_ok(),
+            "timed out waiting for WeChat reply after real Grok resume flood"
+        );
+        let replies = transport.replies();
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].reply_to_message_id, "user-reply-wx-flood");
+        assert!(
+            replies[0].text.contains("LIVE_AFTER_REPLAY_OK"),
+            "real Grok live turn missing: {}",
+            replies[0].text
+        );
+        assert!(
+            !replies[0].text.contains("无法路由") && !replies[0].text.contains("启动失败"),
+            "must not surface route/start failure: {}",
+            replies[0].text
+        );
+        assert!(
+            !replies[0].text.contains("replay-assistant-"),
+            "isReplay must not leak: {}",
+            replies[0].text
+        );
+
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("LUCARNE_FIXTURE", v),
+                None => std::env::remove_var("LUCARNE_FIXTURE"),
+            }
+        }
     }
 
     #[tokio::test]
@@ -4590,6 +5209,86 @@ mod tests {
         assert!(replies[0].text.contains("reply: please continue"));
     }
 
+    /// Production WeChat often omits quote message id and only sends a *truncated*
+    /// preview of the agent notification. Exact full-text hash then fails → 无法路由.
+    #[tokio::test]
+    async fn notification_reply_routes_by_truncated_quoted_text_without_quote_id() {
+        let provider = Arc::new(FakeProvider::default());
+        let core = test_core(Arc::clone(&provider));
+        core.open_workspace_with_events(OpenWorkspaceRequest {
+            provider_id: "codex",
+            project_path: Some("/tmp/workspace-truncated-quote".into()),
+            title: "workspace-truncated-quote".into(),
+        })
+        .await
+        .expect("open workspace");
+        let mut events = core.watch_events();
+        let transport = Arc::new(FakeTransport::default());
+        let service = WechatNotificationService::new(
+            Arc::clone(&core),
+            Arc::clone(&transport),
+            WechatServiceOptions {
+                initial_user_ids: vec!["user-1".into()],
+                ..WechatServiceOptions::default()
+            },
+        );
+
+        let long_body = "你说得对，之前那版是错位的。 ### 对齐后的边界（和其它 provider 一致）\n\n\
+Lucarned 只做中转，agent 自己跑 shell。\n\n\
+很长的正文用于触发微信引用预览截断，确保 hash 对不上全文。\
+".repeat(8);
+        provider.emit_assistant("thread-1", &long_body);
+        service
+            .handle_core_event(next_timeline_event(&mut events).await)
+            .await
+            .expect("deliver notification");
+
+        let sends = transport.sends();
+        assert_eq!(sends.len(), 1);
+        let full = sends[0].text.clone();
+        assert!(
+            full.chars().count() > 80,
+            "fixture body must be long enough to truncate: {}",
+            full.chars().count()
+        );
+        // WeChat quote preview: first ~40 chars + ellipsis (no message id).
+        let truncated: String = full.chars().take(40).collect::<String>() + "…";
+        assert_ne!(
+            sent_quote_binding_id(&full),
+            visible_quote_binding_id(&truncated),
+            "precondition: truncated preview must not match full-text hash"
+        );
+
+        service
+            .handle_incoming(WechatIncoming {
+                message_id: "user-reply-truncated".into(),
+                user_id: "user-1".into(),
+                text: "现在几点了".into(),
+                quoted_message_id: None,
+                quoted_text: Some(truncated),
+                sdk_message: None,
+            })
+            .await
+            .expect("handle truncated quote");
+
+        let early = transport.replies();
+        assert!(
+            early
+                .iter()
+                .all(|r| !r.text.contains("无法路由")),
+            "truncated WeChat quote must not surface 无法路由: {early:?}"
+        );
+        deliver_until_reply_count(&service, &mut events, &transport, 1).await;
+        let replies = transport.replies();
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].reply_to_message_id, "user-reply-truncated");
+        assert!(
+            replies[0].text.contains("reply: 现在几点了"),
+            "must reach agent turn: {}",
+            replies[0].text
+        );
+    }
+
     #[tokio::test]
     async fn notification_reply_routes_by_quoted_text_from_any_split_chunk() {
         let provider = Arc::new(FakeProvider::default());
@@ -4726,6 +5425,369 @@ cwd: `/Volumes/Data/opensource/conductor/lucarnex`"#;
 
         let sent_id = sent_quote_binding_id(sent_body);
         assert_eq!(visible_quote_binding_id(quoted_text), sent_id);
+    }
+
+    #[test]
+    fn quote_resolve_keys_hit_bound_prefix_for_wechat_ellipsis_preview() {
+        let sent = "你说得对，之前那版是错位的。 ### 对齐后的边界（和其它 provider 一致）\n\n很长的正文";
+        let bound: std::collections::HashSet<_> = quote_binding_keys(sent).into_iter().collect();
+        let preview: String = sent.chars().take(28).collect::<String>() + "…";
+        let resolved = quote_resolve_keys(&preview);
+        assert!(
+            resolved.iter().any(|k| bound.contains(k)),
+            "truncated preview keys must intersect bind keys; preview={preview:?} resolved={resolved:?}"
+        );
+        assert_eq!(
+            normalize_wechat_quote_preview(&preview),
+            sent.chars().take(28).collect::<String>()
+        );
+    }
+
+    /// Production screenshot: quote is NOT a raw prefix of the bubble.
+    /// Differences: `Lucarne:` label, `**` markdown, halfwidth `(CST)`, collapsed ` --- `.
+    #[test]
+    fn quote_resolve_keys_hit_after_wechat_ui_transform() {
+        let sent = "现在是 **2026-07-11 15:36（CST）**。\n\n ---\n\n会话：019f4f1c-8ae8-7632-adb2-6133aee3adf3\n目录：…/opensource/conductor/lucarne";
+        let quote = "Lucarne: 现在是 **2026-07-11 15:36 (CST)** 。 --- 会话：019f4f1c-8a…";
+        let bound: std::collections::HashSet<_> = quote_binding_keys(sent).into_iter().collect();
+        let resolved = quote_resolve_keys(quote);
+        assert!(
+            resolved.iter().any(|k| bound.contains(k)),
+            "UI-transformed quote must resolve;\n sent_fp={:?}\n quote_fp={:?}\n resolved={resolved:?}",
+            normalize_for_quote_match(sent),
+            normalize_for_quote_match(quote),
+        );
+    }
+
+    #[test]
+    fn extract_session_ref_from_full_footer_quote() {
+        let quote = "现在是时间。\n\n ---\n\n会话：019f4f1c-8ae8-7632-adb2-6133aee3adf3\n目录：/tmp";
+        assert_eq!(
+            extract_session_ref_from_quote(quote),
+            Some("019f4f1c-8ae8-7632-adb2-6133aee3adf3")
+        );
+        assert_eq!(
+            extract_session_ref_from_quote("会话：019f4f1c-8a…"),
+            None,
+            "truncated uuid must not false-match"
+        );
+    }
+
+    #[tokio::test]
+    async fn notification_reply_routes_by_wechat_ui_transformed_quote_without_id() {
+        let provider = Arc::new(FakeProvider::default());
+        let core = test_core(Arc::clone(&provider));
+        core.open_workspace_with_events(OpenWorkspaceRequest {
+            provider_id: "codex",
+            project_path: Some("/tmp/workspace-ui-quote".into()),
+            title: "workspace-ui-quote".into(),
+        })
+        .await
+        .expect("open workspace");
+        let mut events = core.watch_events();
+        let transport = Arc::new(FakeTransport::default());
+        let service = WechatNotificationService::new(
+            Arc::clone(&core),
+            Arc::clone(&transport),
+            WechatServiceOptions {
+                initial_user_ids: vec!["user-1".into()],
+                ..WechatServiceOptions::default()
+            },
+        );
+
+        provider.emit_assistant(
+            "thread-1",
+            "现在是 **2026-07-11 15:36（CST）**。",
+        );
+        service
+            .handle_core_event(next_timeline_event(&mut events).await)
+            .await
+            .expect("deliver notification");
+
+        let sends = transport.sends();
+        assert_eq!(sends.len(), 1);
+        // Rebuild the WeChat UI quote shape from the real sent body.
+        let sent = &sends[0].text;
+        assert!(
+            sent.contains("会话："),
+            "sent body should include session footer: {sent}"
+        );
+        let quote = format!(
+            "Lucarne: {}",
+            // Mimic collapsed preview + ellipsis (common WeChat shape).
+            {
+                let flat = normalize_for_quote_match(sent);
+                let preview: String = flat.chars().take(48).collect();
+                format!("{preview}…")
+            }
+        );
+        // Ensure this is NOT a raw-text exact match (the production failure mode).
+        assert!(
+            !sent.contains(quote.trim_start_matches("Lucarne: ").trim_end_matches('…')),
+            "precondition: raw substring match should fail for transformed quote"
+        );
+
+        service
+            .handle_incoming(WechatIncoming {
+                message_id: "user-reply-ui-quote".into(),
+                user_id: "user-1".into(),
+                text: "那现在呢 还有你是谁".into(),
+                quoted_message_id: None,
+                quoted_text: Some(quote),
+                sdk_message: None,
+            })
+            .await
+            .expect("handle ui-transformed quote");
+
+        let early = transport.replies();
+        assert!(
+            early.iter().all(|r| !r.text.contains("无法路由")),
+            "UI-transformed quote must not 无法路由: {early:?}"
+        );
+        deliver_until_reply_count(&service, &mut events, &transport, 1).await;
+        let replies = transport.replies();
+        assert_eq!(replies.len(), 1);
+        assert!(
+            replies[0].text.contains("reply: 那现在呢 还有你是谁"),
+            "{}",
+            replies[0].text
+        );
+    }
+
+    /// Production evidence (2026-07-11 log):
+    /// - outbound bound client UUID only
+    /// - quote carries server numeric message_id, empty quoted_text
+    /// - must still continue the last outbound session
+    #[tokio::test]
+    async fn journey_35_wechat_quote_by_server_numeric_id_with_empty_text() {
+        let provider = Arc::new(FakeProvider::default());
+        let core = test_core(Arc::clone(&provider));
+        core.open_workspace_with_events(OpenWorkspaceRequest {
+            provider_id: "codex",
+            project_path: Some(PathBuf::from("/tmp/j35-server-id")),
+            title: "j35-server-id".into(),
+        })
+        .await
+        .expect("open workspace");
+        let mut events = core.watch_events();
+        let transport = Arc::new(FakeTransport::default());
+        let service = WechatNotificationService::new(
+            Arc::clone(&core),
+            Arc::clone(&transport),
+            WechatServiceOptions {
+                initial_user_ids: vec!["user-1".into()],
+                ..WechatServiceOptions::default()
+            },
+        );
+
+        provider.emit_assistant("thread-1", "现在是 **2026-07-11 15:47（CST）**。");
+        service
+            .handle_core_event(next_timeline_event(&mut events).await)
+            .await
+            .expect("deliver notification");
+        let client_id = transport.sends()[0].message_id.clone();
+        assert!(
+            client_id.contains('-'),
+            "FakeTransport uses uuid-like client ids: {client_id}"
+        );
+
+        // Exact production shape from lucarned WARN log.
+        let server_id = "7481615214657239688";
+        assert!(
+            core.message_session_binding("wechat", "user-1", server_id)
+                .is_none(),
+            "server id must not be pre-bound"
+        );
+        service
+            .handle_incoming(WechatIncoming {
+                message_id: "v1:16454359970781427101".into(),
+                user_id: "user-1".into(),
+                text: "那么现在呢".into(),
+                quoted_message_id: Some(server_id.into()),
+                quoted_text: None,
+                sdk_message: None,
+            })
+            .await
+            .expect("handle quote");
+
+        let early = transport.replies();
+        assert!(
+            early.iter().all(|r| !r.text.contains("无法路由")),
+            "server-id quote must not 无法路由: {early:?}"
+        );
+        deliver_until_reply_count(&service, &mut events, &transport, 1).await;
+        let replies = transport.replies();
+        assert_eq!(replies.len(), 1);
+        assert!(
+            replies[0].text.contains("reply: 那么现在呢"),
+            "{}",
+            replies[0].text
+        );
+        // Learned mapping for next quote of the same bubble.
+        assert!(
+            core.message_session_binding("wechat", "user-1", server_id)
+                .is_some(),
+            "fallback must bind server id for subsequent quotes"
+        );
+        let _ = client_id;
+    }
+
+    /// **Journey 35 basic bar (WeChat):** agent 通知 → 用户引用继续 → 再引用 assistant 回复。
+    ///
+    /// Locks the production quote payloads that previously returned 无法路由:
+    /// message-id, full text, truncated preview, and WeChat UI-transformed preview
+    /// (`Lucarne:` + markdown + halfwidth punct + collapsed whitespace + ellipsis).
+    /// FakeTransport only — no live iLink — but the *resolver + service path* is real.
+    #[tokio::test]
+    async fn journey_35_wechat_quote_agent_notification_and_continue() {
+        async fn one_shape(
+            shape: &str,
+            quote_of: impl FnOnce(&str, &str) -> WechatIncoming,
+        ) {
+            let provider = Arc::new(FakeProvider::default());
+            let core = test_core(Arc::clone(&provider));
+            core.open_workspace_with_events(OpenWorkspaceRequest {
+                provider_id: "codex",
+                project_path: Some(PathBuf::from(format!("/tmp/j35-wechat-{shape}"))),
+                title: format!("j35-{shape}"),
+            })
+            .await
+            .expect("open workspace");
+            let mut events = core.watch_events();
+            let transport = Arc::new(FakeTransport::default());
+            let service = WechatNotificationService::new(
+                Arc::clone(&core),
+                Arc::clone(&transport),
+                WechatServiceOptions {
+                    initial_user_ids: vec!["user-1".into()],
+                    ..WechatServiceOptions::default()
+                },
+            );
+
+            // 1) Agent notification (markdown + fullwidth punct like production Grok replies).
+            provider.emit_assistant(
+                "thread-1",
+                "现在是 **2026-07-11 15:36（CST）**。",
+            );
+            service
+                .handle_core_event(next_timeline_event(&mut events).await)
+                .await
+                .expect("deliver notification");
+            let notif = transport.sends();
+            assert_eq!(notif.len(), 1, "[{shape}] one notification");
+            let notif_id = notif[0].message_id.clone();
+            let notif_body = notif[0].text.clone();
+            assert!(
+                notif_body.contains("会话：") && notif_body.contains("目录："),
+                "[{shape}] footer required: {notif_body}"
+            );
+
+            // 2) User quotes notification with this production shape → must continue, never 无法路由.
+            let user_msg = format!("continue via {shape}");
+            service
+                .handle_incoming(quote_of(&notif_id, &notif_body))
+                .await
+                .expect("quote continue");
+            let early = transport.replies();
+            assert!(
+                early.iter().all(|r| !r.text.contains("无法路由")),
+                "[{shape}] must not 无法路由 on notification quote: {early:?}"
+            );
+            deliver_until_reply_count(&service, &mut events, &transport, 1).await;
+            let replies = transport.replies();
+            assert_eq!(replies.len(), 1, "[{shape}] one agent reply");
+            assert!(
+                replies[0].text.contains(&format!("reply: {user_msg}")),
+                "[{shape}] agent turn missing: {}",
+                replies[0].text
+            );
+
+            // 3) Second hop: quote the assistant reply with UI-transformed preview (no id).
+            let reply_id = replies[0].message_id.clone();
+            let reply_body = replies[0].text.clone();
+            let flat = normalize_for_quote_match(&reply_body);
+            let preview: String = flat.chars().take(40).collect();
+            let second_quote = format!("Lucarne: {preview}…");
+            service
+                .handle_incoming(WechatIncoming {
+                    message_id: format!("user-followup-{shape}"),
+                    user_id: "user-1".into(),
+                    text: format!("followup via {shape}"),
+                    quoted_message_id: None,
+                    quoted_text: Some(second_quote),
+                    sdk_message: None,
+                })
+                .await
+                .expect("quote assistant reply");
+            let early2 = transport.replies();
+            // replies() is cumulative; filter new ones by checking none of the latest is 无法路由
+            assert!(
+                early2.iter().all(|r| !r.text.contains("无法路由")),
+                "[{shape}] second hop must not 无法路由: {early2:?}"
+            );
+            deliver_until_reply_count(&service, &mut events, &transport, 2).await;
+            let replies2 = transport.replies();
+            assert_eq!(replies2.len(), 2, "[{shape}] two agent replies");
+            assert!(
+                replies2[1]
+                    .text
+                    .contains(&format!("reply: followup via {shape}")),
+                "[{shape}] second turn: {}",
+                replies2[1].text
+            );
+            let _ = reply_id;
+        }
+
+        // A) Perfect message id (ideal path).
+        one_shape("message_id", |notif_id, _body| WechatIncoming {
+            message_id: "user-continue-message_id".into(),
+            user_id: "user-1".into(),
+            text: "continue via message_id".into(),
+            quoted_message_id: Some(notif_id.to_string()),
+            quoted_text: None,
+            sdk_message: None,
+        })
+        .await;
+
+        // B) Full quoted text, no id.
+        one_shape("full_text", |_id, body| WechatIncoming {
+            message_id: "user-continue-full_text".into(),
+            user_id: "user-1".into(),
+            text: "continue via full_text".into(),
+            quoted_message_id: None,
+            quoted_text: Some(body.to_string()),
+            sdk_message: None,
+        })
+        .await;
+
+        // C) Truncated raw prefix + ellipsis (no id).
+        one_shape("truncated_raw", |_id, body| {
+            let prefix: String = body.chars().take(36).collect();
+            WechatIncoming {
+                message_id: "user-continue-truncated_raw".into(),
+                user_id: "user-1".into(),
+                text: "continue via truncated_raw".into(),
+                quoted_message_id: None,
+                quoted_text: Some(format!("{prefix}…")),
+                sdk_message: None,
+            }
+        })
+        .await;
+
+        // D) Production screenshot shape: contact label + markdown/punct collapse + ellipsis.
+        one_shape("ui_transformed", |_id, body| {
+            let flat = normalize_for_quote_match(body);
+            let preview: String = flat.chars().take(48).collect();
+            WechatIncoming {
+                message_id: "user-continue-ui_transformed".into(),
+                user_id: "user-1".into(),
+                text: "continue via ui_transformed".into(),
+                quoted_message_id: None,
+                quoted_text: Some(format!("Lucarne: {preview}…")),
+                sdk_message: None,
+            }
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -6424,7 +7486,8 @@ cwd: `/Volumes/Data/opensource/conductor/lucarnex`"#;
         transport: &FakeTransport,
         reply_count: usize,
     ) {
-        for _ in 0..16 {
+        // Dense intermediate streams need more than a handful of pumps.
+        for _ in 0..256 {
             service
                 .handle_core_event(next_reply_turn_event(events).await)
                 .await
@@ -6782,7 +7845,8 @@ cwd: `/Volumes/Data/opensource/conductor/lucarnex`"#;
 
     impl FakeProvider {
         fn session(&self, session_id: String) -> FakeSession {
-            let (tx, rx) = mpsc::channel(16);
+            // Dense prefix streams need headroom so submit does not stall the turn.
+            let (tx, rx) = mpsc::channel(512);
             let submit_prefix_messages = self
                 .submit_prefix_messages
                 .lock()

@@ -94,6 +94,22 @@ impl DiscoverableProvider for Grok {
         }
     }
 
+    fn includes_candidate_in_history(_root: &Path, path: &Path) -> bool {
+        // Grok sessions are multi-file: summary.json, events.jsonl,
+        // resources_state.json, signals.json, rewind_points.jsonl, … live next
+        // to updates.jsonl. Common watch uses a coarse is_session_like_path
+        // (any *.json / *.jsonl); without this gate those sidecars are queued
+        // as session files and can thrash/kill the notify kqueue loop.
+        if is_subagent_path(path) {
+            return false;
+        }
+        if path.is_dir() {
+            // Allow directory expansion to discover updates.jsonl.
+            return true;
+        }
+        is_updates_jsonl(path)
+    }
+
     fn discover_in<I, P>(roots: I, emit: &mut dyn FnMut(AgentProviderSource)) -> Result<()>
     where
         I: IntoIterator<Item = P>,
@@ -118,50 +134,75 @@ impl DiscoverableProvider for Grok {
     fn parse_candidate_entries_agent_session_meta(
         entries: &[AgentProviderSourceEntry],
     ) -> Result<crate::agent_session::SessionMeta> {
-        // Prefer explicit summary.json entry, else sibling of updates.jsonl.
+        // Peer pattern (Codex/Pi): header meta + bounded transcript title probe.
+        // Grok header is summary.json; transcript is updates.jsonl.
+        let mut summary_meta = None;
+        let mut updates_path = None;
+
         for entry in entries {
             let name = entry
                 .path
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("");
-            if name == "summary.json"
-                && let Some(meta) = super::read_summary_meta(&entry.path)?
-            {
-                return Ok(meta);
-            }
-        }
-        for entry in entries {
-            if is_updates_jsonl(&entry.path)
-                && let Some(dir) = entry.path.parent()
-            {
-                let summary = dir.join("summary.json");
-                if let Some(meta) = super::read_summary_meta(&summary)? {
-                    return Ok(meta);
+            if name == "summary.json" {
+                if let Some(meta) = super::read_summary_meta(&entry.path)? {
+                    summary_meta = Some(meta);
+                }
+            } else if is_updates_jsonl(&entry.path) {
+                updates_path = Some(entry.path.clone());
+                if summary_meta.is_none()
+                    && let Some(dir) = entry.path.parent()
+                {
+                    let summary = dir.join("summary.json");
+                    if let Some(meta) = super::read_summary_meta(&summary)? {
+                        summary_meta = Some(meta);
+                    }
                 }
             }
         }
-        // Fallback: probe first lines of updates for session id only.
-        for entry in entries {
-            if !is_updates_jsonl(&entry.path) {
-                continue;
-            }
-            let file = std::fs::File::open(&entry.path).map_err(|err| {
-                Error::Message(format!("failed to open {}: {err}", entry.path.display()).into())
+
+        if let Some(path) = updates_path {
+            let file = std::fs::File::open(&path).map_err(|err| {
+                Error::Message(format!("failed to open {}: {err}", path.display()).into())
             })?;
-            let body = super::parse_grok_body_reader(
+            let mut meta = Grok::probe_agent_session_meta_with_title(
+                summary_meta,
                 std::io::BufReader::new(file),
-                crate::ParseSelection::meta_only(),
-                None,
             )?;
-            if let Some(session_id) = body.session_id {
-                return Ok(crate::agent_session::SessionMeta {
-                    session_id: Some(session_id),
-                    source_kind: Some("grok-v1".into()),
-                    ..Default::default()
-                });
+            // If summary lacked session id, recover from updates (meta_only).
+            if meta.session_id.is_none() {
+                let file = std::fs::File::open(&path).map_err(|err| {
+                    Error::Message(format!("failed to open {}: {err}", path.display()).into())
+                })?;
+                if let Ok(body) = super::parse_grok_body_reader(
+                    std::io::BufReader::new(file),
+                    crate::ParseSelection::meta_only(),
+                    None,
+                ) {
+                    if let Some(session_id) = body.session_id {
+                        meta.session_id = Some(session_id);
+                    }
+                }
             }
+            return Ok(meta);
         }
+
+        if let Some(mut meta) = summary_meta {
+            // No transcript entry — still clear sidecar-skewed updated_at.
+            meta.updated_at = None;
+            if meta
+                .title
+                .as_deref()
+                .is_some_and(super::is_grok_instruction_preamble)
+            {
+                // Keep junk title only as last resort when there is no updates file.
+            } else if let Some(title) = meta.title.take() {
+                meta.title = Some(super::first_line_snippet(title.as_str(), 80).into());
+            }
+            return Ok(meta);
+        }
+
         Ok(crate::agent_session::SessionMeta {
             source_kind: Some("grok-v1".into()),
             ..Default::default()
@@ -231,4 +272,53 @@ fn trim_ascii(mut bytes: &[u8]) -> &[u8] {
         bytes = rest;
     }
     bytes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn history_includes_updates_jsonl_and_session_dirs_only() {
+        let root = PathBuf::from("/tmp/grok-home/sessions");
+        let session_dir = root.join("enc-cwd").join("uuid-1");
+        let updates = session_dir.join("updates.jsonl");
+        let summary = session_dir.join("summary.json");
+        let resources = session_dir.join("resources_state.json");
+        let signals = session_dir.join("signals.json");
+        let rewind = session_dir.join("rewind_points.jsonl");
+        let events = session_dir.join("events.jsonl");
+        let subagent_updates = session_dir
+            .join("subagents")
+            .join("child")
+            .join("updates.jsonl");
+
+        assert!(Grok::includes_candidate_in_history(&root, &updates));
+        // Directory existence is path-based; is_dir() needs real dirs. For pure
+        // path policy, non-updates files must be excluded regardless.
+        assert!(!Grok::includes_candidate_in_history(&root, &summary));
+        assert!(!Grok::includes_candidate_in_history(&root, &resources));
+        assert!(!Grok::includes_candidate_in_history(&root, &signals));
+        assert!(!Grok::includes_candidate_in_history(&root, &rewind));
+        assert!(!Grok::includes_candidate_in_history(&root, &events));
+        assert!(!Grok::includes_candidate_in_history(&root, &subagent_updates));
+    }
+
+    #[test]
+    fn history_includes_existing_session_directory_for_expansion() {
+        let temp = tempfile::tempdir().expect("temp");
+        let root = temp.path().join("sessions");
+        let session_dir = root.join("enc").join("uuid");
+        std::fs::create_dir_all(&session_dir).expect("session dir");
+        assert!(Grok::includes_candidate_in_history(&root, &session_dir));
+        assert!(!Grok::includes_candidate_in_history(
+            &root,
+            &session_dir.join("resources_state.json")
+        ));
+        assert!(Grok::includes_candidate_in_history(
+            &root,
+            &session_dir.join("updates.jsonl")
+        ));
+    }
 }

@@ -311,7 +311,17 @@ pub const JOURNEYS: [JourneyMapping; JOURNEY_COUNT] = [
         slug: "journey_35_notification_reply",
         status: JourneyStatus::Covered,
         test_names: &[
+            // Primary bar: WeChat quote→continue with production quote payloads
+            // (message id / full text / truncated / UI-transformed). Must not 无法路由.
+            "journey_35_wechat_quote_agent_notification_and_continue",
+            // Production log: server numeric quoted_message_id + empty quoted_text.
+            "journey_35_wechat_quote_by_server_numeric_id_with_empty_text",
+            // Telegram topic reply (RecordingChannel mock).
             "watch_notification_topic_receives_agent_message_and_reply_routes_to_session",
+            // Stress: real Grok ACP resume flood + mock channel (not FakeProvider).
+            "channel_notification_continue_uses_real_grok_resume_without_replay_flood",
+            "notification_reply_real_grok_resume_flood_fixture_stays_usable",
+            "quoted_notification_reply_real_grok_resume_flood_without_stale_route",
         ],
         reason: "",
     },
@@ -629,6 +639,30 @@ fn covered_entries_have_test_names() {
                 entry.slug
             );
         }
+    }
+}
+
+/// Journey 35 is the basic "quote agent notification and continue" product path.
+/// These names are load-bearing: removing them re-opens the WeChat 无法路由 hole.
+#[test]
+fn journey_35_requires_wechat_production_quote_continue_coverage() {
+    let j35 = JOURNEYS
+        .iter()
+        .find(|entry| entry.id == 35)
+        .expect("journey 35");
+    let required = [
+        "journey_35_wechat_quote_agent_notification_and_continue",
+        "journey_35_wechat_quote_by_server_numeric_id_with_empty_text",
+        "quoted_notification_reply_real_grok_resume_flood_without_stale_route",
+        "notification_reply_real_grok_resume_flood_fixture_stays_usable",
+    ];
+    for name in required {
+        assert!(
+            j35.test_names.contains(&name),
+            "journey 35 must keep test `{name}` (slug={}, tests={:?})",
+            j35.slug,
+            j35.test_names
+        );
     }
 }
 
