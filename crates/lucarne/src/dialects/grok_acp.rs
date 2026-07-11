@@ -422,6 +422,15 @@ impl GrokAcp {
             "turn_completed" => {
                 if !self.turn_active {
                     // Already finalized via session/prompt result or prior notification.
+                } else if self.assistant_buf.is_empty() && self.thought_buf.is_empty() {
+                    // Stale completion from a previous turn can arrive after the next
+                    // begin_turn() cleared buffers. Ignore so we do not finalize the
+                    // new turn early and drop its live transcript as "idle".
+                    debug!(
+                        target: "lucarne::dialects::grok_acp",
+                        turn = %turn,
+                        "ignoring empty turn_completed (likely stale previous turn)"
+                    );
                 } else {
                     let final_text = self.assistant_buf.clone();
                     if !final_text.is_empty() {
@@ -1228,8 +1237,11 @@ impl Dialect for GrokAcp {
                 on_complete,
             }) => {
                 // Prompt RPC completed — if turn_completed update was not sent,
-                // finalize from buffer.
-                if self.turn_active {
+                // finalize from buffer. Only for the *current* turn: a late
+                // session/prompt result from turn N must not clear turn_active
+                // after turn N+1 has already begun (multi-turn race).
+                let is_current = self.current_turn_id() == turn_id;
+                if self.turn_active && is_current {
                     let final_text = self.assistant_buf.clone();
                     if !final_text.is_empty() {
                         events.push(Event::new(Payload::Timeline(Timeline {
@@ -1248,6 +1260,13 @@ impl Dialect for GrokAcp {
                             ..Default::default()
                         }),
                     })));
+                } else if !is_current {
+                    debug!(
+                        target: "lucarne::dialects::grok_acp",
+                        stale_turn = %turn_id,
+                        active_turn = %self.current_turn_id(),
+                        "ignoring stale session/prompt result after newer turn began"
+                    );
                 }
                 if let PromptCommandComplete::PermissionsChanged { mode } = on_complete {
                     self.current_permission_mode = mode.clone();
@@ -1785,6 +1804,68 @@ mod tests {
         });
         assert!(line.contains("session/load"));
         assert!(line.contains("uuid-resume"));
+    }
+
+    #[test]
+    fn multi_turn_stale_prompt_result_does_not_kill_next_turn() {
+        let mut d = GrokAcp::new();
+        d.session_id = Some("sid-mt".into());
+        d.state = SessionState::Ready;
+        d.session_started = true;
+
+        // Turn 1 prompt (rpc id = 1).
+        let _ = d
+            .encode_user_message(&Input {
+                text: "turn 1".into(),
+                images: vec![],
+            })
+            .expect("prompt 1");
+        let _ = d.drain_out_frames();
+        assert_eq!(d.current_turn_id(), "grok-turn-1");
+        assert!(d.turn_active);
+
+        // Live turn 1 assistant tokens.
+        let _ = d.translate(
+            br#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sid-mt","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"TURN_1_OK"}}}}"#,
+        );
+
+        // Begin turn 2 before turn 1's session/prompt RPC result arrives (fixture race).
+        let _ = d
+            .encode_user_message(&Input {
+                text: "turn 2".into(),
+                images: vec![],
+            })
+            .expect("prompt 2");
+        let _ = d.drain_out_frames();
+        assert_eq!(d.current_turn_id(), "grok-turn-2");
+        assert!(d.turn_active);
+
+        // Late turn 1 RPC result must not clear turn_active for turn 2.
+        let stale = d.translate(br#"{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}"#);
+        assert!(
+            !stale.iter().any(|e| matches!(&e.payload, Payload::TurnCompleted(_))),
+            "stale prompt result must not complete the active turn: {stale:?}"
+        );
+        assert!(d.turn_active, "turn 2 must stay active after stale turn 1 result");
+
+        // Empty stale turn_completed (buffers cleared by begin_turn) must not finalize.
+        let empty_done = d.translate(
+            br#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sid-mt","update":{"sessionUpdate":"turn_completed","stop_reason":"end_turn"}}}"#,
+        );
+        assert!(
+            empty_done.is_empty(),
+            "empty turn_completed after begin_turn must be ignored: {empty_done:?}"
+        );
+        assert!(d.turn_active);
+
+        // Live turn 2 tokens still flow.
+        let live = d.translate(
+            br#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sid-mt","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"TURN_2_OK"}}}}"#,
+        );
+        assert!(
+            live.iter().any(|e| matches!(&e.payload, Payload::Timeline(_))),
+            "turn 2 assistant must not be dropped as idle: {live:?}"
+        );
     }
 
     #[test]

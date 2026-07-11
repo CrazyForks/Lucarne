@@ -1,4 +1,6 @@
 # Grok ACP multi-turn
+# Second wait must not reuse EXPECT_IN_CONTAINS "session/prompt" — that matches the
+# first prompt still buffered on stdin and lets fakeagent EXIT before turn 2 is sent.
 EXPECT_IN_CONTAINS "initialize"
 OUT {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}
 EXPECT_IN_CONTAINS "session/new"
@@ -7,7 +9,7 @@ EXPECT_IN_CONTAINS "session/prompt"
 OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-multi","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"first"}}}}
 OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-multi","update":{"sessionUpdate":"turn_completed","stop_reason":"end_turn"}}}
 OUT {"jsonrpc":"2.0","id":3,"result":{}}
-EXPECT_IN_CONTAINS "session/prompt"
+EXPECT_IN_CONTAINS "again"
 OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-multi","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"second"}}}}
 OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-multi","update":{"sessionUpdate":"turn_completed","stop_reason":"end_turn"}}}
 OUT {"jsonrpc":"2.0","id":4,"result":{}}

@@ -535,6 +535,8 @@ async fn commands_catalog_and_system_dispatch() {
 /// Fixture smoke for ACP reverse `fs/*` client RPCs (live tool path depends on these).
 #[tokio::test]
 async fn tool_fs_reverse_rpc_flow() {
+    // Relay-only: lucarne does not host fs/* reverse RPCs. Fixture models an
+    // agent-owned write tool without client fs/write_text_file.
     let r = run_scenario(base_scenario("tool_fs.fixture")).await;
     assert!(r.closed, "kinds = {:?}", kinds(&r.events));
     let calls = collect_timelines(&r.events, TimelineType::ToolCall);
@@ -560,10 +562,6 @@ async fn tool_fs_reverse_rpc_flow() {
             .iter()
             .any(|e| matches!(e.payload, Payload::TurnCompleted(_)))
     );
-    // Side effect of reverse write RPC
-    let written = std::fs::read_to_string("/tmp/lucarne-grok-acp-fs-test.txt")
-        .expect("fs/write_text_file should have written the file");
-    assert_eq!(written, "lucarne-fs-ok\n");
 }
 
 #[test]

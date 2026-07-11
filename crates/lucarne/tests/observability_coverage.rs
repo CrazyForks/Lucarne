@@ -116,6 +116,8 @@ fn runtime_modules_have_structured_tracing_or_are_declared_pure() {
         "agent-sessions/src/providers/cursor/types.rs",
         "agent-sessions/src/providers/gemini/event.rs",
         "agent-sessions/src/providers/gemini/types.rs",
+        "agent-sessions/src/providers/grok/event.rs",
+        "agent-sessions/src/providers/grok/types.rs",
         "agent-sessions/src/providers/descriptor.rs",
         "agent-sessions/src/providers/pi/discovery.rs",
         "agent-sessions/src/providers/pi/event.rs",

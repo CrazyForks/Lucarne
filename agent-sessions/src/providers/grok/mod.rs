@@ -3,6 +3,7 @@ use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use tracing::trace;
 
 use crate::{Error, ParseSelection, Result};
 
@@ -206,6 +207,13 @@ impl Grok {
                 header_title
                     .map(|t| first_line_snippet(t.as_str(), 80).into())
             });
+        trace!(
+            target: "agent_sessions::parse",
+            agent = Grok::name(),
+            session_id = ?meta.session_id,
+            title = ?meta.title,
+            "probed Grok session meta"
+        );
         Ok(meta)
     }
 

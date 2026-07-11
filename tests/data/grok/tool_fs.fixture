@@ -1,16 +1,12 @@
-# Grok ACP reverse FS RPCs (client capabilities advertised at initialize)
+# Grok tool call without client-hosted fs reverse RPC.
+# Lucarne advertises clientCapabilities.fs = false (relay-only); agent-owned tools only.
 EXPECT_IN_CONTAINS "initialize"
-EXPECT_IN_CONTAINS "readTextFile"
+EXPECT_IN_CONTAINS "\"terminal\":false"
 OUT {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}
 EXPECT_IN_CONTAINS "session/new"
 OUT {"jsonrpc":"2.0","id":2,"result":{"sessionId":"019f4f1c-fs-tool-000000000001"}}
 EXPECT_IN_CONTAINS "session/prompt"
 OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"019f4f1c-fs-tool-000000000001","update":{"sessionUpdate":"tool_call","toolCallId":"call-fs-1","title":"write","rawInput":{"file_path":"/tmp/lucarne-grok-acp-fs-test.txt","content":"lucarne-fs-ok\n"}}}}
-OUT {"jsonrpc":"2.0","id":0,"method":"fs/write_text_file","params":{"sessionId":"019f4f1c-fs-tool-000000000001","path":"/tmp/lucarne-grok-acp-fs-test.txt","content":"lucarne-fs-ok\n"}}
-EXPECT_IN_CONTAINS_NEXT "\"id\":0"
-OUT {"jsonrpc":"2.0","id":1,"method":"fs/read_text_file","params":{"sessionId":"019f4f1c-fs-tool-000000000001","path":"/tmp/lucarne-grok-acp-fs-test.txt"}}
-EXPECT_IN_CONTAINS_NEXT "\"id\":1"
-EXPECT_IN_CONTAINS_NEXT "lucarne-fs-ok"
 OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"019f4f1c-fs-tool-000000000001","update":{"sessionUpdate":"tool_call_update","toolCallId":"call-fs-1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"wrote"}}]}}}
 OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"019f4f1c-fs-tool-000000000001","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"TOOL_OK"}}}}
 OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"019f4f1c-fs-tool-000000000001","update":{"sessionUpdate":"turn_completed","stop_reason":"end_turn"}}}
