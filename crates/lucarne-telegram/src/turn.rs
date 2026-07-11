@@ -3226,12 +3226,12 @@ mod tests {
         assert_eq!(sends.len(), 2);
         assert_eq!(sends[0].notification, NotificationPolicy::Silent);
         assert_eq!(sends[1].body, "这是最终结论");
-        assert_eq!(sends[1].format, lucarne_channel::TextFormat::Markdown);
+        assert_eq!(sends[1].format, lucarne_channel::TextFormat::Rich);
         assert_eq!(sends[1].notification, NotificationPolicy::Notify);
     }
 
     #[tokio::test]
-    async fn final_reply_without_preview_is_sent_as_markdown() {
+    async fn final_reply_without_preview_is_sent_as_rich() {
         let channel = TestChannel::default();
         let target = test_target();
         let mut drafts = DraftStream::new();
@@ -3243,7 +3243,7 @@ mod tests {
         let sends = channel.sends.lock().unwrap();
         assert_eq!(sends.len(), 1);
         assert_eq!(sends[0].body, "Use `skills` and **markdown**");
-        assert_eq!(sends[0].format, lucarne_channel::TextFormat::Markdown);
+        assert_eq!(sends[0].format, lucarne_channel::TextFormat::Rich);
         assert_eq!(sends[0].notification, NotificationPolicy::Notify);
     }
 

@@ -748,10 +748,10 @@ async fn journey_07_send_prompt_renders_reasoning_tool_calls_without_footer() {
         )
         .await;
     let final_answer = eventually_topic_message(&channel, "9", |message| {
-        message.body.contains("final answer") && message.format == TextFormat::Markdown
+        message.body.contains("final answer") && message.format == TextFormat::Rich
     })
     .await;
-    assert_eq!(final_answer.format, TextFormat::Markdown);
+    assert_eq!(final_answer.format, TextFormat::Rich);
     assert!(!final_answer.body.contains("\n\n---\n\n"));
     assert!(!final_answer.body.contains("session: `thread-1`"));
     assert!(!final_answer.body.contains("cwd: `/tmp/project-a`"));
@@ -1207,10 +1207,10 @@ async fn watch_notification_topic_receives_agent_message_and_reply_routes_to_ses
     let reply = eventually_topic_message(&channel, &notification.topic, |message| {
         message.body.contains("ok")
             && message.body.contains("\n\n---\n\ncost: ")
-            && message.format == TextFormat::Markdown
+            && message.format == TextFormat::Rich
     })
     .await;
-    assert_eq!(reply.format, TextFormat::Markdown);
+    assert_eq!(reply.format, TextFormat::Rich);
     let footer = reply
         .body
         .split_once("\n\n---\n\ncost: ")
@@ -2302,7 +2302,7 @@ async fn watch_notification_live_replay_routes_background_message_and_reply_with
     })
     .await;
     eventually_topic_message(&channel, &notification.topic, |message| {
-        message.body.contains(reply_text.as_str()) && message.format == TextFormat::Markdown
+        message.body.contains(reply_text.as_str()) && message.format == TextFormat::Rich
     })
     .await;
     assert!(

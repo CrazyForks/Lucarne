@@ -1,12 +1,34 @@
 //! Telegram channel: [`lucarne_channel::Channel`] implementation backed by
-//! teloxide.
+//! frankenstein (Bot API 10.1+).
 //!
 //! This module owns the translation between generic channel events and
 //! Telegram-specific types (Updates, forum topics, inline keyboards).
-//! All markdown is rendered through [`lucarne_channel::markdown`] so the
-//! bot authors in CommonMark-ish and we emit valid MarkdownV2.
+//!
+//! Outbound markdown is sent as **Rich Messages** (`sendRichMessage` with
+//! Rich Markdown). Plain text and control-style short messages still use
+//! `sendMessage`. Callback buttons stay on Telegram's standard
+//! `InlineKeyboardMarkup` + `callback_data` so the existing bot button
+//! routing is unchanged.
 
 use async_trait::async_trait;
+use frankenstein::client_reqwest::Bot;
+use frankenstein::inline_mode::{
+    InlineQueryResult, InlineQueryResultArticle, InputMessageContent, InputTextMessageContent,
+};
+use frankenstein::input_file::{FileUpload as TgFileUpload, InputFile};
+use frankenstein::methods::{
+    AnswerInlineQueryParams, CreateForumTopicParams, DeleteForumTopicParams, DeleteMessageParams,
+    EditForumTopicParams, EditMessageTextParams, GetFileParams, GetUpdatesParams,
+    SendChatActionParams, SendDocumentParams, SendMessageParams, SendPhotoParams,
+    SendRichMessageParams, SendVideoParams, SetMyCommandsParams,
+};
+use frankenstein::rich_message::InputRichMessage;
+use frankenstein::types::{
+    AllowedUpdate, BotCommand, ChatAction, ChatId as TgChatId, InlineKeyboardButton,
+    InlineKeyboardMarkup, MaybeInaccessibleMessage, PhotoSize, ReplyMarkup, ReplyParameters,
+};
+use frankenstein::updates::{Update, UpdateContent};
+use frankenstein::{AsyncTelegramApi, Error as TgError};
 use futures::stream::{BoxStream, StreamExt};
 use lucarne_channel::{
     markdown::render_telegram_markdown_v2,
@@ -18,26 +40,12 @@ use lucarne_channel::{
     },
     Channel, TextFormat,
 };
+use frankenstein::ParseMode;
 use std::{
+    path::PathBuf,
     str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
-};
-use teloxide::{
-    net::Download,
-    payloads::{
-        AnswerInlineQuerySetters, EditForumTopicSetters, EditMessageTextSetters, GetUpdatesSetters,
-        SendChatActionSetters, SendDocumentSetters, SendMessageSetters, SendPhotoSetters,
-        SendVideoSetters,
-    },
-    prelude::Requester,
-    types::{
-        AllowedUpdate, BotCommand, ChatAction, ChatId as TgChatId, FileId, InlineKeyboardButton,
-        InlineKeyboardMarkup, InlineQueryResult, InlineQueryResultArticle, InputFile,
-        InputMessageContent, InputMessageContentText, MaybeInaccessibleMessage,
-        MessageId as TgMessageId, ParseMode, ReplyParameters, ThreadId, UpdateKind,
-    },
-    ApiError, Bot, RequestError,
 };
 use tokio::sync::mpsc;
 use tracing::{debug, info, instrument, trace, warn};
@@ -96,14 +104,33 @@ impl Drop for TelegramChannel {
     }
 }
 
+fn bot_api_url(token: &str) -> String {
+    format!("{}{token}", frankenstein::BASE_API_URL)
+}
+
 impl TelegramChannel {
     pub fn start(cfg: TelegramConfig) -> Arc<Self> {
-        let bot = Bot::new(cfg.token.clone());
+        let bot = Bot::new(&cfg.token);
         Self::start_with_bot(cfg, bot)
     }
 
+    /// Construct the channel using a shared daemon HTTP client when possible.
+    ///
+    /// frankenstein 0.50 depends on reqwest 0.13 while the workspace (and
+    /// wechat-ilink) stay on reqwest 0.12, so the client handle cannot be
+    /// shared by type. We still accept the daemon client for API stability and
+    /// build an equivalent frankenstein client (timeouts + system proxy).
     pub fn start_with_client(cfg: TelegramConfig, http_client: reqwest::Client) -> Arc<Self> {
-        let bot = Bot::with_client(cfg.token.clone(), http_client);
+        let _daemon_client = http_client;
+        let frankenstein_client = frankenstein::reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(500))
+            .build()
+            .unwrap_or_else(|_| frankenstein::reqwest::Client::new());
+        let bot = Bot::builder()
+            .api_url(bot_api_url(&cfg.token))
+            .client(frankenstein_client)
+            .build();
         Self::start_with_bot(cfg, bot)
     }
 
@@ -140,17 +167,28 @@ impl TelegramChannel {
     /// or an error if the bot token or chat id is invalid.
     #[instrument(skip(self), fields(chat = self.cfg.entry_chat_id))]
     pub async fn test_connection(&self) -> Result<()> {
-        use teloxide::prelude::Requester;
         debug!("sending connection-test message");
-        self.bot
-            .send_message(TgChatId(self.cfg.entry_chat_id), "✓ lucarne online")
-            .parse_mode(ParseMode::MarkdownV2)
-            .disable_notification(true)
-            .await
-            .map_err(|e| {
-                warn!(error = %e, "connection test failed");
-                ChannelError::Transport(format!("connection test failed: {e}"))
-            })?;
+        let params = SendMessageParams {
+            business_connection_id: None,
+            chat_id: TgChatId::Integer(self.cfg.entry_chat_id),
+            message_thread_id: None,
+            direct_messages_topic_id: None,
+            text: "✓ lucarne online".into(),
+            parse_mode: None,
+            entities: None,
+            link_preview_options: None,
+            disable_notification: Some(true),
+            protect_content: None,
+            allow_paid_broadcast: None,
+            message_effect_id: None,
+            suggested_post_parameters: None,
+            reply_parameters: None,
+            reply_markup: None,
+        };
+        self.bot.send_message(&params).await.map_err(|e| {
+            warn!(error = %e, "connection test failed");
+            ChannelError::Transport(format!("connection test failed: {e}"))
+        })?;
         info!("connection test ok");
         Ok(())
     }
@@ -167,10 +205,18 @@ impl TelegramChannel {
     pub async fn sync_commands(&self, commands: &[TelegramBotCommand]) -> Result<()> {
         let commands: Vec<_> = commands
             .iter()
-            .map(|cmd| BotCommand::new(cmd.command, cmd.description))
+            .map(|cmd| BotCommand {
+                command: cmd.command.to_string(),
+                description: cmd.description.to_string(),
+            })
             .collect();
         let count = commands.len();
-        self.bot.set_my_commands(commands).await.map_err(map_err)?;
+        let params = SetMyCommandsParams {
+            commands,
+            scope: None,
+            language_code: None,
+        };
+        self.bot.set_my_commands(&params).await.map_err(map_err)?;
         info!(
             target: "lucarne_telegram",
             count,
@@ -182,75 +228,167 @@ impl TelegramChannel {
 
 fn parse_tg_chat_id(id: &ChatId) -> std::result::Result<TgChatId, ChannelError> {
     i64::from_str(id.as_str())
-        .map(TgChatId)
+        .map(TgChatId::Integer)
         .map_err(|_| ChannelError::Transport(format!("invalid chat id: {}", id.as_str())))
 }
 
-fn parse_tg_thread(ws: &WorkspaceId) -> Option<ThreadId> {
+fn parse_tg_thread(ws: &WorkspaceId) -> Option<i32> {
     if ws.as_str().is_empty() {
         return None;
     }
-    i32::from_str(ws.as_str())
-        .ok()
-        .map(|n| ThreadId(TgMessageId(n)))
+    i32::from_str(ws.as_str()).ok()
 }
 
-fn parse_tg_message_id(id: &MessageId) -> std::result::Result<TgMessageId, ChannelError> {
+fn parse_tg_message_id(id: &MessageId) -> std::result::Result<i32, ChannelError> {
     i32::from_str(id.as_str())
-        .map(TgMessageId)
         .map_err(|_| ChannelError::Transport(format!("invalid message id {}", id.as_str())))
 }
 
-fn render_body(msg: &OutgoingMessage) -> (String, Option<ParseMode>) {
-    match msg.format {
-        TextFormat::Markdown => (
-            render_telegram_markdown_v2(&msg.body),
-            Some(ParseMode::MarkdownV2),
-        ),
-        TextFormat::Plain => (msg.body.clone(), None),
-    }
-}
-
+/// Build inline keyboard from channel buttons.
+///
+/// Preserves the exact `Vec<Vec<…>>` grid from callers (panel nav, approvals,
+/// interventions, history pagination, etc.). Uses `callback_data` only so the
+/// existing bot callback routing is unchanged.
 fn build_keyboard(rows: &[Vec<OutgoingButton>]) -> Option<InlineKeyboardMarkup> {
     if rows.is_empty() {
         return None;
     }
-    let kb = rows
+    let keyboard = rows
         .iter()
         .map(|row| {
             row.iter()
-                .map(|b| InlineKeyboardButton::callback(b.label.clone(), b.data.clone()))
+                .map(|b| InlineKeyboardButton {
+                    text: b.label.clone(),
+                    icon_custom_emoji_id: None,
+                    url: None,
+                    login_url: None,
+                    callback_data: Some(b.data.clone()),
+                    web_app: None,
+                    switch_inline_query: None,
+                    switch_inline_query_current_chat: None,
+                    switch_inline_query_chosen_chat: None,
+                    copy_text: None,
+                    callback_game: None,
+                    pay: None,
+                    style: None,
+                })
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    Some(InlineKeyboardMarkup::new(kb))
+    Some(InlineKeyboardMarkup {
+        inline_keyboard: keyboard,
+    })
 }
 
-fn map_err(e: RequestError) -> ChannelError {
-    if let RequestError::Api(api) = &e {
-        // teloxide exposes this as ApiError::Unknown("Bad Request:
-        // can't parse entities: ...") for MarkdownV2 issues.
-        let text = api.to_string();
-        let lower = text.to_ascii_lowercase();
-        if lower.contains("message thread not found")
-            || lower.contains("topic not found")
-            || lower.contains("topic_id_invalid")
-        {
-            return ChannelError::WorkspaceNotFound(text);
+fn map_err(e: TgError) -> ChannelError {
+    match &e {
+        TgError::Api(api) => {
+            let text = api.description.clone();
+            let lower = text.to_ascii_lowercase();
+            if lower.contains("message thread not found")
+                || lower.contains("topic not found")
+                || lower.contains("topic_id_invalid")
+            {
+                return ChannelError::WorkspaceNotFound(text);
+            }
+            if lower.contains("message is not modified") {
+                // Treat as success at call sites that ignore this via map_err paths.
+                return ChannelError::Transport(text);
+            }
+            if lower.contains("message to delete not found")
+                || lower.contains("message can't be deleted")
+            {
+                return ChannelError::Transport(text);
+            }
+            if lower.contains("parse entities")
+                || lower.contains("parse markdown")
+                || lower.contains("can't parse")
+                || lower.contains("can't find end of the entity")
+                || lower.contains("unsupported start tag")
+                || lower.contains("message is too long")
+            {
+                return if lower.contains("too long") {
+                    ChannelError::PayloadTooLarge
+                } else {
+                    ChannelError::FormatRejected(text)
+                };
+            }
+            ChannelError::Transport(text)
         }
-        if lower.contains("parse entities")
-            || lower.contains("parse markdown")
-            || lower.contains("can't parse")
-            || matches!(api, ApiError::MessageIsTooLong)
-        {
-            return if matches!(api, ApiError::MessageIsTooLong) {
-                ChannelError::PayloadTooLarge
-            } else {
-                ChannelError::FormatRejected(text)
-            };
+        other => ChannelError::Transport(other.to_string()),
+    }
+}
+
+fn is_benign_edit_error(e: &TgError) -> bool {
+    match e {
+        TgError::Api(api) => {
+            let lower = api.description.to_ascii_lowercase();
+            lower.contains("message is not modified")
+        }
+        _ => false,
+    }
+}
+
+fn is_benign_delete_error(e: &TgError) -> bool {
+    match e {
+        TgError::Api(api) => {
+            let lower = api.description.to_ascii_lowercase();
+            lower.contains("message to delete not found")
+                || lower.contains("message can't be deleted")
+                || lower.contains("message identifier is not specified")
+        }
+        _ => false,
+    }
+}
+
+/// Write in-memory bytes to a temp file for frankenstein's path-based upload API.
+async fn materialize_upload(filename: &str, bytes: &[u8]) -> Result<(PathBuf, tempfile::TempDir)> {
+    let dir = tempfile::tempdir()
+        .map_err(|e| ChannelError::Transport(format!("tempdir for upload: {e}")))?;
+    // Keep a simple basename so Telegram displays a clean name.
+    let safe_name = filename
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("file.bin");
+    let path = dir.path().join(safe_name);
+    tokio::fs::write(&path, bytes)
+        .await
+        .map_err(|e| ChannelError::Transport(format!("write upload temp: {e}")))?;
+    Ok((path, dir))
+}
+
+fn reply_params_from(reply_to: Option<&MessageId>) -> Result<Option<ReplyParameters>> {
+    match reply_to {
+        None => Ok(None),
+        Some(id) => {
+            let message_id = parse_tg_message_id(id)?;
+            Ok(Some(ReplyParameters {
+                message_id,
+                chat_id: None,
+                allow_sending_without_reply: Some(true),
+                quote: None,
+                quote_parse_mode: None,
+                quote_entities: None,
+                quote_position: None,
+                checklist_task_id: None,
+                poll_option_id: None,
+            }))
         }
     }
-    ChannelError::Transport(e.to_string())
+}
+
+fn silent_flag(silent: bool) -> Option<bool> {
+    silent.then_some(true)
+}
+
+fn rich_markdown_body(text: impl Into<String>) -> InputRichMessage {
+    InputRichMessage {
+        html: None,
+        markdown: Some(text.into()),
+        is_rtl: None,
+        skip_entity_detection: None,
+    }
 }
 
 #[async_trait]
@@ -278,57 +416,109 @@ impl Channel for TelegramChannel {
     ) -> Result<Vec<MessageId>> {
         let chat = parse_tg_chat_id(&target.chat)?;
         let thread = parse_tg_thread(&target.workspace);
-        let (body, parse_mode) = render_body(&msg);
-        let chunks = split_for_channel(&body, TELEGRAM_MESSAGE_LIMIT);
+        // Only agent bodies use Rich Messages; panels/help/status keep MarkdownV2.
+        let use_rich = matches!(msg.format, TextFormat::Rich);
+        let (wire_body, parse_mode) = match msg.format {
+            TextFormat::Rich => (msg.body.clone(), None),
+            TextFormat::Markdown => (
+                render_telegram_markdown_v2(&msg.body),
+                Some(ParseMode::MarkdownV2),
+            ),
+            TextFormat::Plain => (msg.body.clone(), None),
+        };
+        let chunks = split_for_channel(&wire_body, TELEGRAM_MESSAGE_LIMIT);
         let kb = build_keyboard(&msg.buttons);
         debug!(
             target: "lucarne_telegram",
-            chat = chat.0,
-            thread = ?thread.map(|t| t.0.0),
+            chat = ?chat,
+            thread = ?thread,
             chunks = chunks.len(),
-            bytes = body.len(),
-            mode = ?parse_mode,
+            bytes = wire_body.len(),
+            format = ?msg.format,
+            rich = use_rich,
             buttons = msg.buttons.len(),
             "sending message"
         );
 
         let mut message_ids = Vec::with_capacity(chunks.len());
         for (idx, chunk) in chunks.iter().enumerate() {
-            let mut req = self.bot.send_message(chat, chunk.clone());
-            if let Some(pm) = parse_mode {
-                req = req.parse_mode(pm);
-            }
-            if let Some(t) = thread {
-                req = req.message_thread_id(t);
-            }
-            if msg.notification.is_silent() {
-                req = req.disable_notification(true);
-            }
-            if idx == 0 {
-                if let Some(reply_to) = msg.reply_to.as_ref() {
-                    req = req.reply_parameters(
-                        ReplyParameters::new(parse_tg_message_id(reply_to)?)
-                            .allow_sending_without_reply(),
+            let is_last = idx + 1 == chunks.len();
+            // Preserve full button grid (rows × columns) on the final chunk only.
+            let reply = if idx == 0 {
+                reply_params_from(msg.reply_to.as_ref())?
+            } else {
+                None
+            };
+            let markup = if is_last {
+                kb.clone().map(ReplyMarkup::InlineKeyboardMarkup)
+            } else {
+                None
+            };
+            let silent = silent_flag(msg.notification.is_silent());
+
+            let message_id = if use_rich {
+                let params = SendRichMessageParams {
+                    business_connection_id: None,
+                    chat_id: chat.clone(),
+                    message_thread_id: thread,
+                    direct_messages_topic_id: None,
+                    // CommonMark-ish agent body; Telegram parses as Rich Markdown.
+                    rich_message: rich_markdown_body(chunk.clone()),
+                    disable_notification: silent,
+                    protect_content: None,
+                    allow_paid_broadcast: None,
+                    message_effect_id: None,
+                    suggested_post_parameters: None,
+                    reply_parameters: reply,
+                    reply_markup: markup,
+                };
+                let sent = self.bot.send_rich_message(&params).await.map_err(|e| {
+                    let mapped = map_err(e);
+                    warn!(
+                        target: "lucarne_telegram",
+                        chunk_idx = idx, error = %mapped,
+                        "send rich chunk failed"
                     );
-                }
-            }
-            // Attach keyboard only on final chunk.
-            if idx + 1 == chunks.len() {
-                if let Some(kb) = &kb {
-                    req = req.reply_markup(kb.clone());
-                }
-            }
-            let m = req.await.map_err(|e| {
-                let mapped = map_err(e);
-                warn!(
-                    target: "lucarne_telegram",
-                    chunk_idx = idx, error = %mapped,
-                    "send chunk failed"
-                );
-                mapped
-            })?;
-            trace!(target: "lucarne_telegram", chunk_idx = idx, tg_message_id = m.id.0, "chunk sent");
-            message_ids.push(MessageId::new(m.id.0.to_string()));
+                    mapped
+                })?;
+                sent.result.message_id
+            } else {
+                let params = SendMessageParams {
+                    business_connection_id: None,
+                    chat_id: chat.clone(),
+                    message_thread_id: thread,
+                    direct_messages_topic_id: None,
+                    text: chunk.clone(),
+                    parse_mode,
+                    entities: None,
+                    link_preview_options: None,
+                    disable_notification: silent,
+                    protect_content: None,
+                    allow_paid_broadcast: None,
+                    message_effect_id: None,
+                    suggested_post_parameters: None,
+                    reply_parameters: reply,
+                    reply_markup: markup,
+                };
+                let sent = self.bot.send_message(&params).await.map_err(|e| {
+                    let mapped = map_err(e);
+                    warn!(
+                        target: "lucarne_telegram",
+                        chunk_idx = idx, error = %mapped,
+                        "send chunk failed"
+                    );
+                    mapped
+                })?;
+                sent.result.message_id
+            };
+
+            trace!(
+                target: "lucarne_telegram",
+                chunk_idx = idx,
+                tg_message_id = message_id,
+                "chunk sent"
+            );
+            message_ids.push(MessageId::new(message_id.to_string()));
         }
         if message_ids.is_empty() {
             return Err(ChannelError::Transport("no chunks sent".into()));
@@ -344,75 +534,100 @@ impl Channel for TelegramChannel {
     ) -> Result<()> {
         let chat = parse_tg_chat_id(&target.chat)?;
         let msg_id = parse_tg_message_id(id)?;
-        let (body, parse_mode) = render_body(&msg);
+        let use_rich = matches!(msg.format, TextFormat::Rich);
+        let (wire_body, parse_mode) = match msg.format {
+            TextFormat::Rich => (msg.body.clone(), None),
+            TextFormat::Markdown => (
+                render_telegram_markdown_v2(&msg.body),
+                Some(ParseMode::MarkdownV2),
+            ),
+            TextFormat::Plain => (msg.body.clone(), None),
+        };
         let kb = build_keyboard(&msg.buttons);
 
-        // Editing only makes sense for the first chunk; if the payload
-        // would need splitting we truncate with a sentinel so the bot
-        // keeps a well-defined contract.
-        let truncated = if body.chars().count() > TELEGRAM_MESSAGE_LIMIT {
-            let mut s: String = body.chars().take(TELEGRAM_MESSAGE_LIMIT - 16).collect();
+        let truncated = if wire_body.chars().count() > TELEGRAM_MESSAGE_LIMIT {
+            let mut s: String = wire_body.chars().take(TELEGRAM_MESSAGE_LIMIT - 16).collect();
             s.push_str(" …(truncated)");
             s
         } else {
-            body
+            wire_body
         };
 
-        let mut req = self.bot.edit_message_text(chat, msg_id, truncated);
-        if let Some(pm) = parse_mode {
-            req = req.parse_mode(pm);
+        let params = EditMessageTextParams {
+            business_connection_id: None,
+            chat_id: Some(chat),
+            message_id: Some(msg_id),
+            inline_message_id: None,
+            text: if use_rich {
+                None
+            } else {
+                Some(truncated.clone())
+            },
+            parse_mode,
+            entities: None,
+            link_preview_options: None,
+            rich_message: use_rich.then(|| rich_markdown_body(truncated)),
+            reply_markup: kb,
+        };
+        match self.bot.edit_message_text(&params).await {
+            Ok(_) => Ok(()),
+            Err(e) if is_benign_edit_error(&e) => Ok(()),
+            Err(e) => Err(map_err(e)),
         }
-        if let Some(kb) = kb {
-            req = req.reply_markup(kb);
-        }
-        match req.await {
-            Ok(_) => {}
-            Err(RequestError::Api(ApiError::MessageNotModified)) => {}
-            Err(e) => return Err(map_err(e)),
-        }
-        Ok(())
     }
 
     async fn delete(&self, target: &WorkspaceHandle, id: &MessageId) -> Result<()> {
         let chat = parse_tg_chat_id(&target.chat)?;
         let msg_id = parse_tg_message_id(id)?;
-        match self.bot.delete_message(chat, msg_id).await {
+        let params = DeleteMessageParams {
+            chat_id: chat,
+            message_id: msg_id,
+        };
+        match self.bot.delete_message(&params).await {
             Ok(_) => Ok(()),
-            Err(RequestError::Api(ApiError::MessageToDeleteNotFound)) => Ok(()),
+            Err(e) if is_benign_delete_error(&e) => Ok(()),
             Err(e) => Err(map_err(e)),
         }
     }
 
     async fn create_workspace(&self, parent: &ChatId, title: &str) -> Result<WorkspaceHandle> {
         let chat = parse_tg_chat_id(parent)?;
-        info!(target: "lucarne_telegram", chat = chat.0, title, "creating forum topic");
-        let topic = self
-            .bot
-            .create_forum_topic(chat, title.to_string())
-            .await
-            .map_err(|e| {
-                let m = map_err(e);
-                warn!(target: "lucarne_telegram", error = %m, "create_forum_topic failed");
-                m
-            })?;
+        info!(target: "lucarne_telegram", chat = ?chat, title, "creating forum topic");
+        let params = CreateForumTopicParams {
+            chat_id: chat,
+            name: title.to_string(),
+            icon_color: None,
+            icon_custom_emoji_id: None,
+        };
+        let topic = self.bot.create_forum_topic(&params).await.map_err(|e| {
+            let m = map_err(e);
+            warn!(target: "lucarne_telegram", error = %m, "create_forum_topic failed");
+            m
+        })?;
+        let thread_id = topic.result.message_thread_id;
         info!(
             target: "lucarne_telegram",
-            thread_id = topic.thread_id.0.0,
+            thread_id,
             "forum topic created"
         );
         Ok(WorkspaceHandle::new(
             parent.clone(),
-            WorkspaceId::new(topic.thread_id.0 .0.to_string()),
+            WorkspaceId::new(thread_id.to_string()),
         ))
     }
 
     async fn probe_workspace(&self, handle: &WorkspaceHandle) -> Result<()> {
         let chat = parse_tg_chat_id(&handle.chat)?;
-        let mut req = self.bot.send_chat_action(chat, ChatAction::Typing);
-        if let Some(t) = parse_tg_thread(&handle.workspace) {
-            req = req.message_thread_id(t);
-        }
-        req.await.map_err(map_err)?;
+        let params = SendChatActionParams {
+            business_connection_id: None,
+            chat_id: chat,
+            message_thread_id: parse_tg_thread(&handle.workspace),
+            action: ChatAction::Typing,
+        };
+        self.bot
+            .send_chat_action(&params)
+            .await
+            .map_err(map_err)?;
         Ok(())
     }
 
@@ -420,9 +635,14 @@ impl Channel for TelegramChannel {
         let chat = parse_tg_chat_id(&handle.chat)?;
         let thread = parse_tg_thread(&handle.workspace)
             .ok_or_else(|| ChannelError::Unsupported("rename requires a topic".into()))?;
+        let params = EditForumTopicParams {
+            chat_id: chat,
+            message_thread_id: thread,
+            name: Some(title.to_string()),
+            icon_custom_emoji_id: None,
+        };
         self.bot
-            .edit_forum_topic(chat, thread)
-            .name(title.to_string())
+            .edit_forum_topic(&params)
             .await
             .map_err(map_err)?;
         Ok(())
@@ -432,8 +652,12 @@ impl Channel for TelegramChannel {
         let chat = parse_tg_chat_id(&handle.chat)?;
         let thread = parse_tg_thread(&handle.workspace)
             .ok_or_else(|| ChannelError::Unsupported("delete requires a topic".into()))?;
+        let params = DeleteForumTopicParams {
+            chat_id: chat,
+            message_thread_id: thread,
+        };
         self.bot
-            .delete_forum_topic(chat, thread)
+            .delete_forum_topic(&params)
             .await
             .map_err(map_err)?;
         Ok(())
@@ -455,17 +679,30 @@ impl Channel for TelegramChannel {
     }
 
     async fn download_attachment(&self, att: &IncomingAttachment) -> Result<Vec<u8>> {
-        let file = self
+        let params = GetFileParams {
+            file_id: att.file_ref.clone(),
+        };
+        let file = self.bot.get_file(&params).await.map_err(map_err)?;
+        let path = file
+            .result
+            .file_path
+            .ok_or_else(|| ChannelError::Transport("getFile missing file_path".into()))?;
+        // Official file CDN URL (token stays in path by Telegram design).
+        let url = format!(
+            "https://api.telegram.org/file/bot{}/{}",
+            self.cfg.token, path
+        );
+        let bytes = self
             .bot
-            .get_file(FileId(att.file_ref.clone()))
+            .client
+            .get(url)
+            .send()
             .await
-            .map_err(map_err)?;
-        let mut buf = Vec::with_capacity(file.size as usize);
-        self.bot
-            .download_file(&file.path, &mut buf)
+            .map_err(|e| ChannelError::Transport(format!("download: {e}")))?
+            .bytes()
             .await
-            .map_err(|e| ChannelError::Transport(format!("download: {e}")))?;
-        Ok(buf)
+            .map_err(|e| ChannelError::Transport(format!("download body: {e}")))?;
+        Ok(bytes.to_vec())
     }
 
     async fn acknowledge(&self, target: &WorkspaceHandle) -> Result<()> {
@@ -477,34 +714,38 @@ impl Channel for TelegramChannel {
         let thread = parse_tg_thread(&target.workspace);
         info!(
             target: "lucarne_telegram",
-            chat = chat.0,
-            thread = ?thread.map(|t| t.0.0),
+            chat = ?chat,
+            thread = ?thread,
             filename = %file.filename,
             bytes = file.bytes.len(),
             "uploading file"
         );
-        let input = InputFile::memory(file.bytes).file_name(file.filename);
-        let mut req = self.bot.send_document(chat, input);
-        if let Some(t) = thread {
-            req = req.message_thread_id(t);
-        }
-        if let Some(cap) = file.caption {
-            req = req.caption(cap);
-        }
-        if file.notification.is_silent() {
-            req = req.disable_notification(true);
-        }
-        if let Some(reply_to) = file.reply_to.as_ref() {
-            req = req.reply_parameters(
-                ReplyParameters::new(parse_tg_message_id(reply_to)?).allow_sending_without_reply(),
-            );
-        }
-        let m = req.await.map_err(|e| {
+        let (path, _tmp) = materialize_upload(&file.filename, &file.bytes).await?;
+        let params = SendDocumentParams {
+            business_connection_id: None,
+            chat_id: chat,
+            message_thread_id: thread,
+            direct_messages_topic_id: None,
+            document: TgFileUpload::InputFile(InputFile { path }),
+            thumbnail: None,
+            caption: file.caption,
+            parse_mode: None,
+            caption_entities: None,
+            disable_content_type_detection: None,
+            disable_notification: silent_flag(file.notification.is_silent()),
+            protect_content: None,
+            allow_paid_broadcast: None,
+            message_effect_id: None,
+            suggested_post_parameters: None,
+            reply_parameters: reply_params_from(file.reply_to.as_ref())?,
+            reply_markup: None,
+        };
+        let m = self.bot.send_document(&params).await.map_err(|e| {
             let m = map_err(e);
             warn!(target: "lucarne_telegram", error = %m, "send_document failed");
             m
         })?;
-        Ok(MessageId::new(m.id.0.to_string()))
+        Ok(MessageId::new(m.result.message_id.to_string()))
     }
 
     async fn send_attachment(
@@ -517,8 +758,8 @@ impl Channel for TelegramChannel {
         let kind = telegram_attachment_kind(&attachment.media_type);
         info!(
             target: "lucarne_telegram",
-            chat = chat.0,
-            thread = ?thread.map(|t| t.0.0),
+            chat = ?chat,
+            thread = ?thread,
             filename = %attachment.filename,
             media_type = %attachment.media_type,
             bytes = attachment.bytes.len(),
@@ -533,75 +774,114 @@ impl Channel for TelegramChannel {
             reply_to,
             notification,
         } = attachment;
-        let input = InputFile::memory(bytes).file_name(filename);
-        let reply_parameters = reply_to
-            .as_ref()
-            .map(parse_tg_message_id)
-            .transpose()?
-            .map(|id| ReplyParameters::new(id).allow_sending_without_reply());
-        let message = match kind {
+        let (path, _tmp) = materialize_upload(&filename, &bytes).await?;
+        let file = TgFileUpload::InputFile(InputFile { path });
+        let reply = reply_params_from(reply_to.as_ref())?;
+        let silent = silent_flag(notification.is_silent());
+
+        let message_id = match kind {
             TelegramAttachmentKind::Photo => {
-                let mut req = self.bot.send_photo(chat, input);
-                if let Some(t) = thread {
-                    req = req.message_thread_id(t);
-                }
-                if let Some(cap) = caption {
-                    req = req.caption(cap);
-                }
-                if notification.is_silent() {
-                    req = req.disable_notification(true);
-                }
-                if let Some(reply) = reply_parameters {
-                    req = req.reply_parameters(reply);
-                }
-                req.await.map_err(|e| {
-                    let m = map_err(e);
-                    warn!(target: "lucarne_telegram", error = %m, "send_photo failed");
-                    m
-                })?
+                let params = SendPhotoParams {
+                    business_connection_id: None,
+                    chat_id: chat,
+                    message_thread_id: thread,
+                    direct_messages_topic_id: None,
+                    photo: file,
+                    caption,
+                    parse_mode: None,
+                    caption_entities: None,
+                    show_caption_above_media: None,
+                    has_spoiler: None,
+                    disable_notification: silent,
+                    protect_content: None,
+                    allow_paid_broadcast: None,
+                    message_effect_id: None,
+                    suggested_post_parameters: None,
+                    reply_parameters: reply,
+                    reply_markup: None,
+                };
+                self.bot
+                    .send_photo(&params)
+                    .await
+                    .map_err(|e| {
+                        let m = map_err(e);
+                        warn!(target: "lucarne_telegram", error = %m, "send_photo failed");
+                        m
+                    })?
+                    .result
+                    .message_id
             }
             TelegramAttachmentKind::Video => {
-                let mut req = self.bot.send_video(chat, input);
-                if let Some(t) = thread {
-                    req = req.message_thread_id(t);
-                }
-                if let Some(cap) = caption {
-                    req = req.caption(cap);
-                }
-                if notification.is_silent() {
-                    req = req.disable_notification(true);
-                }
-                if let Some(reply) = reply_parameters {
-                    req = req.reply_parameters(reply);
-                }
-                req.await.map_err(|e| {
-                    let m = map_err(e);
-                    warn!(target: "lucarne_telegram", error = %m, "send_video failed");
-                    m
-                })?
+                let params = SendVideoParams {
+                    business_connection_id: None,
+                    chat_id: chat,
+                    message_thread_id: thread,
+                    direct_messages_topic_id: None,
+                    video: file,
+                    duration: None,
+                    width: None,
+                    height: None,
+                    thumbnail: None,
+                    cover: None,
+                    start_timestamp: None,
+                    caption,
+                    parse_mode: None,
+                    caption_entities: None,
+                    show_caption_above_media: None,
+                    has_spoiler: None,
+                    supports_streaming: None,
+                    disable_notification: silent,
+                    protect_content: None,
+                    allow_paid_broadcast: None,
+                    message_effect_id: None,
+                    suggested_post_parameters: None,
+                    reply_parameters: reply,
+                    reply_markup: None,
+                };
+                self.bot
+                    .send_video(&params)
+                    .await
+                    .map_err(|e| {
+                        let m = map_err(e);
+                        warn!(target: "lucarne_telegram", error = %m, "send_video failed");
+                        m
+                    })?
+                    .result
+                    .message_id
             }
             TelegramAttachmentKind::Document => {
-                let mut req = self.bot.send_document(chat, input);
-                if let Some(t) = thread {
-                    req = req.message_thread_id(t);
-                }
-                if let Some(cap) = caption {
-                    req = req.caption(cap);
-                }
-                if notification.is_silent() {
-                    req = req.disable_notification(true);
-                }
-                if let Some(reply) = reply_parameters {
-                    req = req.reply_parameters(reply);
-                }
-                req.await.map_err(|e| {
-                    let m = map_err(e);
-                    warn!(target: "lucarne_telegram", error = %m, "send_document failed");
-                    m
-                })?
+                let params = SendDocumentParams {
+                    business_connection_id: None,
+                    chat_id: chat,
+                    message_thread_id: thread,
+                    direct_messages_topic_id: None,
+                    document: file,
+                    thumbnail: None,
+                    caption,
+                    parse_mode: None,
+                    caption_entities: None,
+                    disable_content_type_detection: None,
+                    disable_notification: silent,
+                    protect_content: None,
+                    allow_paid_broadcast: None,
+                    message_effect_id: None,
+                    suggested_post_parameters: None,
+                    reply_parameters: reply,
+                    reply_markup: None,
+                };
+                self.bot
+                    .send_document(&params)
+                    .await
+                    .map_err(|e| {
+                        let m = map_err(e);
+                        warn!(target: "lucarne_telegram", error = %m, "send_document failed");
+                        m
+                    })?
+                    .result
+                    .message_id
             }
         };
-        Ok(MessageId::new(message.id.0.to_string()))
+        Ok(MessageId::new(message_id.to_string()))
     }
 
     async fn answer_command_query(
@@ -613,29 +893,41 @@ impl Channel for TelegramChannel {
             .into_iter()
             .take(50)
             .map(|result| {
-                InlineQueryResult::Article(
-                    InlineQueryResultArticle::new(
-                        result.id,
-                        result.title,
-                        InputMessageContent::Text(InputMessageContentText::new(
-                            result.message_text,
-                        )),
-                    )
-                    .description(result.description.unwrap_or_default()),
-                )
+                let article = InlineQueryResultArticle {
+                    id: result.id,
+                    title: result.title,
+                    input_message_content: InputMessageContent::Text(InputTextMessageContent {
+                        message_text: result.message_text,
+                        parse_mode: None,
+                        entities: None,
+                        link_preview_options: None,
+                    }),
+                    reply_markup: None,
+                    url: None,
+                    #[allow(deprecated)]
+                    hide_url: None,
+                    description: Some(result.description.unwrap_or_default()),
+                    thumbnail_url: None,
+                    thumbnail_width: None,
+                    thumbnail_height: None,
+                };
+                InlineQueryResult::from(article)
             })
             .collect::<Vec<_>>();
 
-        self.bot
-            .answer_inline_query(query.id.clone().into(), tg_results)
-            .is_personal(true)
-            .cache_time(0)
-            .await
-            .map_err(|e| {
-                let m = map_err(e);
-                warn!(target: "lucarne_telegram", error = %m, "answer_inline_query failed");
-                m
-            })?;
+        let params = AnswerInlineQueryParams {
+            inline_query_id: query.id.clone(),
+            results: tg_results,
+            cache_time: Some(0),
+            is_personal: Some(true),
+            next_offset: None,
+            button: None,
+        };
+        self.bot.answer_inline_query(&params).await.map_err(|e| {
+            let m = map_err(e);
+            warn!(target: "lucarne_telegram", error = %m, "answer_inline_query failed");
+            m
+        })?;
         Ok(())
     }
 }
@@ -648,22 +940,23 @@ async fn poll_updates(
 ) -> Result<()> {
     lucarne::memory_profile_snapshot!("lucarne_telegram.channel.poll_updates.start");
     info!(target: "lucarne_telegram", "long-poll loop starting");
-    let allowed = [
+    let allowed = vec![
         AllowedUpdate::Message,
         AllowedUpdate::CallbackQuery,
         AllowedUpdate::ChannelPost,
         AllowedUpdate::InlineQuery,
     ];
-    let mut offset: i32 = 0;
+    let mut offset: i64 = 0;
     loop {
-        let res = bot
-            .get_updates()
-            .offset(offset)
-            .timeout(GET_UPDATES_TIMEOUT_SECS)
-            .allowed_updates(allowed.to_vec())
-            .await;
+        let params = GetUpdatesParams {
+            offset: Some(offset),
+            limit: None,
+            timeout: Some(GET_UPDATES_TIMEOUT_SECS),
+            allowed_updates: Some(allowed.clone()),
+        };
+        let res = bot.get_updates(&params).await;
         let updates = match res {
-            Ok(u) => u,
+            Ok(resp) => resp.result,
             Err(e) => {
                 warn!(target: "lucarne_telegram", error = %e, "getUpdates error, sleeping 3s");
                 tokio::time::sleep(Duration::from_secs(3)).await;
@@ -674,7 +967,7 @@ async fn poll_updates(
             debug!(target: "lucarne_telegram", count = updates.len(), "received updates");
         }
         for u in updates {
-            offset = u.id.0 as i32 + 1;
+            offset = i64::from(u.update_id) + 1;
             if let Some(ev) = translate_update(u, &cfg) {
                 if tx.send(ev).await.is_err() {
                     warn!(target: "lucarne_telegram", "event channel closed, exiting poll loop");
@@ -685,47 +978,50 @@ async fn poll_updates(
     }
 }
 
-fn translate_update(u: teloxide::types::Update, cfg: &TelegramConfig) -> Option<ChannelEvent> {
-    match u.kind {
-        UpdateKind::Message(m) => {
-            if !authorized(cfg, m.from.as_ref().map(|u| u.id.0 as i64)) {
+fn translate_update(u: Update, cfg: &TelegramConfig) -> Option<ChannelEvent> {
+    match u.content {
+        UpdateContent::Message(m) | UpdateContent::ChannelPost(m) => {
+            if !authorized(cfg, m.from.as_ref().map(|u| u.id as i64)) {
                 debug!(target: "lucarne_telegram", "ignoring unauthorized message");
                 return None;
             }
-            let chat = ChatId::new(m.chat.id.0.to_string());
-            let workspace = m.thread_id.map(|t| WorkspaceId::new(t.0 .0.to_string()));
+            let chat = ChatId::new(m.chat.id.to_string());
+            let workspace = m
+                .message_thread_id
+                .map(|t| WorkspaceId::new(t.to_string()));
             let user = m
                 .from
                 .as_ref()
                 .map(|u| {
                     u.username
                         .clone()
-                        .unwrap_or_else(|| format!("id:{}", u.id.0))
+                        .unwrap_or_else(|| format!("id:{}", u.id))
                 })
                 .unwrap_or_else(|| "unknown".into());
-            let text = m.text().or_else(|| m.caption()).map(|s| s.to_string());
+            let text = m.text.clone().or_else(|| m.caption.clone());
             let reply_to = m
-                .reply_to_message()
-                .map(|reply| MessageId::new(reply.id.0.to_string()));
+                .reply_to_message
+                .as_ref()
+                .map(|reply| MessageId::new(reply.message_id.to_string()));
             let mut attachments = Vec::new();
-            if let Some(photo) = m.photo().and_then(largest_photo) {
+            if let Some(photo) = m.photo.as_deref().and_then(largest_photo) {
                 attachments.push(IncomingAttachment {
-                    file_ref: photo.file.id.clone().to_string(),
+                    file_ref: photo.file_id.clone(),
                     filename: Some("photo.jpg".into()),
                     mime_type: Some("image/jpeg".into()),
-                    size: Some(photo.file.size as u64),
+                    size: photo.file_size,
                 });
             }
-            if let Some(doc) = m.document() {
+            if let Some(doc) = m.document.as_ref() {
                 attachments.push(IncomingAttachment {
-                    file_ref: doc.file.id.clone().to_string(),
+                    file_ref: doc.file_id.clone(),
                     filename: doc.file_name.clone(),
-                    mime_type: doc.mime_type.as_ref().map(|m| m.to_string()),
-                    size: Some(doc.file.size as u64),
+                    mime_type: doc.mime_type.clone(),
+                    size: doc.file_size,
                 });
             }
             Some(ChannelEvent::Message(IncomingMessage {
-                message_id: MessageId::new(m.id.0.to_string()),
+                message_id: MessageId::new(m.message_id.to_string()),
                 chat,
                 workspace,
                 reply_to,
@@ -734,8 +1030,8 @@ fn translate_update(u: teloxide::types::Update, cfg: &TelegramConfig) -> Option<
                 attachments,
             }))
         }
-        UpdateKind::InlineQuery(q) => {
-            if !authorized(cfg, Some(q.from.id.0 as i64)) {
+        UpdateContent::InlineQuery(q) => {
+            if !authorized(cfg, Some(q.from.id as i64)) {
                 debug!(target: "lucarne_telegram", "ignoring unauthorized inline query");
                 return None;
             }
@@ -743,35 +1039,38 @@ fn translate_update(u: teloxide::types::Update, cfg: &TelegramConfig) -> Option<
                 .from
                 .username
                 .clone()
-                .unwrap_or_else(|| format!("id:{}", q.from.id.0));
+                .unwrap_or_else(|| format!("id:{}", q.from.id));
             Some(ChannelEvent::CommandQuery(CommandQuery {
-                id: q.id.0,
+                id: q.id,
                 user,
                 query: q.query,
-                chat_type: q.chat_type.map(|kind| format!("{kind:?}")),
+                chat_type: q.chat_type,
             }))
         }
-        UpdateKind::CallbackQuery(q) => {
-            if !authorized(cfg, Some(q.from.id.0 as i64)) {
+        UpdateContent::CallbackQuery(q) => {
+            if !authorized(cfg, Some(q.from.id as i64)) {
                 return None;
             }
             let data = q.data?;
             let msg = q.message?;
-            let (chat_id, workspace, message_id) = match &msg {
-                MaybeInaccessibleMessage::Regular(m) => (
+            let (chat_id, workspace, message_id) = match msg {
+                MaybeInaccessibleMessage::Message(m) => (
                     m.chat.id,
-                    m.thread_id.map(|t| WorkspaceId::new(t.0 .0.to_string())),
-                    m.id,
+                    m.message_thread_id
+                        .map(|t| WorkspaceId::new(t.to_string())),
+                    m.message_id,
                 ),
-                MaybeInaccessibleMessage::Inaccessible(m) => (m.chat.id, None, m.message_id),
+                MaybeInaccessibleMessage::InaccessibleMessage(m) => {
+                    (m.chat.id, None, m.message_id)
+                }
             };
-            let chat = ChatId::new(chat_id.0.to_string());
-            let source_message = MessageId::new(message_id.0.to_string());
+            let chat = ChatId::new(chat_id.to_string());
+            let source_message = MessageId::new(message_id.to_string());
             let user = q
                 .from
                 .username
                 .clone()
-                .unwrap_or_else(|| format!("id:{}", q.from.id.0));
+                .unwrap_or_else(|| format!("id:{}", q.from.id));
             Some(ChannelEvent::Button {
                 chat,
                 workspace,
@@ -784,7 +1083,7 @@ fn translate_update(u: teloxide::types::Update, cfg: &TelegramConfig) -> Option<
     }
 }
 
-fn largest_photo(photos: &[teloxide::types::PhotoSize]) -> Option<&teloxide::types::PhotoSize> {
+fn largest_photo(photos: &[PhotoSize]) -> Option<&PhotoSize> {
     photos
         .iter()
         .max_by_key(|p| u64::from(p.width) * u64::from(p.height))
@@ -874,10 +1173,57 @@ mod tests {
             .expect("production source");
         assert!(source.contains("pub fn start_with_client"));
         assert!(source.contains("http_client: reqwest::Client"));
+        // Daemon still injects its client for API stability; frankenstein uses
+        // reqwest 0.13 so we rebuild an equivalent client rather than sharing
+        // the 0.12 handle with wechat-ilink.
         assert!(
-            source.contains("Bot::with_client(cfg.token.clone(), http_client)"),
-            "Telegram bot must use the shared reqwest client"
+            source.contains("frankenstein::reqwest::Client::builder()"),
+            "Telegram bot must construct a frankenstein-compatible HTTP client"
         );
+        assert!(
+            !source.contains("teloxide"),
+            "teloxide must be fully removed from channel production code"
+        );
+    }
+
+    #[test]
+    fn build_keyboard_preserves_row_and_column_layout_and_callback_data() {
+        let rows = vec![
+            vec![
+                OutgoingButton {
+                    label: "A".into(),
+                    data: "a:1".into(),
+                },
+                OutgoingButton {
+                    label: "B".into(),
+                    data: "b:2".into(),
+                },
+            ],
+            vec![OutgoingButton {
+                label: "C".into(),
+                data: "c:3".into(),
+            }],
+        ];
+        let kb = build_keyboard(&rows).expect("keyboard");
+        assert_eq!(kb.inline_keyboard.len(), 2, "two rows");
+        assert_eq!(kb.inline_keyboard[0].len(), 2, "first row has 2 buttons");
+        assert_eq!(kb.inline_keyboard[1].len(), 1, "second row has 1 button");
+        assert_eq!(kb.inline_keyboard[0][0].text, "A");
+        assert_eq!(
+            kb.inline_keyboard[0][0].callback_data.as_deref(),
+            Some("a:1")
+        );
+        assert_eq!(
+            kb.inline_keyboard[0][1].callback_data.as_deref(),
+            Some("b:2")
+        );
+        assert_eq!(
+            kb.inline_keyboard[1][0].callback_data.as_deref(),
+            Some("c:3")
+        );
+        // No accidental URL/pay buttons — callback-only contract for bot routing.
+        assert!(kb.inline_keyboard[0][0].url.is_none());
+        assert!(kb.inline_keyboard[0][0].pay.is_none());
     }
 
     #[test]
@@ -896,8 +1242,30 @@ mod tests {
     }
 
     #[test]
+    fn agent_rich_and_ui_markdown_v2_are_split() {
+        let source = include_str!("channel.rs")
+            .split("\n#[cfg(test)]")
+            .next()
+            .expect("production source");
+        assert!(source.contains("send_rich_message"));
+        assert!(source.contains("InputRichMessage"));
+        assert!(
+            source.contains("render_telegram_markdown_v2"),
+            "UI chrome must keep MarkdownV2 path"
+        );
+        assert!(
+            source.contains("TextFormat::Rich"),
+            "only TextFormat::Rich may use rich messages"
+        );
+        assert!(
+            source.contains("callback_data"),
+            "inline buttons must keep callback_data for bot routing"
+        );
+    }
+
+    #[test]
     fn photo_message_becomes_image_attachment_with_caption_text() {
-        let update: teloxide::types::Update = serde_json::from_str(
+        let update: Update = serde_json::from_str(
             r#"{
                 "update_id": 1,
                 "message": {
@@ -951,6 +1319,47 @@ mod tests {
         assert_eq!(msg.attachments[0].size, Some(12345));
     }
 
+    #[test]
+    fn callback_query_keeps_callback_data_and_source_message() {
+        let update: Update = serde_json::from_str(
+            r#"{
+                "update_id": 2,
+                "callback_query": {
+                    "id": "cb1",
+                    "from": {
+                        "id": 123,
+                        "is_bot": false,
+                        "first_name": "era",
+                        "username": "era"
+                    },
+                    "message": {
+                        "message_id": 42,
+                        "date": 1,
+                        "chat": { "id": 100, "type": "supergroup", "title": "lucarne" },
+                        "message_thread_id": 7,
+                        "text": "pick"
+                    },
+                    "chat_instance": "x",
+                    "data": "agentcmd:c:t1"
+                }
+            }"#,
+        )
+        .unwrap();
+        let ev = translate_update(update, &test_config()).expect("button event");
+        let ChannelEvent::Button {
+            data,
+            source_message,
+            workspace,
+            ..
+        } = ev
+        else {
+            panic!("expected button");
+        };
+        assert_eq!(data, "agentcmd:c:t1");
+        assert_eq!(source_message.as_str(), "42");
+        assert_eq!(workspace.as_ref().map(|w| w.as_str()), Some("7"));
+    }
+
     fn real_bot_api_channel_from_env() -> Option<Arc<TelegramChannel>> {
         let _ = dotenvy::dotenv();
         if std::env::var("LUCARNE_TELEGRAM_REAL_E2E").ok().as_deref() != Some("1") {
@@ -969,7 +1378,7 @@ mod tests {
         });
         let (_tx, rx) = tokio::sync::mpsc::channel(EVENT_QUEUE);
         Some(Arc::new(TelegramChannel {
-            bot: Bot::new(token),
+            bot: Bot::new(&token),
             events_rx: Mutex::new(Some(rx)),
             _poll_task: tokio::spawn(async { std::future::pending::<()>().await }),
             cfg,

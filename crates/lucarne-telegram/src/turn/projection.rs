@@ -273,7 +273,8 @@ async fn delete_preview(channel: &dyn Channel, target: &WorkspaceHandle, id: &Me
 }
 
 fn final_reply_message(text: String) -> OutgoingMessage {
-    OutgoingMessage::markdown(text)
+    // Agent final answers use Telegram Rich Messages; UI chrome stays MarkdownV2.
+    OutgoingMessage::rich(text)
 }
 
 pub(super) fn maybe_reply_to(

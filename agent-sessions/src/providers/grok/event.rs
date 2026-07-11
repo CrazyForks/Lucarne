@@ -473,7 +473,7 @@ impl crate::watch::provider::ProviderWatchEvents for super::Grok {
         path: &std::path::Path,
         is_recent: bool,
     ) -> bool {
-        if super::is_subagent_path(path) {
+        if super::is_subagent_session(path) {
             return false;
         }
         // Session dirs hold noise trees (terminal/compaction/goal/…). Only watch

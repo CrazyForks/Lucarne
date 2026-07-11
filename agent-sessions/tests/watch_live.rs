@@ -312,6 +312,21 @@ fn write_grok_session_layout(
     cwd: &str,
     baseline_lines: &str,
 ) -> std::path::PathBuf {
+    write_grok_session_layout_kind(sessions_root, session_id, cwd, baseline_lines, None, None)
+}
+
+/// Grok also materializes harness subagents as *top-level* session dirs with
+/// `summary.json` `session_kind` (`subagent` / `subagent_fork`), not only under
+/// `parent/subagents/`.
+#[cfg(feature = "grok")]
+fn write_grok_session_layout_kind(
+    sessions_root: &Path,
+    session_id: &str,
+    cwd: &str,
+    baseline_lines: &str,
+    session_kind: Option<&str>,
+    parent_session_id: Option<&str>,
+) -> std::path::PathBuf {
     let session_dir = sessions_root
         .join(percent_encode_cwd(cwd))
         .join(session_id);
@@ -319,14 +334,69 @@ fn write_grok_session_layout(
     let updates = session_dir.join("updates.jsonl");
     let summary = session_dir.join("summary.json");
     fs::write(&updates, baseline_lines).unwrap();
+    let mut summary_json = serde_json::json!({
+        "info": { "id": session_id, "cwd": cwd },
+        "generated_title": "Grok live watch",
+        "current_model_id": "grok-4.5",
+    });
+    if let Some(kind) = session_kind {
+        summary_json["session_kind"] = serde_json::Value::String(kind.to_string());
+    }
+    if let Some(parent) = parent_session_id {
+        summary_json["parent_session_id"] = serde_json::Value::String(parent.to_string());
+    }
     fs::write(
         &summary,
-        format!(
-            r#"{{"info":{{"id":"{session_id}","cwd":"{cwd}"}},"generated_title":"Grok live watch","current_model_id":"grok-4.5"}}"#
-        ),
+        serde_json::to_string_pretty(&summary_json).expect("summary json"),
     )
     .unwrap();
     updates
+}
+
+/// Channel-facing bodies seen on watch updates (Grok uses TurnCompleted).
+#[cfg(feature = "grok")]
+fn channel_bodies(update: &WatchUpdate) -> Vec<String> {
+    update
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            WatchEvent::TurnCompleted(completed) => completed
+                .last_agent_message
+                .as_ref()
+                .map(|s| s.to_string()),
+            WatchEvent::AssistantMessage(message)
+                if message.phase.is_none() && message.text.is_some() =>
+            {
+                message.text.as_ref().map(|s| s.to_string())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Wait until `want` is seen; return every channel body observed (for negative asserts).
+#[cfg(feature = "grok")]
+async fn wait_for_body_collecting(
+    watcher: &mut SessionWatcher,
+    want: &str,
+) -> (WatchUpdate, Vec<(Option<String>, String)>) {
+    let deadline = Instant::now() + Duration::from_secs(6);
+    let mut seen = Vec::new();
+    while Instant::now() < deadline {
+        let updates = recv_timeout(watcher, Duration::from_millis(250))
+            .await
+            .unwrap();
+        for update in updates {
+            let session = update.session_id.as_ref().map(|s| s.to_string());
+            for body in channel_bodies(&update) {
+                seen.push((session.clone(), body.clone()));
+                if body == want {
+                    return (update, seen);
+                }
+            }
+        }
+    }
+    panic!("missing assistant body {want}; seen={seen:?}");
 }
 
 #[cfg(feature = "grok")]
@@ -531,6 +601,185 @@ async fn live_grok_watch_large_baseline_append_only_emits_delta() {
         body_count <= 4,
         "expected bounded delta events, got {body_count} body events in {:?}",
         update.events
+    );
+}
+
+/// Live regression for WeChat "Done" / "Not Refuted" spam:
+/// Grok Goal Plan Writer / adversarial verifiers land as top-level session dirs
+/// with `session_kind=subagent_fork|subagent`. Watch must still deliver the
+/// primary session reply and must never surface the harness "Done" body.
+#[cfg(all(
+    feature = "grok",
+    any(target_os = "macos", windows, target_os = "linux")
+))]
+#[tokio::test]
+async fn live_grok_watch_ignores_top_level_subagent_done_while_primary_notifies() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("grok-home").join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    let mut watcher = start_file_watcher(watch_provider("grok"), &root).await;
+
+    let cwd = "/tmp/grok-subagent-noise";
+    let primary_sid = "019f50b7-primary-000000000001";
+    let subagent_sid = "019f50b7-subagent-000000000002";
+
+    let primary_path = write_grok_session_layout(
+        &root,
+        primary_sid,
+        cwd,
+        &format!(
+            "{}\n",
+            grok_user_line(primary_sid, "2026-05-03T00:00:01.000Z", "do the work")
+        ),
+    );
+    let subagent_path = write_grok_session_layout_kind(
+        &root,
+        subagent_sid,
+        cwd,
+        &format!(
+            "{}\n",
+            grok_user_line(
+                subagent_sid,
+                "2026-05-03T00:00:01.000Z",
+                "You are the Goal Plan Writer for the xAI Grok Build harness."
+            )
+        ),
+        Some("subagent_fork"),
+        Some(primary_sid),
+    );
+    // Nested copy under parent/subagents/ (path exclusion alone used to be enough
+    // for this tree, but the top-level dir above is the regression surface).
+    let nested = root
+        .join(percent_encode_cwd(cwd))
+        .join(primary_sid)
+        .join("subagents")
+        .join(subagent_sid);
+    fs::create_dir_all(&nested).unwrap();
+    fs::copy(
+        subagent_path.parent().unwrap().join("summary.json"),
+        nested.join("summary.json"),
+    )
+    .unwrap();
+    fs::copy(&subagent_path, nested.join("updates.jsonl")).unwrap();
+
+    let _ = recv_timeout(&mut watcher, Duration::from_millis(500)).await;
+
+    // Harness noise first (this is what used to flood WeChat).
+    for line in grok_assistant_turn(subagent_sid, "2026-05-03T00:02:06.000Z", "Done").lines() {
+        append_line(&subagent_path, line);
+        append_line(&nested.join("updates.jsonl"), line);
+    }
+    // Primary real reply after noise.
+    for line in
+        grok_assistant_turn(primary_sid, "2026-05-03T00:02:10.000Z", "primary real reply").lines()
+    {
+        append_line(&primary_path, line);
+    }
+
+    let (update, seen) =
+        wait_for_body_collecting(&mut watcher, "primary real reply").await;
+    assert_eq!(update.provider, watch_provider("grok"));
+    assert_eq!(update.session_id.as_deref(), Some(primary_sid));
+
+    // Drain a bit longer: subagent "Done" must never appear as a channel body.
+    let mut more = seen;
+    for _ in 0..8 {
+        let updates = recv_timeout(&mut watcher, Duration::from_millis(150))
+            .await
+            .unwrap();
+        for update in updates {
+            let session = update.session_id.as_ref().map(|s| s.to_string());
+            for body in channel_bodies(&update) {
+                more.push((session.clone(), body));
+            }
+        }
+    }
+
+    let done_hits: Vec<_> = more
+        .iter()
+        .filter(|(_, body)| body == "Done")
+        .collect();
+    assert!(
+        done_hits.is_empty(),
+        "top-level subagent_fork must not notify channels with harness Done; seen={more:?}"
+    );
+    assert!(
+        more.iter().any(|(sid, body)| {
+            sid.as_deref() == Some(primary_sid) && body == "primary real reply"
+        }),
+        "primary session must still notify; seen={more:?}"
+    );
+    assert!(
+        more.iter()
+            .all(|(sid, _)| sid.as_deref() != Some(subagent_sid)),
+        "no watch update should bind the subagent session id; seen={more:?}"
+    );
+}
+
+/// Discovery-level live fixture: top-level subagent sessions are not history sources.
+#[cfg(feature = "grok")]
+#[test]
+fn live_grok_discovery_skips_top_level_subagent_sessions() {
+    let temp = tempfile::tempdir().unwrap();
+    let grok_home = temp.path().join("grok-home");
+    let sessions = grok_home.join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let cwd = "/tmp/grok-discovery-subagent";
+    let primary = "019f50b7-discover-primary-000001";
+    let subagent = "019f50b7-discover-subagent-000002";
+    write_grok_session_layout(
+        &sessions,
+        primary,
+        cwd,
+        &format!(
+            "{}\n",
+            grok_user_line(primary, "2026-05-03T00:00:01.000Z", "ping")
+        ),
+    );
+    write_grok_session_layout_kind(
+        &sessions,
+        subagent,
+        cwd,
+        &format!(
+            "{}\n",
+            grok_user_line(subagent, "2026-05-03T00:00:01.000Z", "Done plan")
+        ),
+        Some("subagent"),
+        None,
+    );
+
+    let prev = std::env::var_os("GROK_HOME");
+    // SAFETY: test-only env mutation, restored below.
+    unsafe { std::env::set_var("GROK_HOME", &grok_home) };
+
+    let provider = agent_sessions::agent_provider("grok").expect("grok");
+    let mut sources = Vec::new();
+    provider
+        .discover_sources_into(&mut |source| sources.push(source))
+        .expect("discover");
+
+    match prev {
+        Some(v) => unsafe { std::env::set_var("GROK_HOME", v) },
+        None => unsafe { std::env::remove_var("GROK_HOME") },
+    }
+
+    let ids: Vec<String> = sources
+        .iter()
+        .filter_map(|src| {
+            src.path()
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string())
+        })
+        .collect();
+    assert!(
+        ids.iter().any(|id| id == primary),
+        "primary must be discovered; got {ids:?}"
+    );
+    assert!(
+        !ids.iter().any(|id| id == subagent),
+        "top-level subagent must not be a history source; got {ids:?}"
     );
 }
 

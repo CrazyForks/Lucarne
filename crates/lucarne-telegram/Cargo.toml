@@ -21,8 +21,8 @@ smol_str = { workspace = true }
 base64 = "0.22"
 reqwest = { workspace = true }
 rusqlite = { workspace = true }
-
-teloxide = { version = "0.17", default-features = false, features = ["native-tls"] }
+frankenstein = { version = "0.50.2", features = ["client-reqwest"] }
+tempfile.workspace = true
 
 [dev-dependencies]
 agent-sessions = { path = "../../agent-sessions", features = ["discovery", "agent_session", "watch", "codex"] }

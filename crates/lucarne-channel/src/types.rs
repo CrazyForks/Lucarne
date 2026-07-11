@@ -117,6 +117,17 @@ impl OutgoingMessage {
             notification: NotificationPolicy::Notify,
         }
     }
+    /// Agent conversation body (assistant final / notification). Prefer rich
+    /// rendering on channels that support it.
+    pub fn rich(body: impl Into<String>) -> Self {
+        Self {
+            body: body.into(),
+            format: super::TextFormat::Rich,
+            buttons: Vec::new(),
+            reply_to: None,
+            notification: NotificationPolicy::Notify,
+        }
+    }
     pub fn with_buttons(mut self, rows: Vec<Vec<OutgoingButton>>) -> Self {
         self.buttons = rows;
         self

@@ -691,6 +691,68 @@ pub(crate) fn is_subagent_path(path: &Path) -> bool {
         .any(|c| c.as_os_str() == "subagents")
 }
 
+/// True when this path belongs to a Grok subagent session that must not enter
+/// history/watch notifications.
+///
+/// Grok writes subagents twice:
+/// 1. Nested under `parent/subagents/<id>/` (caught by [`is_subagent_path`])
+/// 2. As a full top-level session dir with `summary.json` `session_kind` of
+///    `subagent` or `subagent_fork` (harness roles like Goal Plan Writer /
+///    Adversarial Verifier that emit "Done" / "Not Refuted")
+///
+/// Path-only exclusion misses (2) and floods WeChat/Telegram.
+pub(crate) fn is_subagent_session(path: &Path) -> bool {
+    if is_subagent_path(path) {
+        return true;
+    }
+    let Some(summary) = summary_path_for_session_path(path) else {
+        return false;
+    };
+    summary_marks_subagent(&summary)
+}
+
+fn summary_path_for_session_path(path: &Path) -> Option<PathBuf> {
+    if path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n == "summary.json")
+    {
+        return Some(path.to_path_buf());
+    }
+    if is_updates_jsonl(path) {
+        return path.parent().map(|dir| dir.join("summary.json"));
+    }
+    // Session uuid directory (watch/discovery expand session roots).
+    if path.is_dir() {
+        return Some(path.join("summary.json"));
+    }
+    // Sidecar file inside a session dir (resources_state.json, etc.).
+    path.parent().map(|dir| dir.join("summary.json"))
+}
+
+fn summary_marks_subagent(summary: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(summary) else {
+        return false;
+    };
+    let Ok(raw) = serde_json::from_slice::<RawSummaryKindProbe>(&bytes) else {
+        return false;
+    };
+    raw.session_kind
+        .as_deref()
+        .is_some_and(is_subagent_session_kind)
+}
+
+fn is_subagent_session_kind(kind: &str) -> bool {
+    let kind = kind.trim();
+    kind == "subagent" || kind == "subagent_fork" || kind.starts_with("subagent")
+}
+
+#[derive(Debug, Deserialize)]
+struct RawSummaryKindProbe {
+    #[serde(default)]
+    session_kind: Option<String>,
+}
+
 pub(crate) fn is_updates_jsonl(path: &Path) -> bool {
     path.file_name()
         .and_then(|n| n.to_str())
@@ -786,6 +848,37 @@ pub(super) fn format_ask_user_question_notify(input_json: Option<&str>) -> Optio
         }
     }
     wrote_question.then_some(body)
+}
+
+#[cfg(test)]
+mod subagent_session_tests {
+    use super::*;
+
+    #[test]
+    fn session_kind_probe_matches_harness_roles() {
+        assert!(is_subagent_session_kind("subagent"));
+        assert!(is_subagent_session_kind("subagent_fork"));
+        assert!(is_subagent_session_kind("subagent_something_new"));
+        assert!(!is_subagent_session_kind("primary"));
+        assert!(!is_subagent_session_kind(""));
+    }
+
+    #[test]
+    fn top_level_summary_kind_excludes_without_subagents_path_segment() {
+        let temp = tempfile::tempdir().expect("temp");
+        let session = temp.path().join("enc").join("child");
+        std::fs::create_dir_all(&session).expect("dir");
+        std::fs::write(
+            session.join("summary.json"),
+            r#"{"session_kind":"subagent_fork","parent_session_id":"parent"}"#,
+        )
+        .expect("summary");
+        let updates = session.join("updates.jsonl");
+        std::fs::write(&updates, "").expect("updates");
+        assert!(is_subagent_session(&updates));
+        assert!(is_subagent_session(&session));
+        assert!(!is_subagent_path(&updates));
+    }
 }
 
 #[cfg(test)]

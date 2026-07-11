@@ -6,7 +6,7 @@ use crate::providers::AgentProviderSource;
 use crate::{Error, Result};
 use tracing::trace;
 
-use super::{Grok, is_subagent_path, is_updates_jsonl, sessions_root};
+use super::{Grok, is_subagent_session, is_updates_jsonl, sessions_root};
 
 impl Grok {
     pub fn default_roots() -> Vec<PathBuf> {
@@ -87,7 +87,7 @@ impl DiscoverableProvider for Grok {
     }
 
     fn candidate_role(_root: &Path, path: &Path) -> CandidateRole {
-        if is_subagent_path(path) {
+        if is_subagent_session(path) {
             CandidateRole::Subagent
         } else {
             CandidateRole::Primary
@@ -100,7 +100,8 @@ impl DiscoverableProvider for Grok {
         // to updates.jsonl. Common watch uses a coarse is_session_like_path
         // (any *.json / *.jsonl); without this gate those sidecars are queued
         // as session files and can thrash/kill the notify kqueue loop.
-        if is_subagent_path(path) {
+        // Also drop top-level subagent/subagent_fork sessions (summary.session_kind).
+        if is_subagent_session(path) {
             return false;
         }
         if path.is_dir() {
@@ -320,5 +321,70 @@ mod tests {
             &root,
             &session_dir.join("updates.jsonl")
         ));
+    }
+
+    /// Grok materializes subagents as *top-level* session dirs (full
+    /// updates.jsonl + summary.json) *and* under parent/subagents/. Path-only
+    /// `subagents/` exclusion misses the top-level copy, so history watch
+    /// notifies channels with harness noise ("Done", "Not Refuted").
+    #[test]
+    fn history_excludes_top_level_subagent_session_marked_in_summary() {
+        let temp = tempfile::tempdir().expect("temp");
+        let root = temp.path().join("sessions");
+        let primary = root.join("enc").join("primary-uuid");
+        let subagent = root.join("enc").join("subagent-uuid");
+        let subagent_fork = root.join("enc").join("fork-uuid");
+        for dir in [&primary, &subagent, &subagent_fork] {
+            std::fs::create_dir_all(dir).expect("session dir");
+            std::fs::write(dir.join("updates.jsonl"), "{}\n").expect("updates");
+        }
+        std::fs::write(
+            primary.join("summary.json"),
+            r#"{"info":{"id":"primary-uuid","cwd":"/tmp"},"generated_title":"real work"}"#,
+        )
+        .expect("primary summary");
+        std::fs::write(
+            subagent.join("summary.json"),
+            r#"{"info":{"id":"subagent-uuid","cwd":"/tmp"},"session_kind":"subagent","generated_title":"Adversarial Verifier"}"#,
+        )
+        .expect("subagent summary");
+        std::fs::write(
+            subagent_fork.join("summary.json"),
+            r#"{"info":{"id":"fork-uuid","cwd":"/tmp"},"session_kind":"subagent_fork","parent_session_id":"primary-uuid","generated_title":"Goal Plan Writer"}"#,
+        )
+        .expect("fork summary");
+
+        assert!(
+            Grok::includes_candidate_in_history(&root, &primary.join("updates.jsonl")),
+            "primary session must stay in history"
+        );
+        assert!(
+            Grok::includes_candidate_in_history(&root, &primary),
+            "primary session dir must stay expandable"
+        );
+        assert!(
+            !Grok::includes_candidate_in_history(&root, &subagent.join("updates.jsonl")),
+            "top-level session_kind=subagent must not enter history/watch"
+        );
+        assert!(
+            !Grok::includes_candidate_in_history(&root, &subagent),
+            "top-level subagent session dir must not expand into history"
+        );
+        assert!(
+            !Grok::includes_candidate_in_history(&root, &subagent_fork.join("updates.jsonl")),
+            "top-level session_kind=subagent_fork must not enter history/watch"
+        );
+        assert_eq!(
+            Grok::candidate_role(&root, &subagent.join("updates.jsonl")),
+            CandidateRole::Subagent
+        );
+        assert_eq!(
+            Grok::candidate_role(&root, &subagent_fork.join("updates.jsonl")),
+            CandidateRole::Subagent
+        );
+        assert_eq!(
+            Grok::candidate_role(&root, &primary.join("updates.jsonl")),
+            CandidateRole::Primary
+        );
     }
 }

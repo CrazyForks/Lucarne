@@ -716,7 +716,7 @@ impl Bot {
                 .send_watched_agent_message_as_notification_if_enabled(session, text)
                 .await;
         };
-        let msg = OutgoingMessage::markdown(text.trim());
+        let msg = OutgoingMessage::rich(text.trim());
         match send_with_fallback(&*self.channel, &handle, msg.clone(), session.provider_id).await {
             Ok(_) => Ok(()),
             Err(ChannelError::WorkspaceNotFound(reason)) => {
@@ -4306,7 +4306,7 @@ impl Bot {
 
             if let Some(assistant) = turn.assistant.as_ref() {
                 if !assistant_already_sent {
-                    let msg = OutgoingMessage::markdown(history_reply_message_body(assistant))
+                    let msg = OutgoingMessage::rich(history_reply_message_body(assistant))
                         .reply_to(user_message_id)
                         .silent();
                     let message_id =
@@ -5122,7 +5122,8 @@ fn render_agent_notification(
             cwd: Some(cwd),
         },
     );
-    OutgoingMessage::markdown(body)
+    // Watched / background agent text is still agent content → rich.
+    OutgoingMessage::rich(body)
 }
 
 fn bounded_agent_notification_text(text: &str) -> std::borrow::Cow<'_, str> {
@@ -15820,6 +15821,7 @@ done
 
         let msg = render_agent_notification(&session, Some("thread-1"), "done");
 
+        assert_eq!(msg.format, lucarne_channel::TextFormat::Rich);
         assert!(msg.body.contains("cwd: `…/opensource/conductor/lucarnex`"));
         assert!(!msg.body.contains("/Volumes/Data"));
     }

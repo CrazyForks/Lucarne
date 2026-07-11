@@ -36,6 +36,10 @@ pub enum TextFormat {
     /// Generic markdown; the channel is responsible for translating to
     /// its own dialect (e.g. Telegram MarkdownV2).
     Markdown,
+    /// Agent-authored body intended for rich channel rendering when available
+    /// (e.g. Telegram Bot API Rich Messages). Other UI chrome stays on
+    /// [`TextFormat::Markdown`].
+    Rich,
 }
 
 /// The core abstraction. One `Channel` instance represents the bot's

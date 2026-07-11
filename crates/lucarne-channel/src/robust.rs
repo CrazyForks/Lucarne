@@ -137,9 +137,40 @@ async fn send_with_fallback_inner(
                 .map(|id| vec![id])
         }
         Err(other) => {
-            if matches!(msg.format, TextFormat::Markdown)
+            if matches!(msg.format, TextFormat::Markdown | TextFormat::Rich)
                 && looks_like_parse_error(&other.to_string())
             {
+                // Rich failures fall back to ordinary markdown first (original
+                // Telegram path), then plain via a recursive send if needed.
+                if matches!(msg.format, TextFormat::Rich) {
+                    warn!(
+                        error = %other,
+                        "rich parse/transport error, retrying as markdown",
+                    );
+                    let markdown = OutgoingMessage {
+                        body: msg.body.clone(),
+                        format: TextFormat::Markdown,
+                        buttons: msg.buttons.clone(),
+                        reply_to: msg.reply_to.clone(),
+                        notification: msg.notification,
+                    };
+                    match channel.send_all(target, markdown).await {
+                        Ok(ids) => {
+                            debug!(
+                                messages = ids.len(),
+                                last_message_id = ids.last().map(|id| id.as_str()).unwrap_or(""),
+                                "markdown fallback after rich ok"
+                            );
+                            return ensure_message_ids(ids);
+                        }
+                        Err(retry_err) => {
+                            warn!(
+                                error = %retry_err,
+                                "markdown fallback after rich failed; trying plain"
+                            );
+                        }
+                    }
+                }
                 warn!(
                     error = %other,
                     "transport error looks like a parse error, retrying as plain",

@@ -2,7 +2,8 @@
 //!
 //! Layering:
 //! * [`channel`] — a [`lucarne_channel::Channel`] implementation wrapping
-//!   `teloxide`. Handles message splitting, markdown rendering, topic
+//!   `frankenstein` (Bot API 10.1+ Rich Messages). Handles message splitting,
+//!   rich markdown rendering, topic
 //!   lifecycle, and inbound event translation.
 //! * [`state`] — in-memory bot state (entry chat, topic↔instance map).
 //! * [`agents`] — presentation entries for daemon-reported providers.
