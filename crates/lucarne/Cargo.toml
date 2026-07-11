@@ -6,12 +6,13 @@ license.workspace = true
 description = "Agent multiplexer: protocol-normalizing daemon for AI agent CLIs."
 
 [features]
-default = ["claude", "codex", "copilot", "gemini", "pi"]
+default = ["claude", "codex", "copilot", "gemini", "pi", "grok"]
 claude = []
 codex = []
 copilot = []
 gemini = []
 pi = []
+grok = []
 memory-profiling = ["agent-sessions/memory-profiling"]
 
 [dependencies]
@@ -30,7 +31,7 @@ base64 = "0.22"
 rusqlite = { workspace = true }
 linkme = "0.3.35"
 once_cell = { workspace = true }
-agent-sessions = { path = "../../agent-sessions", features = ["discovery", "agent_session", "watch", "claude", "codex", "copilot", "gemini", "pi"] }
+agent-sessions = { path = "../../agent-sessions", features = ["discovery", "agent_session", "watch", "claude", "codex", "copilot", "gemini", "pi", "grok"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 
 [target.'cfg(unix)'.dependencies]

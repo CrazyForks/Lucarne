@@ -7,6 +7,7 @@
         feature = "copilot",
         feature = "cursor",
         feature = "gemini",
+        feature = "grok",
         feature = "pi"
     )
 ))]
@@ -18,7 +19,8 @@ use agent_sessions::{ParseSelection, agent_session::Body};
     feature = "claude",
     feature = "copilot",
     feature = "cursor",
-    feature = "gemini"
+    feature = "gemini",
+    feature = "grok"
 ))]
 fn fixture(path: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -149,6 +151,145 @@ fn parses_gemini_fixture_to_semantic_session() {
             .iter()
             .any(|event| matches!(event.body, Body::Response(_)))
     );
+}
+
+#[cfg(feature = "grok")]
+#[test]
+fn parses_grok_updates_fixture_to_semantic_session() {
+    let bytes = std::fs::read(fixture("grok/updates.jsonl")).unwrap();
+    let session = parse_provider("grok", bytes, ParseSelection::full());
+
+    assert_eq!(session.agent.as_str(), "grok");
+    assert_eq!(
+        session.meta.session_id.as_deref(),
+        Some("019f4f1c-8ae8-7632-adb2-6133aee3adf3")
+    );
+    assert!(session.events.iter().any(|event| matches!(
+        event.actor,
+        agent_sessions::agent_session::Actor::User
+    ) && matches!(&event.body, Body::Prompt(p) if p.text.as_deref() == Some("hello grok"))));
+    assert!(session.events.iter().any(|event| {
+        matches!(
+            &event.body,
+            Body::Response(response)
+                if response.text.as_deref() == Some("Hello from Grok")
+        )
+    }));
+    assert!(
+        session
+            .events
+            .iter()
+            .any(|event| matches!(event.body, Body::Operation(_)))
+    );
+}
+
+#[cfg(feature = "grok")]
+#[test]
+fn grok_discovery_reads_summary_meta_under_grok_home() {
+    let temp = tempfile::tempdir().unwrap();
+    let grok_home = temp.path().join("grok-home");
+    let session_dir = grok_home
+        .join("sessions")
+        .join("%2Ftmp%2Fproject")
+        .join("019f4f1c-8ae8-7632-adb2-6133aee3adf3");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    std::fs::copy(
+        fixture("grok/sample-session/summary.json"),
+        session_dir.join("summary.json"),
+    )
+    .unwrap();
+    std::fs::copy(
+        fixture("grok/sample-session/updates.jsonl"),
+        session_dir.join("updates.jsonl"),
+    )
+    .unwrap();
+
+    let prev = std::env::var_os("GROK_HOME");
+    // SAFETY: test-only env mutation, single-threaded test process section.
+    unsafe { std::env::set_var("GROK_HOME", &grok_home) };
+
+    let provider = agent_sessions::agent_provider("grok").expect("grok provider");
+    let mut sources = Vec::new();
+    provider
+        .discover_sources_into(&mut |source| sources.push(source))
+        .unwrap();
+    assert!(
+        !sources.is_empty(),
+        "expected discovered updates.jsonl under GROK_HOME"
+    );
+    let meta = provider.parse_source_meta(&sources[0]).unwrap();
+    assert_eq!(
+        meta.session_id.as_deref(),
+        Some("019f4f1c-8ae8-7632-adb2-6133aee3adf3")
+    );
+    assert_eq!(meta.cwd.as_deref(), Some("/tmp/project"));
+    assert_eq!(meta.title.as_deref(), Some("Hello Grok fixture"));
+
+    match prev {
+        Some(v) => unsafe { std::env::set_var("GROK_HOME", v) },
+        None => unsafe { std::env::remove_var("GROK_HOME") },
+    }
+}
+
+#[cfg(feature = "grok")]
+#[test]
+fn grok_meta_only_extracts_session_id_from_updates_without_materializing_messages() {
+    // F2.02 + discovery fallback: meta_only must scan updates.jsonl for sessionId
+    // even when summary.json is absent.
+    let bytes = std::fs::read(fixture("grok/updates.jsonl")).unwrap();
+    let session = parse_provider("grok", bytes, ParseSelection::meta_only());
+
+    assert_eq!(session.agent.as_str(), "grok");
+    assert_eq!(
+        session.meta.session_id.as_deref(),
+        Some("019f4f1c-8ae8-7632-adb2-6133aee3adf3")
+    );
+    assert!(
+        session.events.is_empty(),
+        "meta_only must not materialize prompt/response/tool events, got {}",
+        session.events.len()
+    );
+}
+
+#[cfg(feature = "grok")]
+#[test]
+fn grok_discovery_fallback_session_id_from_updates_when_summary_missing() {
+    let temp = tempfile::tempdir().unwrap();
+    let grok_home = temp.path().join("grok-home");
+    let session_dir = grok_home
+        .join("sessions")
+        .join("%2Ftmp%2Fnosummary")
+        .join("019f4f1c-8ae8-7632-adb2-6133aee3adf3");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    // No summary.json — only updates.jsonl (discovery fallback path).
+    std::fs::copy(
+        fixture("grok/sample-session/updates.jsonl"),
+        session_dir.join("updates.jsonl"),
+    )
+    .unwrap();
+
+    let prev = std::env::var_os("GROK_HOME");
+    unsafe { std::env::set_var("GROK_HOME", &grok_home) };
+
+    let provider = agent_sessions::agent_provider("grok").expect("grok provider");
+    let mut sources = Vec::new();
+    provider
+        .discover_sources_into(&mut |source| sources.push(source))
+        .unwrap();
+    assert_eq!(sources.len(), 1);
+    let meta = provider.parse_source_meta(&sources[0]).unwrap();
+    assert_eq!(
+        meta.session_id.as_deref(),
+        Some("019f4f1c-8ae8-7632-adb2-6133aee3adf3"),
+        "discovery fallback must parse sessionId from updates.jsonl when summary is missing"
+    );
+    assert!(meta.title.is_none());
+    assert!(meta.cwd.is_none());
+
+    match prev {
+        Some(v) => unsafe { std::env::set_var("GROK_HOME", v) },
+        None => unsafe { std::env::remove_var("GROK_HOME") },
+    }
 }
 
 #[cfg(feature = "pi")]

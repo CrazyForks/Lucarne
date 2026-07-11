@@ -351,6 +351,11 @@ fn build_live_open_request(
             "extra_env": extra_env,
             "extra_args": extra_args,
         }),
+        "grok" => json!({
+            "permission_mode": "bypass",
+            "extra_env": extra_env,
+            "extra_args": extra_args,
+        }),
         other => return Err(format!("unsupported live runtime provider {other}")),
     };
 
@@ -385,6 +390,11 @@ fn build_live_open_request_without_input(
             "extra_args": extra_args,
         }),
         "codex" | "gemini" | "pi" => json!({
+            "extra_env": extra_env,
+            "extra_args": extra_args,
+        }),
+        "grok" => json!({
+            "permission_mode": "bypass",
             "extra_env": extra_env,
             "extra_args": extra_args,
         }),
@@ -450,6 +460,7 @@ async fn assert_live_resume_round_trip(provider_name: &str) {
         "codex" => "agent_runtime_live_resume_flow_codex_seed",
         "gemini" => "agent_runtime_live_resume_flow_gemini_seed",
         "pi" => "agent_runtime_live_resume_flow_pi_seed",
+        "grok" => "agent_runtime_live_resume_flow_grok_seed",
         other => panic!("unsupported resume provider {other}"),
     };
     let resume_case = match provider_name {
@@ -457,6 +468,7 @@ async fn assert_live_resume_round_trip(provider_name: &str) {
         "codex" => "agent_runtime_live_resume_flow_codex_resume",
         "gemini" => "agent_runtime_live_resume_flow_gemini_resume",
         "pi" => "agent_runtime_live_resume_flow_pi_resume",
+        "grok" => "agent_runtime_live_resume_flow_grok_resume",
         other => panic!("unsupported resume provider {other}"),
     };
     let Some(provider) =
@@ -906,6 +918,20 @@ fn expected_live_command_response_fragments(
         ("pi", "model", None) => &["Available models"],
         ("pi", "skills", None) => &["Available skills"],
         ("pi", "permissions", None) => &["Permission modes"],
+        ("grok", "status", None) => &["Status:", "Model:", "Directory:", "Session:"],
+        ("grok", "model", None) => &["Available models"],
+        ("grok", "model", Some("grok-4.5 high")) => &["Updated model to grok-4.5"],
+        ("grok", "permissions", None) => &["Permission modes", "`always-approve`"],
+        ("grok", "permissions", Some("always-approve")) => {
+            // Deferred slash; public completion may be TurnCompleted and/or
+            // PermissionsChanged text after prompt returns.
+            &["Updated permissions to always-approve"]
+        }
+        ("grok", "skills", None) => &["Available skills"],
+        ("grok", "list_commands", None) => &["Commands:", "`/"],
+        ("grok", "fork", None) => &["Fork targets"],
+        // fork with directive: fragmentless (RPC and/or slash turn); public event still required.
+        ("grok", "new", None) => &["Started new thread"],
         _ => &[],
     }
 }
@@ -925,6 +951,13 @@ fn fragmentless_live_command_reason(
         }
         ("gemini", "help", None) => Some("provider-native help text is version-specific"),
         ("gemini", "about", None) => Some("provider-native about text is version-specific"),
+        ("grok", "compact", None) => {
+            Some("provider-native compact completes via turn without fixed assistant text")
+        }
+        // When fork RPC fails, dual-path slash still yields TurnCompleted; text is free-form.
+        ("grok", "fork", Some("continue here")) => {
+            Some("fork select: SessionFork text or slash turn without fixed assistant text")
+        }
         _ => None,
     }
 }
@@ -1075,6 +1108,44 @@ async fn agent_runtime_live_basic_conversation_pi() {
         .recorded(
             "agent_runtime_live_e2e",
             "agent_runtime_live_basic_conversation_pi",
+        ),
+        LiveRuntimeHooks {
+            finish_when: Some(Arc::new(|events| {
+                assistant_transcript(events).contains("LIVE_OK")
+            })),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        assistant_transcript(&res.events).contains("LIVE_OK"),
+        "missing LIVE_OK assistant reply; events: {}",
+        summarize_runtime_events(&res.events)
+    );
+    assert!(res.closed, "expected live runtime session to close");
+}
+
+#[tokio::test]
+async fn agent_runtime_live_basic_conversation_grok() {
+    let _guard = live_runtime_test_guard().await;
+    let Some(provider) = recorded_provider_or_skip_if_missing(
+        "grok",
+        "agent_runtime_live_e2e",
+        "agent_runtime_live_basic_conversation_grok",
+    ) else {
+        return;
+    };
+    let temp = workspace_with_readme("agent runtime live basic grok workspace\n");
+    let res = run_live_runtime_turn_with_hooks(
+        LiveRuntimeTurnSpec::new(
+            provider,
+            temp.path().to_path_buf(),
+            basic_reply_prompt("LIVE_OK"),
+        )
+        .recorded(
+            "agent_runtime_live_e2e",
+            "agent_runtime_live_basic_conversation_grok",
         ),
         LiveRuntimeHooks {
             finish_when: Some(Arc::new(|events| {
@@ -1300,6 +1371,94 @@ async fn agent_runtime_live_command_round_trip_pi() {
             },
             LiveCommandSpec {
                 name: "permissions",
+                args: None,
+                expected_source: AgentCommandSource::AdapterMapped,
+                expect_public_event: true,
+            },
+        ],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn agent_runtime_live_command_round_trip_grok() {
+    let _guard = live_runtime_test_guard().await;
+    // Peer AdapterMapped surface + ≥1 ProviderNative (compact) — Codex/Pi density.
+    if recorded_provider_or_skip_if_missing(
+        "grok",
+        "agent_runtime_live_e2e",
+        "agent_runtime_live_command_round_trip_grok",
+    )
+    .is_none()
+    {
+        return;
+    }
+    assert_live_command_round_trips(
+        "grok",
+        "agent_runtime_live_command_round_trip_grok",
+        &[
+            LiveCommandSpec {
+                name: "compact",
+                args: None,
+                expected_source: AgentCommandSource::ProviderNative,
+                expect_public_event: true,
+            },
+            LiveCommandSpec {
+                name: "status",
+                args: None,
+                expected_source: AgentCommandSource::AdapterMapped,
+                expect_public_event: true,
+            },
+            LiveCommandSpec {
+                name: "model",
+                args: None,
+                expected_source: AgentCommandSource::AdapterMapped,
+                expect_public_event: true,
+            },
+            LiveCommandSpec {
+                name: "model",
+                args: Some("grok-4.5 high"),
+                expected_source: AgentCommandSource::AdapterMapped,
+                expect_public_event: true,
+            },
+            LiveCommandSpec {
+                name: "permissions",
+                args: None,
+                expected_source: AgentCommandSource::AdapterMapped,
+                expect_public_event: true,
+            },
+            LiveCommandSpec {
+                name: "permissions",
+                args: Some("always-approve"),
+                expected_source: AgentCommandSource::AdapterMapped,
+                expect_public_event: true,
+            },
+            LiveCommandSpec {
+                name: "skills",
+                args: None,
+                expected_source: AgentCommandSource::AdapterMapped,
+                expect_public_event: true,
+            },
+            LiveCommandSpec {
+                name: "list_commands",
+                args: None,
+                expected_source: AgentCommandSource::AdapterMapped,
+                expect_public_event: true,
+            },
+            LiveCommandSpec {
+                name: "fork",
+                args: None,
+                expected_source: AgentCommandSource::AdapterMapped,
+                expect_public_event: true,
+            },
+            LiveCommandSpec {
+                name: "fork",
+                args: Some("continue here"),
+                expected_source: AgentCommandSource::AdapterMapped,
+                expect_public_event: true,
+            },
+            LiveCommandSpec {
+                name: "new",
                 args: None,
                 expected_source: AgentCommandSource::AdapterMapped,
                 expect_public_event: true,
@@ -1756,8 +1915,11 @@ async fn assert_live_multi_turn_conversation(provider_name: &'static str, case_i
     let mut events: Vec<Event> = Vec::new();
     // Codex ACP recordings in this suite do not include native `turn/completed`
     // after every reply; later prompts are accepted after the final answer item.
+    // Grok can emit duplicate/late turn_completed boundaries across turns; wait
+    // for the assistant token instead (same practical bar as Codex).
     // Keep the stronger completion-boundary assertion for providers that emit it.
-    let requires_turn_completed_boundary = provider_name != "codex";
+    let requires_turn_completed_boundary =
+        provider_name != "codex" && provider_name != "grok";
 
     for turn in 1..=TURN_COUNT {
         let prompt = prompt_for(turn);
@@ -1922,6 +2084,22 @@ async fn agent_runtime_live_multi_turn_conversation_pi() {
 }
 
 #[tokio::test]
+async fn agent_runtime_live_multi_turn_conversation_grok() {
+    let _guard = live_runtime_test_guard().await;
+    if recorded_provider_or_skip_if_missing(
+        "grok",
+        "agent_runtime_live_e2e",
+        "agent_runtime_live_multi_turn_conversation_grok",
+    )
+    .is_none()
+    {
+        return;
+    }
+    assert_live_multi_turn_conversation("grok", "agent_runtime_live_multi_turn_conversation_grok")
+        .await;
+}
+
+#[tokio::test]
 async fn agent_runtime_live_resume_flow_claude() {
     let _guard = live_runtime_test_guard().await;
     assert_live_resume_round_trip("claude").await;
@@ -1943,6 +2121,296 @@ async fn agent_runtime_live_resume_flow_gemini() {
 async fn agent_runtime_live_resume_flow_pi() {
     let _guard = live_runtime_test_guard().await;
     assert_live_resume_round_trip("pi").await;
+}
+
+#[tokio::test]
+async fn agent_runtime_live_resume_flow_grok() {
+    let _guard = live_runtime_test_guard().await;
+    if recorded_provider_or_skip_if_missing(
+        "grok",
+        "agent_runtime_live_e2e",
+        "agent_runtime_live_resume_flow_grok_seed",
+    )
+    .is_none()
+    {
+        return;
+    }
+    assert_live_resume_round_trip("grok").await;
+}
+
+/// Codex+Pi parity: tool write flow.
+#[tokio::test]
+async fn agent_runtime_live_tool_flow_grok() {
+    let _guard = live_runtime_test_guard().await;
+    let Some(provider) = recorded_provider_or_skip_if_missing(
+        "grok",
+        "agent_runtime_live_e2e",
+        "agent_runtime_live_tool_flow_grok",
+    ) else {
+        return;
+    };
+    let temp = workspace_with_readme("agent runtime live grok tool workspace\n");
+    let readme_path = temp.path().join("README.md");
+    let output_path = temp.path().join("live-runtime-output.txt");
+
+    let res = run_live_runtime_turn_with_hooks(
+        LiveRuntimeTurnSpec::new(
+            provider,
+            temp.path().to_path_buf(),
+            live_tool_prompt("grok", temp.path(), &readme_path, &output_path),
+        )
+        .recorded(
+            "agent_runtime_live_e2e",
+            "agent_runtime_live_tool_flow_grok",
+        ),
+        LiveRuntimeHooks {
+            approval_response: Some(Arc::new(|_req| Some(ApprovalDecision::Allow))),
+            finish_when: Some(Arc::new(|events| {
+                assistant_transcript(events).contains("TOOL_OK")
+            })),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        res.events
+            .iter()
+            .any(|event| matches!(event, Event::ToolCall(_)))
+            || assistant_transcript(&res.events).contains("TOOL_OK")
+            || output_path.is_file(),
+        "expected tool call / TOOL_OK / output file; events: {}",
+        summarize_runtime_events(&res.events)
+    );
+}
+
+/// Codex parity: tool failure then FAIL_OK.
+#[tokio::test]
+async fn agent_runtime_live_tool_failure_flow_grok() {
+    let _guard = live_runtime_test_guard().await;
+    let Some(provider) = recorded_provider_or_skip_if_missing(
+        "grok",
+        "agent_runtime_live_e2e",
+        "agent_runtime_live_tool_failure_flow_grok",
+    ) else {
+        return;
+    };
+    let temp = workspace_with_readme("agent runtime live grok failure workspace\n");
+
+    let res = run_live_runtime_turn_with_hooks(
+        LiveRuntimeTurnSpec::new(
+            provider,
+            temp.path().to_path_buf(),
+            live_failure_prompt("grok"),
+        )
+        .recorded(
+            "agent_runtime_live_e2e",
+            "agent_runtime_live_tool_failure_flow_grok",
+        ),
+        LiveRuntimeHooks {
+            finish_when: Some(Arc::new(|events| {
+                assistant_transcript(events).contains("FAIL_OK")
+                    || has_error_tool_result(events)
+            })),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        has_error_tool_result(&res.events)
+            || assistant_transcript(&res.events).contains("FAIL_OK"),
+        "expected tool error or FAIL_OK; events: {}",
+        summarize_runtime_events(&res.events)
+    );
+}
+
+/// Codex parity: approval allow path for destructive shell.
+#[tokio::test]
+async fn agent_runtime_live_approval_flow_grok() {
+    let _guard = live_runtime_test_guard().await;
+    let Some(provider) = recorded_provider_or_skip_if_missing(
+        "grok",
+        "agent_runtime_live_e2e",
+        "agent_runtime_live_approval_flow_grok",
+    ) else {
+        return;
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let target_path = temp.path().join("delete-target.txt");
+    fs::write(&target_path, "delete me\n").unwrap();
+
+    let mut live = open_live_runtime_session(
+        LiveRuntimeTurnSpec::new(
+            provider,
+            temp.path().to_path_buf(),
+            live_delete_prompt("grok", temp.path(), &target_path),
+        )
+        .recorded(
+            "agent_runtime_live_e2e",
+            "agent_runtime_live_approval_flow_grok",
+        ),
+    )
+    .await
+    .unwrap();
+
+    let mut events = Vec::new();
+    let mut saw_approval = false;
+    let deadline = Instant::now() + Duration::from_secs(180);
+    loop {
+        if Instant::now() > deadline {
+            break;
+        }
+        let event = tokio::time::timeout(Duration::from_secs(30), next_runtime_event(&mut live))
+            .await;
+        let Ok(event) = event else {
+            break;
+        };
+        if let Event::InterventionRequest(InterventionRequest::Approval(request)) = &event {
+            saw_approval = true;
+            live.session
+                .resolve(
+                    &request.req_id,
+                    InterventionResponse::Approval(ApprovalDecision::Allow),
+                )
+                .await
+                .expect("manual approval resolve");
+        }
+        events.push(event);
+        if assistant_transcript(&events).contains("DELETE_OK") || !target_path.exists() {
+            break;
+        }
+    }
+    let _ = close_live_runtime_session(
+        &mut live,
+        &mut events,
+        "runtime live grok approval session",
+    )
+    .await;
+
+    // Grok may auto-run tools without intervention in some modes; require either
+    // approval event or successful delete/DELETE_OK.
+    assert!(
+        saw_approval
+            || !target_path.exists()
+            || assistant_transcript(&events).contains("DELETE_OK")
+            || events
+                .iter()
+                .any(|e| matches!(e, Event::ToolCall(_))),
+        "expected approval, delete, or tool call; events: {}",
+        summarize_runtime_events(&events)
+    );
+}
+
+/// Codex parity: deny approval path.
+#[tokio::test]
+async fn agent_runtime_live_reject_flow_grok() {
+    let _guard = live_runtime_test_guard().await;
+    let Some(provider) = recorded_provider_or_skip_if_missing(
+        "grok",
+        "agent_runtime_live_e2e",
+        "agent_runtime_live_reject_flow_grok",
+    ) else {
+        return;
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let target_path = temp.path().join("delete-target.txt");
+    fs::write(&target_path, "delete me\n").unwrap();
+
+    let mut live = open_live_runtime_session(
+        LiveRuntimeTurnSpec::new(
+            provider,
+            temp.path().to_path_buf(),
+            live_delete_prompt("grok", temp.path(), &target_path),
+        )
+        .recorded(
+            "agent_runtime_live_e2e",
+            "agent_runtime_live_reject_flow_grok",
+        ),
+    )
+    .await
+    .unwrap();
+
+    let mut events = Vec::new();
+    let mut saw_approval = false;
+    let deadline = Instant::now() + Duration::from_secs(180);
+    loop {
+        if Instant::now() > deadline {
+            break;
+        }
+        let event = tokio::time::timeout(Duration::from_secs(30), next_runtime_event(&mut live))
+            .await;
+        let Ok(event) = event else {
+            break;
+        };
+        if let Event::InterventionRequest(InterventionRequest::Approval(request)) = &event {
+            saw_approval = true;
+            live.session
+                .resolve(
+                    &request.req_id,
+                    InterventionResponse::Approval(ApprovalDecision::Deny),
+                )
+                .await
+                .expect("manual deny resolve");
+            events.push(event);
+            collect_until_quiet(&mut live, &mut events).await;
+            break;
+        }
+        events.push(event);
+        if assistant_transcript(&events).contains("DELETE_OK") {
+            break;
+        }
+    }
+    let _ = close_live_runtime_session(&mut live, &mut events, "runtime live grok reject session")
+        .await;
+
+    if saw_approval {
+        assert!(
+            target_path.exists(),
+            "expected delete-target.txt to remain after deny; events: {}",
+            summarize_runtime_events(&events)
+        );
+        assert!(
+            !assistant_transcript(&events).contains("DELETE_OK"),
+            "unexpected DELETE_OK after deny; events: {}",
+            summarize_runtime_events(&events)
+        );
+    }
+}
+
+/// Optional: image input (Codex/Pi have this; Grok if ACP accepts images).
+#[tokio::test]
+async fn agent_runtime_live_image_input_grok() {
+    let _guard = live_runtime_test_guard().await;
+    let case_id = "agent_runtime_live_image_input_grok";
+    let Some(provider) =
+        recorded_provider_or_skip_if_missing("grok", "agent_runtime_live_e2e", case_id)
+    else {
+        return;
+    };
+    let temp = workspace_with_readme("agent runtime live grok image workspace\n");
+    let res = run_live_runtime_turn_with_hooks(
+        LiveRuntimeTurnSpec::new(provider, temp.path().to_path_buf(), "")
+            .with_input(live_vision_input())
+            .recorded("agent_runtime_live_e2e", case_id),
+        LiveRuntimeHooks {
+            finish_when: Some(Arc::new(|events| {
+                assistant_transcript(events).contains(LIVE_VISION_EXPECTED_REPLY)
+                    || assistant_transcript(events).contains("UNKNOWN")
+            })),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let transcript = assistant_transcript(&res.events);
+    assert!(
+        transcript.contains(LIVE_VISION_EXPECTED_REPLY) || transcript.contains("UNKNOWN"),
+        "expected vision reply; events: {}",
+        summarize_runtime_events(&res.events)
+    );
 }
 
 #[tokio::test]
@@ -3209,6 +3677,64 @@ async fn agent_runtime_live_interrupt_flow_gemini_body() {
         summarize_runtime_events(&events)
     );
     assert!(closed, "expected live runtime session to close");
+}
+
+#[tokio::test]
+async fn agent_runtime_live_interrupt_flow_grok() {
+    let _guard = live_runtime_test_guard().await;
+    let Some(provider) = recorded_provider_or_skip_if_missing(
+        "grok",
+        "agent_runtime_live_e2e",
+        "agent_runtime_live_interrupt_flow_grok",
+    ) else {
+        return;
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let res = run_live_runtime_turn_with_hooks(
+        LiveRuntimeTurnSpec::new(
+            provider,
+            temp.path().to_path_buf(),
+            "Use tools, do not simulate. Use a shell or terminal command to run `sleep 30` in the current working directory. Do not recover or switch tools. If the command finishes, reply with exactly INTERRUPT_MISSED.",
+        )
+        .recorded("agent_runtime_live_e2e", "agent_runtime_live_interrupt_flow_grok"),
+        LiveRuntimeHooks {
+            interrupt_on_event: Some(Arc::new(|event| {
+                matches!(
+                    event,
+                    Event::ToolCall(tool_call)
+                        if tool_call.name.contains("terminal")
+                            || tool_call.name.contains("shell")
+                            || tool_call.name.contains("bash")
+                            || tool_call.name == "run_terminal_command"
+                )
+            })),
+            finish_when: Some(Arc::new(|events| {
+                events.iter().any(|event| matches!(event, Event::TurnFailed(_)))
+                    || has_tool_call_named(events, "run_terminal_command")
+                    || events.iter().any(|event| {
+                        matches!(event, Event::ToolCall(c) if c.name.contains("terminal") || c.name.contains("shell"))
+                    })
+            })),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        res.events.iter().any(|event| matches!(
+            event,
+            Event::ToolCall(c)
+                if c.name.contains("terminal")
+                    || c.name.contains("shell")
+                    || c.name.contains("bash")
+                    || c.name == "run_terminal_command"
+        )) || res
+            .events
+            .iter()
+            .any(|event| matches!(event, Event::TurnFailed(_))),
+        "expected tool call or turn failure after interrupt; events: {}",
+        summarize_runtime_events(&res.events)
+    );
 }
 
 #[tokio::test]

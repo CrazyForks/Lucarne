@@ -290,6 +290,8 @@ pub fn agent_providers() -> Vec<AgentProviderDescriptor> {
         descriptor_for::<super::pi::Pi>("Pi", SessionFileFormat::LineDelimitedJson),
         #[cfg(feature = "cursor")]
         descriptor_for::<super::cursor::Cursor>("Cursor", SessionFileFormat::LineDelimitedJson),
+        #[cfg(feature = "grok")]
+        descriptor_for::<super::grok::Grok>("Grok Build", SessionFileFormat::LineDelimitedJson),
     ]
 }
 

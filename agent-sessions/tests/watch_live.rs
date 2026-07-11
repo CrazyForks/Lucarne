@@ -6,7 +6,9 @@
         feature = "claude",
         feature = "copilot",
         feature = "cursor",
-        feature = "gemini"
+        feature = "gemini",
+        feature = "grok",
+        feature = "pi"
     )
 ))]
 
@@ -275,4 +277,239 @@ async fn live_gemini_watch_ignores_rewritten_assistant_response_without_incremen
         updates.is_empty(),
         "Gemini rewritten JSON must not be full-reparsed by live watch; updates={updates:?}"
     );
+}
+
+#[cfg(feature = "grok")]
+fn percent_encode_cwd(cwd: &str) -> String {
+    let mut out = String::with_capacity(cwd.len() * 3);
+    for b in cwd.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+#[cfg(feature = "grok")]
+fn write_grok_session_layout(
+    sessions_root: &Path,
+    session_id: &str,
+    cwd: &str,
+    baseline_lines: &str,
+) -> std::path::PathBuf {
+    let session_dir = sessions_root
+        .join(percent_encode_cwd(cwd))
+        .join(session_id);
+    fs::create_dir_all(&session_dir).unwrap();
+    let updates = session_dir.join("updates.jsonl");
+    let summary = session_dir.join("summary.json");
+    fs::write(&updates, baseline_lines).unwrap();
+    fs::write(
+        &summary,
+        format!(
+            r#"{{"info":{{"id":"{session_id}","cwd":"{cwd}"}},"generated_title":"Grok live watch","current_model_id":"grok-4.5"}}"#
+        ),
+    )
+    .unwrap();
+    updates
+}
+
+#[cfg(feature = "grok")]
+fn grok_user_line(session_id: &str, ts: &str, text: &str) -> String {
+    serde_json::json!({
+        "timestamp": ts,
+        "method": "session/update",
+        "params": {
+            "sessionId": session_id,
+            "update": {
+                "sessionUpdate": "user_message_chunk",
+                "content": { "type": "text", "text": text }
+            }
+        }
+    })
+    .to_string()
+}
+
+#[cfg(feature = "grok")]
+fn grok_assistant_line(session_id: &str, ts: &str, text: &str) -> String {
+    serde_json::json!({
+        "timestamp": ts,
+        "method": "session/update",
+        "params": {
+            "sessionId": session_id,
+            "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": text }
+            }
+        }
+    })
+    .to_string()
+}
+
+/// Direct file append: incremental tail only (Codex/Claude parity).
+#[cfg(feature = "grok")]
+#[tokio::test]
+async fn live_grok_watch_emits_appended_assistant_response() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("updates.jsonl");
+    write_parent(
+        &path,
+        &format!(
+            "{}\n",
+            grok_user_line(
+                "019f4f1c-live-append-000000000001",
+                "2026-05-03T00:00:01.000Z",
+                "ping"
+            )
+        ),
+    );
+    let mut watcher = start_file_watcher(watch_provider("grok"), &path).await;
+
+    append_line(
+        &path,
+        &grok_assistant_line(
+            "019f4f1c-live-append-000000000001",
+            "2026-05-03T00:02:06.000Z",
+            "grok pong",
+        ),
+    );
+
+    let update = wait_for_assistant_response(&mut watcher, "grok pong").await;
+    assert_eq!(update.provider, watch_provider("grok"));
+}
+
+/// Nested real layout under sessions/<encoded-cwd>/<uuid>/updates.jsonl.
+#[cfg(all(
+    feature = "grok",
+    any(target_os = "macos", windows, target_os = "linux")
+))]
+#[tokio::test]
+async fn live_grok_watch_emits_nested_session_append() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("grok-home").join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    // Empty root first so start_file_watcher baseline drain stays quiet.
+    let mut watcher = start_file_watcher(watch_provider("grok"), &root).await;
+
+    let cwd = "/tmp/grok-live-project";
+    let sid = "019f4f1c-live-nested-000000000002";
+    let path = write_grok_session_layout(
+        &root,
+        sid,
+        cwd,
+        &format!("{}\n", grok_user_line(sid, "2026-05-03T00:00:01.000Z", "ping")),
+    );
+    // Drain Created/discovery noise before the assistant append under test.
+    let _ = recv_timeout(&mut watcher, Duration::from_millis(400)).await;
+
+    append_line(
+        &path,
+        &grok_assistant_line(sid, "2026-05-03T00:02:06.000Z", "grok nested pong"),
+    );
+
+    let update = wait_for_assistant_response(&mut watcher, "grok nested pong").await;
+    assert_eq!(update.provider, watch_provider("grok"));
+    assert_eq!(update.session_id.as_deref(), Some(sid));
+}
+
+/// New nested session created after watch starts (Created baseline + Updated append).
+#[cfg(all(
+    feature = "grok",
+    any(target_os = "macos", windows, target_os = "linux")
+))]
+#[tokio::test]
+async fn live_grok_watch_emits_nested_created_session_response() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("grok-home").join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    let mut watcher = start_file_watcher(watch_provider("grok"), &root).await;
+
+    let cwd = "/tmp/grok-created-project";
+    let sid = "019f4f1c-live-created-000000000003";
+    let _path = write_grok_session_layout(
+        &root,
+        sid,
+        cwd,
+        &format!(
+            "{}\n{}\n",
+            grok_user_line(sid, "2026-05-03T00:00:01.000Z", "ping"),
+            grok_assistant_line(sid, "2026-05-03T00:02:06.000Z", "grok created pong"),
+        ),
+    );
+
+    let update = wait_for_assistant_response(&mut watcher, "grok created pong").await;
+    assert_eq!(update.provider, watch_provider("grok"));
+    assert_eq!(update.session_id.as_deref(), Some(sid));
+}
+
+/// Large baseline + small append: only the new assistant text is delivered (bounded delta).
+#[cfg(feature = "grok")]
+#[tokio::test]
+async fn live_grok_watch_large_baseline_append_only_emits_delta() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("updates.jsonl");
+    let sid = "019f4f1c-live-large-000000000004";
+    let mut baseline = String::new();
+    baseline.push_str(&grok_user_line(sid, "2026-05-03T00:00:01.000Z", "ping"));
+    baseline.push('\n');
+    // ~64KiB of noise chunks that must not be re-emitted on append.
+    for i in 0..800 {
+        baseline.push_str(&grok_assistant_line(
+            sid,
+            "2026-05-03T00:00:02.000Z",
+            &format!("noise-{i:04}-pad-xxxxxxxxxxxxxxxx"),
+        ));
+        baseline.push('\n');
+    }
+    write_parent(&path, &baseline);
+    let mut watcher = start_file_watcher(watch_provider("grok"), &path).await;
+
+    append_line(
+        &path,
+        &grok_assistant_line(sid, "2026-05-03T00:02:06.000Z", "grok large-delta pong"),
+    );
+
+    let update = wait_for_assistant_response(&mut watcher, "grok large-delta pong").await;
+    assert_eq!(update.provider, watch_provider("grok"));
+    // Delta window must not replay earlier noise blobs as separate expected hits;
+    // the wait already required exact text match. Also assert no full baseline reparse
+    // by ensuring we did not get hundreds of assistant events in this update.
+    let assistant_count = update
+        .events
+        .iter()
+        .filter(|e| matches!(e, WatchEvent::AssistantMessage(_)))
+        .count();
+    assert!(
+        assistant_count <= 4,
+        "expected bounded delta events, got {assistant_count} assistant events in {:?}",
+        update.events
+    );
+}
+
+#[cfg(feature = "pi")]
+#[tokio::test]
+async fn live_pi_watch_emits_appended_assistant_response() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("pi-live.jsonl");
+    write_parent(
+        &path,
+        concat!(
+            r#"{"type":"session","id":"pi-live","cwd":"/tmp/project","timestamp":"2026-05-03T00:00:00.000Z"}"#,
+            "\n",
+            r#"{"type":"message","id":"u1","parentId":null,"timestamp":"2026-05-03T00:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"ping"}]}}"#,
+            "\n",
+        ),
+    );
+    let mut watcher = start_file_watcher(watch_provider("pi"), &path).await;
+
+    append_line(
+        &path,
+        r#"{"type":"message","id":"a1","parentId":"u1","timestamp":"2026-05-03T00:02:06.000Z","message":{"role":"assistant","model":"pi","stopReason":"stop","content":[{"type":"text","text":"pi pong"}]}}"#,
+    );
+
+    let update = wait_for_assistant_response(&mut watcher, "pi pong").await;
+    assert_eq!(update.provider, watch_provider("pi"));
 }

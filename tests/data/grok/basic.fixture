@@ -1,0 +1,14 @@
+# Grok ACP basic conversation
+EXPECT_IN_CONTAINS "initialize"
+OUT {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}
+EXPECT_IN_CONTAINS "session/new"
+OUT {"jsonrpc":"2.0","id":2,"result":{"sessionId":"019f4f1c-8ae8-7632-adb2-6133aee3adf3"}}
+EXPECT_IN_CONTAINS "session/prompt"
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"019f4f1c-8ae8-7632-adb2-6133aee3adf3","update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"Inspecting"}}}}
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"019f4f1c-8ae8-7632-adb2-6133aee3adf3","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Hello "}}}}
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"019f4f1c-8ae8-7632-adb2-6133aee3adf3","update":{"sessionUpdate":"tool_call","toolCallId":"call-1","title":"read_file","rawInput":{"path":"/tmp/test.txt"}}}}
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"019f4f1c-8ae8-7632-adb2-6133aee3adf3","update":{"sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"file contents"}}]}}}
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"019f4f1c-8ae8-7632-adb2-6133aee3adf3","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"from Grok"}}}}
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"019f4f1c-8ae8-7632-adb2-6133aee3adf3","update":{"sessionUpdate":"turn_completed","stop_reason":"end_turn"}}}
+OUT {"jsonrpc":"2.0","id":3,"result":{}}
+EXIT 0

@@ -44,6 +44,7 @@ const STARTUP_HELP_MAX_RETRIES: u8 = 3;
 const MAX_PENDING_REPLIES: usize = 10;
 const MAX_PENDING_NOTIFICATIONS: usize = 10;
 const MAX_PENDING_INTERVENTIONS: usize = 10;
+const AGENT_NOTIFICATION_TEXT_LIMIT: usize = 8192;
 const WECHAT_STALE_NOTIFICATION: &str = "⚠️ 这条通知已无法路由，请重新引用最新的 agent 通知。";
 const WECHAT_REPLY_REQUIRED: &str = "💬 请引用一条 agent 通知后再回复，以继续对应会话。";
 
@@ -793,7 +794,8 @@ where
             .map(|record| record.native_resume_ref.to_string())
             .unwrap_or_else(|| provider_session_id.as_str().to_string());
 
-        let body = render_agent_message(text, &workspace, &session_ref, None);
+        let text = bounded_agent_notification_text(text);
+        let body = render_agent_message(text.as_ref(), &workspace, &session_ref, None);
 
         if self.core.direct_notification_suppressed(workspace_id) {
             debug!(
@@ -2625,6 +2627,20 @@ fn render_agent_message(
     } else {
         format!("{}\n\n ---\n\n{}", text, footer_lines.join("\n"))
     }
+}
+
+fn bounded_agent_notification_text(text: &str) -> std::borrow::Cow<'_, str> {
+    let mut chars = text.char_indices();
+    let Some((cut_at, _)) = chars.nth(AGENT_NOTIFICATION_TEXT_LIMIT) else {
+        return std::borrow::Cow::Borrowed(text);
+    };
+    let omitted = text[cut_at..].chars().count();
+    let mut out = String::with_capacity(cut_at + 96);
+    out.push_str(text[..cut_at].trim_end());
+    out.push_str("\n\n[truncated ");
+    out.push_str(&omitted.to_string());
+    out.push_str(" chars; full output remains in the agent session]");
+    std::borrow::Cow::Owned(out)
 }
 
 fn split_wechat_trailing_cost(text: &str) -> (&str, Option<&str>) {
@@ -5674,6 +5690,54 @@ cwd: `/Volumes/Data/opensource/conductor/lucarnex`"#;
         match &notifications[0].content {
             WechatPendingNotificationContent::Text(body) => {
                 assert_eq!(body.as_str(), "body-1");
+            }
+            WechatPendingNotificationContent::Attachment(_) => panic!("expected text notification"),
+        }
+    }
+
+    #[tokio::test]
+    async fn watched_notification_truncates_large_agent_message_before_retry_queue() {
+        let provider = Arc::new(FakeProvider::default());
+        let core = test_core(Arc::clone(&provider));
+        let opened = core
+            .open_workspace_with_events(OpenWorkspaceRequest {
+                provider_id: "codex",
+                project_path: Some("/tmp/workspace-large-notification".into()),
+                title: "workspace-large-notification".into(),
+            })
+            .await
+            .expect("open workspace");
+        let workspace_id = opened.workspace.workspace_id.clone();
+        let transport = Arc::new(FakeTransport::default());
+        transport.fail_sends_rate_limited(Duration::from_millis(50));
+        let service = WechatNotificationService::new(
+            core,
+            transport,
+            WechatServiceOptions {
+                initial_user_ids: vec!["user-1".into()],
+                ..WechatServiceOptions::default()
+            },
+        );
+        let text = format!(
+            "{}TAIL_SHOULD_NOT_APPEAR",
+            "x".repeat(AGENT_NOTIFICATION_TEXT_LIMIT * 4)
+        );
+
+        service
+            .deliver_assistant_message(&workspace_id, &text)
+            .await
+            .expect("watched notification should queue after rate limit");
+
+        let notifications = service.take_pending_notifications();
+        assert_eq!(notifications.len(), 1);
+        match &notifications[0].content {
+            WechatPendingNotificationContent::Text(body) => {
+                assert!(body.contains("[truncated "));
+                assert!(!body.contains("TAIL_SHOULD_NOT_APPEAR"));
+                assert!(
+                    body.len() < text.len() / 2,
+                    "pending retry should not retain the full history text"
+                );
             }
             WechatPendingNotificationContent::Attachment(_) => panic!("expected text notification"),
         }

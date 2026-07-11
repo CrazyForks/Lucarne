@@ -1,0 +1,14 @@
+# Grok ACP multi-turn
+EXPECT_IN_CONTAINS "initialize"
+OUT {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}
+EXPECT_IN_CONTAINS "session/new"
+OUT {"jsonrpc":"2.0","id":2,"result":{"sessionId":"sess-multi"}}
+EXPECT_IN_CONTAINS "session/prompt"
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-multi","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"first"}}}}
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-multi","update":{"sessionUpdate":"turn_completed","stop_reason":"end_turn"}}}
+OUT {"jsonrpc":"2.0","id":3,"result":{}}
+EXPECT_IN_CONTAINS "session/prompt"
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-multi","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"second"}}}}
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-multi","update":{"sessionUpdate":"turn_completed","stop_reason":"end_turn"}}}
+OUT {"jsonrpc":"2.0","id":4,"result":{}}
+EXIT 0

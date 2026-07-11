@@ -141,6 +141,7 @@ fn journey_58_linkme_history_descriptor_discovers_and_replays_new_provider() {
         .collect::<Vec<_>>();
     assert!(ids.contains(&"codex"));
     assert!(ids.contains(&"pi"));
+    assert!(ids.contains(&"grok"));
 }
 
 #[test]

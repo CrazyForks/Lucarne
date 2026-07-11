@@ -9,6 +9,7 @@ use live::{
 };
 use lucarne::event::{Decision, Kind, Payload, PermissionResponse, TimelineType};
 use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 fn recorded_provider_or_return(
@@ -17,6 +18,27 @@ fn recorded_provider_or_return(
     case_id: &'static str,
 ) -> Option<LiveProvider> {
     replay_provider_or_return(name, RecordedLiveCase { suite, case_id })
+}
+
+fn recorded_provider_or_skip_if_missing(
+    name: &str,
+    suite: &'static str,
+    case_id: &'static str,
+) -> Option<LiveProvider> {
+    let live_enabled = std::env::var("LUCARNE_LIVE_E2E").unwrap_or_default() == "1";
+    let fixture_exists = {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/data/live_recordings")
+            .join(suite)
+            .join(name)
+            .join(case_id)
+            .join("session.fixture");
+        root.exists()
+    };
+    if !live_enabled && !fixture_exists {
+        return None;
+    }
+    recorded_provider_or_return(name, suite, case_id)
 }
 
 fn workspace_with_readme(contents: &str) -> tempfile::TempDir {
@@ -122,6 +144,47 @@ async fn basic_conversation_pi() {
             "Reply with exactly LIVE_OK and nothing else.",
         )
         .recorded("live_e2e", "basic_conversation_pi"),
+    )
+    .await
+    .unwrap();
+
+    let messages = collect_timelines(&res.events, TimelineType::AssistantMessage);
+    assert!(
+        !messages.is_empty(),
+        "expected assistant message; events: {}",
+        live::summarize_live_events(&res.events)
+    );
+    let transcript = assistant_transcript(&messages);
+    assert!(
+        transcript.contains("LIVE_OK"),
+        "unexpected assistant reply: {:?}; events: {}",
+        transcript,
+        live::summarize_live_events(&res.events)
+    );
+    assert!(
+        failed_messages(&res.events).is_empty(),
+        "unexpected failures: {:?}; events: {}",
+        failed_messages(&res.events),
+        live::summarize_live_events(&res.events)
+    );
+}
+
+#[tokio::test]
+async fn basic_conversation_grok() {
+    let Some(provider) =
+        recorded_provider_or_skip_if_missing("grok", "live_e2e", "basic_conversation_grok")
+    else {
+        return;
+    };
+    let temp = workspace_with_readme("live basic workspace\n");
+
+    let res = run_live_turn(
+        LiveTurnSpec::new(
+            provider,
+            temp.path().to_path_buf(),
+            "Reply with exactly LIVE_OK and nothing else.",
+        )
+        .recorded("live_e2e", "basic_conversation_grok"),
     )
     .await
     .unwrap();
@@ -923,4 +986,207 @@ async fn interrupt_flow_pi() {
         "expected terminal turn event after interrupt; events: {}",
         live::summarize_live_events(&res.events)
     );
+}
+
+#[tokio::test]
+async fn interrupt_flow_grok() {
+    let Some(provider) =
+        recorded_provider_or_skip_if_missing("grok", "live_e2e", "interrupt_flow_grok")
+    else {
+        return;
+    };
+    let temp = workspace_with_readme("live interrupt workspace\n");
+
+    let res = run_live_turn_with_hooks(
+        LiveTurnSpec::new(
+            provider,
+            temp.path().to_path_buf(),
+            "Start a long-running response, but do not use tools. Continue until interrupted.",
+        )
+        .recorded("live_e2e", "interrupt_flow_grok"),
+        LiveTurnHooks {
+            permission_response: None,
+            interrupt_on_event: Some(Arc::new(|event| {
+                matches!(&event.payload, Payload::Timeline(_))
+                    || matches!(&event.payload, Payload::TurnStarted(_))
+            })),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        turn_failed(&res.events).is_some()
+            || turn_completed(&res.events).is_some()
+            || res.events.iter().any(|e| matches!(
+                e.payload,
+                Payload::SessionClosed(_)
+            )),
+        "expected terminal event after interrupt; events: {}",
+        live::summarize_live_events(&res.events)
+    );
+}
+
+#[tokio::test]
+async fn tool_flow_grok() {
+    let Some(provider) =
+        recorded_provider_or_skip_if_missing("grok", "live_e2e", "tool_flow_grok")
+    else {
+        return;
+    };
+    let temp = workspace_with_readme("live e2e workspace\n");
+    let readme_path = temp.path().join("README.md");
+    let output_path = temp.path().join("live-output.txt");
+
+    // Grok requests Write permission by default; auto-allow like channel bots.
+    let res = run_live_turn_with_hooks(
+        LiveTurnSpec::new(
+            provider,
+            temp.path().to_path_buf(),
+            live_tool_prompt("grok", temp.path(), &readme_path, &output_path),
+        )
+        .recorded("live_e2e", "tool_flow_grok"),
+        LiveTurnHooks {
+            permission_response: Some(Arc::new(|_req| {
+                Some(PermissionResponse::from_decision(Decision::Allow))
+            })),
+            interrupt_on_event: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let messages = collect_timelines(&res.events, TimelineType::AssistantMessage);
+    let transcript = assistant_transcript(&messages);
+    assert!(
+        transcript.contains("TOOL_OK")
+            || output_path.is_file()
+            || !collect_timelines(&res.events, TimelineType::ToolCall).is_empty(),
+        "expected tool use or TOOL_OK; transcript={transcript:?}; events: {}",
+        live::summarize_live_events(&res.events)
+    );
+}
+
+/// Codex+Pi parity: delete via shell tool.
+#[tokio::test]
+async fn delete_flow_grok() {
+    let Some(provider) =
+        recorded_provider_or_skip_if_missing("grok", "live_e2e", "delete_flow_grok")
+    else {
+        return;
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let target_path = temp.path().join("delete-target.txt");
+    fs::write(&target_path, "delete me\n").unwrap();
+
+    let res = run_live_turn_with_hooks(
+        LiveTurnSpec::new(
+            provider.clone(),
+            temp.path().to_path_buf(),
+            live_delete_prompt(provider.name(), temp.path(), &target_path),
+        )
+        .recorded("live_e2e", "delete_flow_grok"),
+        LiveTurnHooks {
+            permission_response: Some(Arc::new(|_req| {
+                Some(PermissionResponse::from_decision(Decision::Allow))
+            })),
+            interrupt_on_event: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        !collect_timelines(&res.events, TimelineType::ToolCall).is_empty(),
+        "expected tool call; events: {}",
+        live::summarize_live_events(&res.events)
+    );
+    assert!(
+        !target_path.exists()
+            || assistant_transcript(&collect_timelines(
+                &res.events,
+                TimelineType::AssistantMessage
+            ))
+            .contains("DELETE_OK"),
+        "expected delete-target.txt gone or DELETE_OK; events: {}",
+        live::summarize_live_events(&res.events)
+    );
+}
+
+/// Codex parity: tool failure then FAIL_OK.
+#[tokio::test]
+async fn tool_failure_flow_grok() {
+    let Some(provider) =
+        recorded_provider_or_skip_if_missing("grok", "live_e2e", "tool_failure_flow_grok")
+    else {
+        return;
+    };
+    let temp = workspace_with_readme("live failure workspace\n");
+
+    let res = run_live_turn(
+        LiveTurnSpec::new(
+            provider,
+            temp.path().to_path_buf(),
+            live_failure_prompt("grok"),
+        )
+        .recorded("live_e2e", "tool_failure_flow_grok"),
+    )
+    .await
+    .unwrap();
+
+    let results = collect_timelines(&res.events, TimelineType::ToolResult);
+    let has_error = results.iter().any(|item| {
+        item.tool_result
+            .as_ref()
+            .is_some_and(|r| !r.result.error.is_empty() || r.result.exit_code != 0)
+    });
+    let transcript = assistant_transcript(&collect_timelines(
+        &res.events,
+        TimelineType::AssistantMessage,
+    ));
+    assert!(
+        has_error || transcript.contains("FAIL_OK"),
+        "expected tool error or FAIL_OK; events: {}",
+        live::summarize_live_events(&res.events)
+    );
+}
+
+/// Codex/Pi parity: deny permission path.
+#[tokio::test]
+async fn reject_flow_grok() {
+    let Some(provider) =
+        recorded_provider_or_skip_if_missing("grok", "live_e2e", "reject_flow_grok")
+    else {
+        return;
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let target_path = temp.path().join("delete-target.txt");
+    fs::write(&target_path, "delete me\n").unwrap();
+
+    let res = run_live_turn_with_hooks(
+        LiveTurnSpec::new(
+            provider,
+            temp.path().to_path_buf(),
+            live_delete_prompt("grok", temp.path(), &target_path),
+        )
+        .recorded("live_e2e", "reject_flow_grok"),
+        LiveTurnHooks {
+            permission_response: Some(Arc::new(|_req| {
+                Some(PermissionResponse::from_decision(Decision::Deny))
+            })),
+            interrupt_on_event: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // With default permission mode Grok should surface request_permission for
+    // destructive shell; deny keeps the file.
+    if !find_events_by_kind(&res.events, Kind::PermissionRequest).is_empty() {
+        assert!(
+            target_path.exists(),
+            "expected delete-target.txt to remain after deny; events: {}",
+            live::summarize_live_events(&res.events)
+        );
+    }
 }

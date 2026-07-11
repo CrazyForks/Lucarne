@@ -1,0 +1,10 @@
+# Grok ACP resume via session/load
+EXPECT_IN_CONTAINS "initialize"
+OUT {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}
+EXPECT_IN_CONTAINS "session/load"
+OUT {"jsonrpc":"2.0","id":2,"result":{"sessionId":"uuid-resume-1"}}
+EXPECT_IN_CONTAINS "session/prompt"
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"uuid-resume-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"resumed ok"}}}}
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"uuid-resume-1","update":{"sessionUpdate":"turn_completed","stop_reason":"end_turn"}}}
+OUT {"jsonrpc":"2.0","id":3,"result":{}}
+EXIT 0

@@ -9,6 +9,7 @@ pub(crate) struct ParsedToolInput {
         feature = "claude",
         feature = "codex",
         feature = "cursor",
+        feature = "grok",
         feature = "pi"
     ))]
     pub(crate) command: Option<SmolStr>,
@@ -23,6 +24,7 @@ struct ToolInputShape<'a> {
         feature = "claude",
         feature = "codex",
         feature = "cursor",
+        feature = "grok",
         feature = "pi"
     ))]
     #[serde(borrow, default)]
@@ -31,6 +33,7 @@ struct ToolInputShape<'a> {
         feature = "claude",
         feature = "codex",
         feature = "cursor",
+        feature = "grok",
         feature = "pi"
     ))]
     #[serde(borrow, default)]
@@ -59,6 +62,7 @@ pub(crate) fn parsed_tool_input(tool_name: &str, input_json: Option<&str>) -> Pa
         feature = "claude",
         feature = "codex",
         feature = "cursor",
+        feature = "grok",
         feature = "pi"
     ))]
     let command = parsed.command.or(parsed.cmd).map(crate::util::cow_to_box);
@@ -75,6 +79,7 @@ pub(crate) fn parsed_tool_input(tool_name: &str, input_json: Option<&str>) -> Pa
                 feature = "claude",
                 feature = "codex",
                 feature = "cursor",
+                feature = "grok",
                 feature = "pi"
             ))]
             command,
@@ -91,6 +96,7 @@ pub(crate) fn parsed_tool_input(tool_name: &str, input_json: Option<&str>) -> Pa
                 feature = "claude",
                 feature = "codex",
                 feature = "cursor",
+                feature = "grok",
                 feature = "pi"
             ))]
             command,
@@ -105,6 +111,7 @@ pub(crate) fn parsed_tool_input(tool_name: &str, input_json: Option<&str>) -> Pa
             feature = "claude",
             feature = "codex",
             feature = "cursor",
+            feature = "grok",
             feature = "pi"
         ))]
         command,

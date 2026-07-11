@@ -41,6 +41,7 @@ pub(crate) use event::watch_smol;
     feature = "claude",
     feature = "copilot",
     feature = "gemini",
+    feature = "grok",
     feature = "pi"
 ))]
 pub(crate) use event::watch_smol_opt;

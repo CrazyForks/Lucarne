@@ -39,6 +39,7 @@ fn journey_53_linkme_descriptor_registers_runtime_history_and_catalog() {
         .collect::<Vec<_>>();
     assert!(ids.contains(&"codex"));
     assert!(ids.contains(&"pi"));
+    assert!(ids.contains(&"grok"));
 }
 
 #[test]

@@ -72,3 +72,17 @@ Provider responsibility must not be moved into public/common/core layers.
 - `agent-sessions` parsed provider structs should expose only data consumed by descriptor, parse, discovery, or watch contracts. Do not keep unused convenience getters, raw provider fields, or generic project aggregation APIs as speculative compatibility.
 - Do not reintroduce a generic raw parser bridge such as `ProviderParser -> ProviderParsed<Body>`. Provider descriptors must enter through semantic byte parsing, discovery metadata parsing, or watch parsing; provider-private helpers may exist only as implementation details below that boundary.
 - Provider and watch helpers must compile in `--no-default-features` single-provider matrices. Do not rely on `--all-features` to hide unused imports, dead helpers, or tests that only compile when unrelated providers are enabled.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in GitHub Issues for `tuchg/Lucarne` (via `gh`). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout (`CONTEXT.md` + `docs/adr/` at repo root). See `docs/agents/domain.md`.

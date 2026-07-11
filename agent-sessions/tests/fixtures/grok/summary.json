@@ -1,0 +1,12 @@
+{
+  "info": {
+    "id": "019f4f1c-8ae8-7632-adb2-6133aee3adf3",
+    "cwd": "/tmp/project"
+  },
+  "session_summary": "Hello Grok fixture",
+  "generated_title": "Hello Grok fixture",
+  "created_at": "2026-07-11T02:58:18.587034Z",
+  "updated_at": "2026-07-11T03:00:00.000000Z",
+  "current_model_id": "grok-4.5",
+  "num_messages": 4
+}

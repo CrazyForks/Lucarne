@@ -11,6 +11,7 @@ use crate::{ParseSelection, Result, agent_session::SessionMeta};
     feature = "copilot",
     feature = "cursor",
     feature = "gemini",
+    feature = "grok",
     feature = "pi"
 ))]
 use super::{WatchAssistantMessage, WatchEventMeta, WatchTurnCompleted};
@@ -127,6 +128,7 @@ pub(super) fn normalize_provider_watch_events(
     feature = "copilot",
     feature = "cursor",
     feature = "gemini",
+    feature = "grok",
     feature = "pi"
 ))]
 pub(crate) fn synthesize_task_complete_from_terminal_responses(
@@ -262,6 +264,7 @@ pub(crate) fn latest_prompt_timestamp(events: &[WatchEvent]) -> Option<smol_str:
     feature = "copilot",
     feature = "cursor",
     feature = "gemini",
+    feature = "grok",
     feature = "pi"
 ))]
 fn timestamp_duration_ms(start: &str, end: &str) -> Option<u64> {
@@ -276,6 +279,7 @@ fn timestamp_duration_ms(start: &str, end: &str) -> Option<u64> {
     feature = "copilot",
     feature = "cursor",
     feature = "gemini",
+    feature = "grok",
     feature = "pi"
 ))]
 fn parse_utc_rfc3339_millis(timestamp: &str) -> Option<i64> {
@@ -342,6 +346,7 @@ fn parse_utc_rfc3339_millis(timestamp: &str) -> Option<i64> {
     feature = "copilot",
     feature = "cursor",
     feature = "gemini",
+    feature = "grok",
     feature = "pi"
 ))]
 fn parse_digits(bytes: &[u8], start: usize, len: usize) -> Option<u32> {
@@ -360,6 +365,7 @@ fn parse_digits(bytes: &[u8], start: usize, len: usize) -> Option<u32> {
     feature = "copilot",
     feature = "cursor",
     feature = "gemini",
+    feature = "grok",
     feature = "pi"
 ))]
 fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
@@ -380,7 +386,8 @@ mod tests {
         feature = "claude",
         feature = "copilot",
         feature = "cursor",
-        feature = "pi"
+        feature = "grok",
+    feature = "pi"
     ))]
     use std::path::Path;
 
@@ -389,7 +396,8 @@ mod tests {
         feature = "claude",
         feature = "copilot",
         feature = "cursor",
-        feature = "pi"
+        feature = "grok",
+    feature = "pi"
     ))]
     use crate::ParseSelection;
     #[cfg(any(
@@ -397,7 +405,8 @@ mod tests {
         feature = "claude",
         feature = "copilot",
         feature = "cursor",
-        feature = "pi"
+        feature = "grok",
+    feature = "pi"
     ))]
     use crate::watch::WatchProvider;
 
@@ -406,7 +415,8 @@ mod tests {
         feature = "claude",
         feature = "copilot",
         feature = "cursor",
-        feature = "pi"
+        feature = "grok",
+    feature = "pi"
     ))]
     fn watch_provider(id: &str) -> WatchProvider {
         crate::agent_provider(id).expect("watch provider")
@@ -437,6 +447,135 @@ mod tests {
 
         assert_eq!(parsed.session_id.as_deref(), Some("cursor-reader-session"));
         assert_eq!(parsed.events.len(), 1);
+    }
+
+    #[cfg(feature = "grok")]
+    #[test]
+    fn parse_provider_reader_grok_delta_only_window_emits_assistant() {
+        // Watch hot path feeds only the appended byte window, not the full file.
+        let path = Path::new("/tmp/grok-delta/updates.jsonl");
+        let delta = br#"{"timestamp":"2026-05-03T00:02:06.000Z","method":"session/update","params":{"sessionId":"sid-delta","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"delta only"}}}}
+"#;
+        let parsed = parse_provider_reader(
+            watch_provider("grok"),
+            path,
+            delta.to_vec(),
+            ParseSelection::empty().with_messages(),
+        )
+        .unwrap();
+        assert!(
+            parsed.events.iter().any(|event| matches!(
+                event,
+                crate::watch::WatchEvent::AssistantMessage(message)
+                    if message.text.as_deref() == Some("delta only")
+            )),
+            "delta window must parse without full-session context: {:?}",
+            parsed.events
+        );
+    }
+
+    #[cfg(feature = "grok")]
+    #[test]
+    fn grok_supports_incremental_watch_events() {
+        assert!(watch_provider("grok").supports_incremental_watch_events());
+        assert!(watch_provider("grok").needs_watch_state_seed());
+        assert_eq!(
+            watch_provider("grok").initial_watch_directory_depth(),
+            Some(3)
+        );
+    }
+
+    #[cfg(feature = "grok")]
+    #[test]
+    fn parse_provider_reader_grok_projects_user_assistant_thought_and_tools() {
+        // F2.05: real parse_watch_reader path (descriptor → ProviderWatchEvents).
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/grok/updates.jsonl");
+        let bytes = std::fs::read(&fixture).expect("grok fixture");
+        // Sibling summary for title/cwd seed (same layout as real sessions).
+        let session_dir = tempfile::tempdir().unwrap();
+        let updates = session_dir.path().join("updates.jsonl");
+        let summary = session_dir.path().join("summary.json");
+        std::fs::write(&updates, &bytes).unwrap();
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/grok/summary.json"),
+            &summary,
+        )
+        .unwrap();
+
+        let parsed = parse_provider_reader(
+            watch_provider("grok"),
+            &updates,
+            bytes,
+            ParseSelection::full(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            parsed.session_id.as_deref(),
+            Some("019f4f1c-8ae8-7632-adb2-6133aee3adf3")
+        );
+        assert_eq!(parsed.cwd.as_deref(), Some("/tmp/project"));
+        assert_eq!(parsed.title.as_deref(), Some("Hello Grok fixture"));
+
+        assert!(
+            parsed.events.iter().any(|event| matches!(
+                event,
+                crate::watch::WatchEvent::UserMessage(message)
+                    if message.text.as_deref() == Some("hello grok")
+            )),
+            "expected user message watch event, got {:?}",
+            parsed.events
+        );
+        assert!(
+            parsed.events.iter().any(|event| matches!(
+                event,
+                crate::watch::WatchEvent::AssistantMessage(message)
+                    if message.phase.as_deref() == Some("thinking")
+                        && message.text.as_deref() == Some("thinking about reply")
+            )),
+            "expected thought/reasoning watch event, got {:?}",
+            parsed.events
+        );
+        assert!(
+            parsed.events.iter().any(|event| matches!(
+                event,
+                crate::watch::WatchEvent::AssistantMessage(message)
+                    if message.phase.is_none()
+                        && message.text.as_deref() == Some("Hello from Grok")
+            )),
+            "expected assistant text watch event, got {:?}",
+            parsed.events
+        );
+        assert!(
+            parsed.events.iter().any(|event| matches!(
+                event,
+                crate::watch::WatchEvent::ToolCall(call)
+                    if call.name.as_str() == "read_file"
+                        && call.call_id.as_deref() == Some("call-1")
+            )),
+            "expected tool_call watch event, got {:?}",
+            parsed.events
+        );
+        assert!(
+            parsed.events.iter().any(|event| matches!(
+                event,
+                crate::watch::WatchEvent::ToolResult(result)
+                    if result.call_id.as_deref() == Some("call-1")
+                        && !result.is_error
+                        && result.output_json.as_deref() == Some("file contents")
+            )),
+            "expected tool_result watch event, got {:?}",
+            parsed.events
+        );
+        assert!(
+            parsed
+                .events
+                .iter()
+                .any(|event| matches!(event, crate::watch::WatchEvent::TurnCompleted(_))),
+            "expected turn_completed watch event, got {:?}",
+            parsed.events
+        );
     }
 
     #[cfg(feature = "cursor")]

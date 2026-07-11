@@ -1,0 +1,12 @@
+# Grok ACP interrupt via session/cancel
+EXPECT_IN_CONTAINS "initialize"
+OUT {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}
+EXPECT_IN_CONTAINS "session/new"
+OUT {"jsonrpc":"2.0","id":2,"result":{"sessionId":"sess-int"}}
+EXPECT_IN_CONTAINS "session/prompt"
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-int","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"working"}}}}
+WAIT_MS 50
+EXPECT_IN_CONTAINS "session/cancel"
+OUT {"jsonrpc":"2.0","id":4,"result":{}}
+OUT {"jsonrpc":"2.0","id":3,"result":{}}
+EXIT 0

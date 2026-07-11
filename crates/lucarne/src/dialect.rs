@@ -539,7 +539,12 @@ pub fn normalize_agent_command_name(raw: &str) -> &str {
     raw.trim().trim_start_matches('/')
 }
 
-#[cfg(any(feature = "claude", feature = "gemini", feature = "pi"))]
+#[cfg(any(
+    feature = "claude",
+    feature = "gemini",
+    feature = "pi",
+    feature = "grok"
+))]
 pub(crate) fn model_args(command: &CommandInvocation) -> Option<(String, Option<String>)> {
     let model = command
         .values
@@ -568,7 +573,12 @@ pub(crate) fn model_args(command: &CommandInvocation) -> Option<(String, Option<
     Some((model.into(), reasoning.map(Into::into)))
 }
 
-#[cfg(any(feature = "claude", feature = "gemini", feature = "pi"))]
+#[cfg(any(
+    feature = "claude",
+    feature = "gemini",
+    feature = "pi",
+    feature = "grok"
+))]
 pub(crate) fn permission_arg(command: &CommandInvocation) -> Option<String> {
     let mode = command
         .values
@@ -582,7 +592,7 @@ pub(crate) fn permission_arg(command: &CommandInvocation) -> Option<String> {
     (!mode.is_empty()).then(|| mode.into())
 }
 
-#[cfg(any(feature = "claude", feature = "pi"))]
+#[cfg(any(feature = "claude", feature = "pi", feature = "grok"))]
 pub(crate) fn fork_name(command: &CommandInvocation) -> Option<String> {
     command
         .values

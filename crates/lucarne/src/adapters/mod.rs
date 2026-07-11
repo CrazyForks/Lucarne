@@ -20,6 +20,9 @@ pub mod claude;
 #[cfg(feature = "codex")]
 pub mod codex;
 
+#[cfg(feature = "grok")]
+pub mod grok;
+
 pub mod codex_prep;
 pub mod version;
 

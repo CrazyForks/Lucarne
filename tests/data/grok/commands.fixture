@@ -1,0 +1,7 @@
+# Grok ACP command surface — available_commands_update + control session
+EXPECT_IN_CONTAINS "initialize"
+OUT {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true},"_meta":{"agentVersion":"0.2.93"}}}
+EXPECT_IN_CONTAINS "session/new"
+OUT {"jsonrpc":"2.0","id":2,"result":{"sessionId":"019f4f1c-cmd-fixture-0000000001","models":{"currentModelId":"grok-4.5","availableModels":[{"modelId":"grok-4.5","name":"Grok 4.5","description":"frontier model","_meta":{"reasoningEffort":"high","reasoningEfforts":[{"id":"high","default":true},{"id":"low"}]}}]}}}
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"019f4f1c-cmd-fixture-0000000001","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"compact","description":"Compress conversation history"},{"name":"help","description":"Show help"},{"name":"always-approve","description":"Toggle always approve"},{"name":"status","description":"must not become native"},{"name":"model","description":"must not become native"},{"name":"tdd","description":"TDD skill","_meta":{"scope":"user","path":"/skills/tdd/SKILL.md"}}]}}}
+EXIT 0

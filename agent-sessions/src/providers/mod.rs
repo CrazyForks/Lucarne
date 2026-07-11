@@ -10,6 +10,8 @@ pub mod cursor;
 mod descriptor;
 #[cfg(feature = "gemini")]
 pub mod gemini;
+#[cfg(feature = "grok")]
+pub mod grok;
 #[cfg(feature = "pi")]
 pub mod pi;
 

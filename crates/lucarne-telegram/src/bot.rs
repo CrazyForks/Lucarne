@@ -80,6 +80,7 @@ const HISTORY_USER_MARKER: &str = "👤 ";
 const MAX_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
 const NOTIFICATION_TOPIC_TITLE: &str = "agent notifications";
 const RECENT_UNBOUND_TOPIC_CREATION_LIMIT: usize = 32;
+const AGENT_NOTIFICATION_TEXT_LIMIT: usize = 8192;
 
 const TELEGRAM_MENU_COMMANDS: &[TelegramBotCommand] = &[
     TelegramBotCommand {
@@ -518,6 +519,31 @@ impl Bot {
         drop(noop_system_notifications);
     }
 
+    fn spawn_core_event_watcher(
+        bot: Arc<Self>,
+        mut core_events: lucarne::core_service::CoreEventReceiver,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
+                match core_events.recv().await {
+                    Ok(event) => {
+                        let bot = bot.clone();
+                        if let Err(e) = bot.handle_core_event(event).await {
+                            warn!(target: "lucarne_telegram::bot", error = %e, "core event handler error");
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        warn!(target: "lucarne_telegram::bot", skipped, "core event watch lagged");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        warn!(target: "lucarne_telegram::bot", "core event watch closed");
+                        break;
+                    }
+                }
+            }
+        })
+    }
+
     /// Consume channel events and daemon system notifications forever.
     pub async fn run_with_system_notifications(
         self: Arc<Self>,
@@ -526,32 +552,11 @@ impl Bot {
         lucarne::memory_profile_snapshot!("lucarne_telegram.bot.run.start");
         info!(target: "lucarne_telegram::bot", channel = self.channel.name(), "bot run loop starting");
         let core_watcher = {
-            let bot = self.clone();
-            let mut core_events = self.core.watch_events();
+            let core_events = self.core.watch_events();
             lucarne::memory_profile_snapshot!(
                 "lucarne_telegram.bot.run.after_watch_events_subscribe"
             );
-            let core_watcher = tokio::spawn(async move {
-                loop {
-                    match core_events.recv().await {
-                        Ok(event) => {
-                            let bot = bot.clone();
-                            tokio::spawn(async move {
-                                if let Err(e) = bot.handle_core_event(event).await {
-                                    warn!(target: "lucarne_telegram::bot", error = %e, "core event handler error");
-                                }
-                            });
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                            warn!(target: "lucarne_telegram::bot", skipped, "core event watch lagged");
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            warn!(target: "lucarne_telegram::bot", "core event watch closed");
-                            break;
-                        }
-                    }
-                }
-            });
+            let core_watcher = Self::spawn_core_event_watcher(self.clone(), core_events);
             lucarne::memory_profile_snapshot!("lucarne_telegram.bot.run.after_core_watcher_spawn");
             core_watcher
         };
@@ -668,7 +673,7 @@ impl Bot {
         let mut session = self.state.get(&workspace);
         if session.is_none() {
             self.state
-                .hydrate_unbound_control_workspaces(&self.entry.chat)
+                .hydrate_workspace(&workspace, &self.entry.chat)
                 .map_err(|err| err.to_string())?;
             session = self.state.get(&workspace);
         }
@@ -5108,8 +5113,9 @@ fn render_agent_notification(
         .as_ref()
         .map(|path| compact_path(&path.display().to_string(), 58))
         .unwrap_or_else(|| "-".to_string());
+    let text = bounded_agent_notification_text(text);
     let body = render_agent_message_markdown(
-        text,
+        text.as_ref(),
         &AgentMessageFooter {
             cost: None,
             session: Some(session_ref.to_string()),
@@ -5117,6 +5123,20 @@ fn render_agent_notification(
         },
     );
     OutgoingMessage::markdown(body)
+}
+
+fn bounded_agent_notification_text(text: &str) -> std::borrow::Cow<'_, str> {
+    let mut chars = text.char_indices();
+    let Some((cut_at, _)) = chars.nth(AGENT_NOTIFICATION_TEXT_LIMIT) else {
+        return std::borrow::Cow::Borrowed(text);
+    };
+    let omitted = text[cut_at..].chars().count();
+    let mut out = String::with_capacity(cut_at + 96);
+    out.push_str(text[..cut_at].trim_end());
+    out.push_str("\n\n[truncated ");
+    out.push_str(&omitted.to_string());
+    out.push_str(" chars; full output remains in the agent session]");
+    std::borrow::Cow::Owned(out)
 }
 
 fn short_line(s: &str, max: usize) -> String {
@@ -6821,7 +6841,7 @@ mod tests {
         fs,
         path::{Path, PathBuf},
         sync::{
-            atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering},
+            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering},
             Arc, Mutex as StdMutex,
         },
         time::Duration,
@@ -6844,6 +6864,86 @@ mod tests {
         ] {
             assert!(source.contains(label), "missing snapshot {label}");
         }
+    }
+
+    #[test]
+    fn core_event_watcher_processes_events_with_backpressure() {
+        let source = include_str!("bot.rs");
+        let start = source
+            .find("fn spawn_core_event_watcher(")
+            .expect("core watcher spawn");
+        let end = source[start..]
+            .find("    /// Consume channel events and daemon system notifications forever.")
+            .expect("core watcher end marker");
+        let core_watcher = &source[start..start + end];
+
+        assert_eq!(
+            core_watcher.matches("tokio::spawn").count(),
+            1,
+            "core events must not spawn one task per event"
+        );
+        assert!(
+            core_watcher.contains("bot.handle_core_event(event).await"),
+            "core events should be awaited inside the watcher for backpressure"
+        );
+    }
+
+    #[tokio::test]
+    async fn core_event_watcher_backpressures_slow_notification_delivery() {
+        let channel = Arc::new(RecordingChannel::default());
+        channel.delay_sends_by(Duration::from_millis(100));
+        let runtime = Arc::new(AgentRuntime::new());
+        runtime.register(Arc::new(RecordingProvider::new(Arc::new(StdMutex::new(
+            Vec::new(),
+        )))));
+        let core = core_with_runtime(runtime);
+        let bot = Arc::new(Bot::new(
+            Arc::clone(&channel) as Arc<dyn Channel>,
+            Arc::clone(&core),
+            WorkspaceHandle::new(ChatId::new("100"), WorkspaceId::new("")),
+        ));
+        let workspace = WorkspaceId::new("codex:resume:burst");
+        core.upsert_workspace_binding(
+            ControlWorkspaceId::new(workspace.as_str()),
+            OpenWorkspaceRequest {
+                provider_id: "codex",
+                project_path: Some(PathBuf::from("/tmp/project")),
+                title: "codex burst".into(),
+            },
+            Some("burst"),
+        )
+        .expect("persist unbound workspace");
+
+        let (tx, rx) = broadcast::channel(64);
+        let watcher = Bot::spawn_core_event_watcher(Arc::clone(&bot), rx);
+        for i in 0..16 {
+            tx.send(CoreEvent::TimelineEvent {
+                workspace_id: ControlWorkspaceId::new(workspace.as_str()),
+                turn_id: None,
+                event: AgentEvent::Message(MessageEvent {
+                    role: MessageRole::Assistant,
+                    text: format!("assistant reply {i}").into(),
+                    streaming: false,
+                }),
+            })
+            .expect("send core event");
+        }
+
+        timeout(Duration::from_millis(200), async {
+            while channel.max_concurrent_sends() == 0 {
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("first notification send should start");
+        sleep(Duration::from_millis(50)).await;
+
+        assert_eq!(
+            channel.max_concurrent_sends(),
+            1,
+            "slow notification delivery must not create an unbounded per-event send backlog"
+        );
+        watcher.abort();
     }
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -6893,6 +6993,34 @@ mod tests {
                 .unwrap()
                 .push_back(ids.iter().map(|id| id.to_string()).collect());
         }
+
+        fn delay_sends_by(&self, delay: Duration) {
+            let delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+            self.send_delay_ms.store(delay_ms, AtomicOrdering::SeqCst);
+        }
+
+        fn max_concurrent_sends(&self) -> usize {
+            self.max_concurrent_sends.load(AtomicOrdering::SeqCst)
+        }
+
+        fn note_send_started(&self) -> SendConcurrencyGuard<'_> {
+            let active = self.active_sends.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+            self.max_concurrent_sends
+                .fetch_max(active, AtomicOrdering::SeqCst);
+            SendConcurrencyGuard {
+                active_sends: &self.active_sends,
+            }
+        }
+    }
+
+    struct SendConcurrencyGuard<'a> {
+        active_sends: &'a AtomicUsize,
+    }
+
+    impl Drop for SendConcurrencyGuard<'_> {
+        fn drop(&mut self) {
+            self.active_sends.fetch_sub(1, AtomicOrdering::SeqCst);
+        }
     }
 
     #[derive(Default)]
@@ -6908,6 +7036,9 @@ mod tests {
         deleted_workspaces: StdMutex<Vec<String>>,
         next_workspace_id: AtomicUsize,
         next_message_id: AtomicUsize,
+        send_delay_ms: AtomicU64,
+        active_sends: AtomicUsize,
+        max_concurrent_sends: AtomicUsize,
         send_results: StdMutex<VecDeque<std::result::Result<(), ChannelError>>>,
         missing_workspaces: StdMutex<Vec<String>>,
         probed_workspaces: StdMutex<Vec<String>>,
@@ -6940,6 +7071,11 @@ mod tests {
             target: &WorkspaceHandle,
             msg: OutgoingMessage,
         ) -> Result<Vec<MessageId>> {
+            let _concurrency_guard = self.note_send_started();
+            let delay_ms = self.send_delay_ms.load(AtomicOrdering::SeqCst);
+            if delay_ms > 0 {
+                sleep(Duration::from_millis(delay_ms)).await;
+            }
             if self
                 .missing_workspaces
                 .lock()
@@ -11239,6 +11375,54 @@ done
         assert_eq!(sent.len(), 1);
         assert!(sent[0].body.contains("assistant reply"));
         assert!(sent[0].body.contains("session: `thread-live`"));
+    }
+
+    #[tokio::test]
+    async fn history_watch_message_hydrates_only_target_unbound_workspace() {
+        let channel = Arc::new(RecordingChannel::default());
+        let runtime = Arc::new(AgentRuntime::new());
+        runtime.register(Arc::new(RecordingProvider::new(Arc::new(StdMutex::new(
+            Vec::new(),
+        )))));
+        let core = core_with_runtime(runtime);
+        let bot = Arc::new(Bot::new(
+            Arc::clone(&channel) as Arc<dyn Channel>,
+            Arc::clone(&core),
+            WorkspaceHandle::new(ChatId::new("100"), WorkspaceId::new("")),
+        ));
+        let target = WorkspaceId::new("codex:resume:target");
+        let unrelated = WorkspaceId::new("codex:resume:unrelated");
+        for (workspace, resume_ref) in [(&target, "target"), (&unrelated, "unrelated")] {
+            core.upsert_workspace_binding(
+                ControlWorkspaceId::new(workspace.as_str()),
+                OpenWorkspaceRequest {
+                    provider_id: "codex",
+                    project_path: Some(PathBuf::from("/tmp/project")),
+                    title: format!("codex {resume_ref}"),
+                },
+                Some(resume_ref),
+            )
+            .expect("persist unbound workspace");
+        }
+
+        Arc::clone(&bot)
+            .handle_core_event(CoreEvent::TimelineEvent {
+                workspace_id: ControlWorkspaceId::new(target.as_str()),
+                turn_id: None,
+                event: AgentEvent::Message(MessageEvent {
+                    role: MessageRole::Assistant,
+                    text: "assistant reply".into(),
+                    streaming: false,
+                }),
+            })
+            .await
+            .expect("history-watch message should hydrate target workspace");
+
+        assert!(bot.state.get(&target).is_some());
+        assert!(
+            bot.state.get(&unrelated).is_none(),
+            "handling one history event must not hydrate every control workspace"
+        );
     }
 
     #[tokio::test]
@@ -15638,6 +15822,32 @@ done
 
         assert!(msg.body.contains("cwd: `…/opensource/conductor/lucarnex`"));
         assert!(!msg.body.contains("/Volumes/Data"));
+    }
+
+    #[test]
+    fn agent_notification_truncates_large_history_text() {
+        let session = WorkSession {
+            workspace: WorkspaceId::new("topic-1"),
+            chat: ChatId::new("chat-1"),
+            provider_id: "codex",
+            project_path: Some(PathBuf::from("/tmp/project")),
+            title: "project".into(),
+            live: None,
+            resume_ref: None,
+        };
+        let text = format!(
+            "{}TAIL_SHOULD_NOT_APPEAR",
+            "x".repeat(AGENT_NOTIFICATION_TEXT_LIMIT * 4)
+        );
+
+        let msg = render_agent_notification(&session, Some("thread-1"), &text);
+
+        assert!(msg.body.contains("[truncated "));
+        assert!(!msg.body.contains("TAIL_SHOULD_NOT_APPEAR"));
+        assert!(
+            msg.body.len() < text.len() / 2,
+            "notification should not retain the full history text"
+        );
     }
 
     #[test]

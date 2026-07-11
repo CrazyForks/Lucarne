@@ -12,3 +12,5 @@ pub mod copilot;
 pub mod gemini;
 #[cfg(feature = "pi")]
 pub mod pi_rpc;
+#[cfg(feature = "grok")]
+pub mod grok_acp;

@@ -19,6 +19,7 @@ where
     feature = "claude",
     feature = "copilot",
     feature = "gemini",
+    feature = "grok",
     feature = "pi"
 ))]
 pub(crate) fn watch_smol_opt<T>(value: Option<T>) -> Option<SmolStr>
@@ -233,6 +234,7 @@ impl WatchEvent {
         feature = "copilot",
         feature = "cursor",
         feature = "gemini",
+        feature = "grok",
         feature = "pi"
     ))]
     pub(crate) fn assistant_message_mut(&mut self) -> Option<&mut WatchAssistantMessage> {

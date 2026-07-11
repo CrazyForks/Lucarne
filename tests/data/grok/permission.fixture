@@ -1,0 +1,14 @@
+# Grok ACP permission request/response
+EXPECT_IN_CONTAINS "initialize"
+OUT {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}
+EXPECT_IN_CONTAINS "session/new"
+OUT {"jsonrpc":"2.0","id":2,"result":{"sessionId":"sess-perm"}}
+EXPECT_IN_CONTAINS "session/prompt"
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-perm","update":{"sessionUpdate":"tool_call","toolCallId":"call-p1","title":"run_terminal_command","rawInput":{"command":"ls"}}}}
+OUT {"jsonrpc":"2.0","id":10,"method":"session/request_permission","params":{"toolCall":{"toolCallId":"call-p1","title":"run_terminal_command"}}}
+EXPECT_IN_CONTAINS "allow-once"
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-perm","update":{"sessionUpdate":"tool_call_update","toolCallId":"call-p1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"ok"}}]}}}
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-perm","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"done"}}}}
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-perm","update":{"sessionUpdate":"turn_completed","stop_reason":"end_turn"}}}
+OUT {"jsonrpc":"2.0","id":3,"result":{}}
+EXIT 0

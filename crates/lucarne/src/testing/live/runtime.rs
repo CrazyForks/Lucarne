@@ -490,6 +490,13 @@ fn live_open_request(
             "extra_env": extra_env,
             "extra_args": extra_args,
         }),
+        "grok" => json!({
+            // Bypass maps to --always-approve so live tool/write is not stuck
+            // on session/request_permission (Codex uses protocol approvals instead).
+            "permission_mode": "bypass",
+            "extra_env": extra_env,
+            "extra_args": extra_args,
+        }),
         other => return Err(format!("unsupported live runtime provider {other}")),
     };
 
@@ -519,6 +526,12 @@ fn live_resume_request(
         }),
         "codex" | "gemini" | "pi" => json!({
             "cwd": workdir,
+            "extra_env": extra_env,
+            "extra_args": extra_args,
+        }),
+        "grok" => json!({
+            "cwd": workdir,
+            "permission_mode": "bypass",
             "extra_env": extra_env,
             "extra_args": extra_args,
         }),

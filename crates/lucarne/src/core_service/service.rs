@@ -5112,8 +5112,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_resource_snapshot_hides_managed_sessions_from_observed_and_uses_live_activity(
-    ) {
+    async fn agent_resource_snapshot_hides_managed_sessions_from_observed_and_uses_live_activity() {
         let process_id = std::process::id() as i32;
         let runtime = Arc::new(AgentRuntime::new());
         runtime.register(Arc::new(PidProvider { process_id }));
@@ -7275,6 +7274,216 @@ mod tests {
         .expect("matching watch update")
     }
 
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn history_session_watch_emits_core_event_for_existing_grok_append() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let grok_home = temp.path().join("grok");
+        let project_path = temp.path().join("grok-project");
+        fs::create_dir_all(&project_path).expect("project dir");
+        let session_id = "019f4f1c-hist-watch-000000000001";
+        let cwd = project_path.to_str().expect("utf8 project");
+        let session_path =
+            write_grok_history_session(&grok_home, session_id, cwd, "2026-05-03T00:00:01.000Z", "ping");
+
+        // Stabilize mtime before watcher baselines the path (parity with codex).
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        let runtime = Arc::new(AgentRuntime::new());
+        // Runtime must know provider id "grok" so ensure_history_watch_workspace
+        // can intern it via provider_id_static (CatalogProvider is codex-only).
+        runtime.register(Arc::new(RequestRecordingProvider::new("grok")));
+        let core = LucarneCore::from_runtime_and_store(
+            runtime,
+            ControlPlaneSqliteStore::open_in_memory().expect("store"),
+        )
+        .expect("core");
+        let mut events = core.watch_events();
+
+        // Drive SessionWatcher in-process (same projection path as the core
+        // history loop) so the assertion is deterministic without FSEvents races.
+        let mut watcher = SessionWatcher::start(
+            WatchConfig::new()
+                .providers([watch_provider("grok")])
+                .provider_roots(watch_provider("grok"), [session_path.clone()])
+                .selection(history_watch_selection())
+                .debounce(Duration::from_millis(10)),
+        )
+        .expect("start grok watcher on updates.jsonl");
+        // Drain any startup noise.
+        let _ = tokio::time::timeout(Duration::from_millis(100), watcher.next()).await;
+
+        append_grok_assistant_response(
+            &session_path,
+            "2026-05-03T00:02:06.000Z",
+            session_id,
+            "grok history watch assistant received",
+        );
+        let updated = tokio::time::timeout(Duration::from_secs(6), async {
+            loop {
+                let updates = watcher
+                    .next()
+                    .await
+                    .expect("watch stream")
+                    .expect("watch update");
+                if updates.iter().any(|u| {
+                    u.change == WatchChange::Updated
+                        && !u.events.is_empty()
+                        && (u.session_id.as_deref() == Some(session_id)
+                            || u.path.ends_with("updates.jsonl"))
+                }) {
+                    break updates;
+                }
+            }
+        })
+        .await
+        .expect("updated append with events");
+        assert!(
+            updated.iter().any(|u| !u.events.is_empty()),
+            "expected non-empty watch events on grok append: {updated:?}"
+        );
+        core.handle_history_watch_updates(updated);
+
+        let text = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let event = events.recv().await.expect("core event");
+                if let CoreEvent::TimelineEvent {
+                    event:
+                        AgentEvent::Message(crate::agent_runtime::MessageEvent {
+                            role: crate::agent_runtime::MessageRole::Assistant,
+                            text,
+                            streaming: false,
+                        }),
+                    ..
+                } = event
+                {
+                    break text;
+                }
+            }
+        })
+        .await
+        .expect("assistant timeline event");
+        assert!(
+            text.contains("grok history watch assistant received"),
+            "unexpected assistant text: {text}"
+        );
+        let observed_recent = core.observed_recent_sessions();
+        assert!(
+            observed_recent.iter().any(|session| {
+                session.provider_id == "grok"
+                    && session.native_resume_ref.as_str() == session_id
+            }),
+            "grok history watch append should populate observed_recent_sessions: {observed_recent:?}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn history_session_watch_emits_core_event_for_new_grok_session_after_created_baseline() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let grok_home = temp.path().join("grok");
+        let project_path = temp.path().join("grok-new-project");
+        fs::create_dir_all(&project_path).expect("project dir");
+        let sessions_root = grok_home.join("sessions");
+        fs::create_dir_all(&sessions_root).expect("sessions root");
+        let cwd = project_path.to_str().expect("utf8 project");
+
+        let runtime = Arc::new(AgentRuntime::new());
+        runtime.register(Arc::new(RequestRecordingProvider::new("grok")));
+        let core = LucarneCore::from_runtime_and_store(
+            runtime,
+            ControlPlaneSqliteStore::open_in_memory().expect("store"),
+        )
+        .expect("core");
+        let mut events = core.watch_events();
+
+        let mut watcher = SessionWatcher::start(
+            WatchConfig::new()
+                .providers([watch_provider("grok")])
+                .provider_roots(watch_provider("grok"), [sessions_root.clone()])
+                .selection(history_watch_selection())
+                .debounce(Duration::from_millis(10))
+                .scan_interval(Duration::from_millis(25)),
+        )
+        .expect("start grok watcher");
+        let _ = tokio::time::timeout(Duration::from_millis(100), watcher.next()).await;
+
+        let session_id = "019f4f1c-hist-new-000000000002";
+        let session_path =
+            write_grok_history_session(&grok_home, session_id, cwd, "2026-05-03T00:00:01.000Z", "ping");
+        // Accept Created with or without session_id (metadata race); match path.
+        let created = tokio::time::timeout(Duration::from_secs(6), async {
+            loop {
+                let updates = watcher
+                    .next()
+                    .await
+                    .expect("watch stream")
+                    .expect("watch update");
+                if updates.iter().any(|u| {
+                    u.change == WatchChange::Created
+                        && (u.session_id.as_deref() == Some(session_id)
+                            || u.path.ends_with("updates.jsonl"))
+                }) {
+                    break updates;
+                }
+            }
+        })
+        .await
+        .expect("created update");
+        core.handle_history_watch_updates(created);
+
+        append_grok_assistant_response(
+            &session_path,
+            "2026-05-03T00:02:06.000Z",
+            session_id,
+            "grok new session watch assistant",
+        );
+        let updated = tokio::time::timeout(Duration::from_secs(6), async {
+            loop {
+                let updates = watcher
+                    .next()
+                    .await
+                    .expect("watch stream")
+                    .expect("watch update");
+                if updates.iter().any(|u| {
+                    u.change == WatchChange::Updated
+                        && !u.events.is_empty()
+                        && (u.session_id.as_deref() == Some(session_id)
+                            || u.path.ends_with("updates.jsonl"))
+                }) {
+                    break updates;
+                }
+            }
+        })
+        .await
+        .expect("updated append");
+        core.handle_history_watch_updates(updated);
+
+        let text = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let event = events.recv().await.expect("core event");
+                if let CoreEvent::TimelineEvent {
+                    event:
+                        AgentEvent::Message(crate::agent_runtime::MessageEvent {
+                            role: crate::agent_runtime::MessageRole::Assistant,
+                            text,
+                            streaming: false,
+                        }),
+                    ..
+                } = event
+                {
+                    break text;
+                }
+            }
+        })
+        .await
+        .expect("assistant timeline event");
+        assert!(
+            text.contains("grok new session watch assistant"),
+            "unexpected assistant text: {text}"
+        );
+    }
+
     #[tokio::test]
     async fn history_watch_update_with_missing_metadata_is_ignored() {
         let runtime = Arc::new(AgentRuntime::new());
@@ -9374,6 +9583,91 @@ mod tests {
         ];
         fs::write(&path, format!("{}\n", lines.join("\n"))).expect("write codex session");
         path
+    }
+
+    fn percent_encode_cwd(cwd: &str) -> String {
+        let mut out = String::with_capacity(cwd.len() * 3);
+        for b in cwd.bytes() {
+            match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    out.push(b as char);
+                }
+                _ => out.push_str(&format!("%{b:02X}")),
+            }
+        }
+        out
+    }
+
+    /// Grok layout: `$GROK_HOME/sessions/<percent-encoded-cwd>/<uuid>/updates.jsonl`.
+    fn write_grok_history_session(
+        grok_home: &Path,
+        session_id: &str,
+        cwd: &str,
+        timestamp: &str,
+        prompt: &str,
+    ) -> PathBuf {
+        let session_dir = grok_home
+            .join("sessions")
+            .join(percent_encode_cwd(cwd))
+            .join(session_id);
+        fs::create_dir_all(&session_dir).expect("grok session dir");
+        let updates = session_dir.join("updates.jsonl");
+        let summary = session_dir.join("summary.json");
+        let line = serde_json::json!({
+            "timestamp": timestamp,
+            "method": "session/update",
+            "params": {
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "user_message_chunk",
+                    "content": { "type": "text", "text": prompt }
+                }
+            }
+        });
+        fs::write(&updates, format!("{line}\n")).expect("write grok updates");
+        fs::write(
+            &summary,
+            serde_json::json!({
+                "info": { "id": session_id, "cwd": cwd },
+                "generated_title": "Grok history watch",
+                "current_model_id": "grok-4.5",
+            })
+            .to_string(),
+        )
+        .expect("write grok summary");
+        updates
+    }
+
+    fn append_grok_assistant_response(path: &Path, timestamp: &str, session_id: &str, text: &str) {
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .expect("open grok updates");
+        let assistant = serde_json::json!({
+            "timestamp": timestamp,
+            "method": "session/update",
+            "params": {
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": { "type": "text", "text": text }
+                }
+            }
+        });
+        let completed = serde_json::json!({
+            "timestamp": timestamp,
+            "method": "session/update",
+            "params": {
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "turn_completed",
+                    "stop_reason": "end_turn"
+                }
+            }
+        });
+        writeln!(file, "{assistant}").expect("append grok assistant");
+        writeln!(file, "{completed}").expect("append grok turn_completed");
+        file.sync_all().expect("sync grok updates");
     }
 
     fn append_codex_assistant_response(path: &Path, timestamp: &str, text: &str) {

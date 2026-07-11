@@ -52,6 +52,7 @@ mod parse_selection;
         feature = "copilot",
         feature = "cursor",
         feature = "gemini",
+        feature = "grok",
         feature = "pi"
     )
 ))]
@@ -86,6 +87,8 @@ pub use providers::copilot::{self, Copilot};
 pub use providers::cursor::{self, Cursor};
 #[cfg(feature = "gemini")]
 pub use providers::gemini::{self, Gemini};
+#[cfg(feature = "grok")]
+pub use providers::grok::{self, Grok};
 #[cfg(feature = "pi")]
 pub use providers::pi::{self, Pi};
 #[cfg(all(feature = "discovery", feature = "agent_session"))]

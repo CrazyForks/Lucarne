@@ -7,6 +7,8 @@ use crate::adapters::codex;
 use crate::adapters::gemini;
 #[cfg(feature = "pi")]
 use crate::adapters::pi;
+#[cfg(feature = "grok")]
+use crate::adapters::grok;
 #[cfg(any(feature = "codex", feature = "gemini"))]
 use crate::adapters::{merged_env_map, resolve_command_for_launch};
 #[cfg(any(feature = "codex", feature = "gemini"))]
@@ -48,11 +50,14 @@ pub enum ProviderKind {
     Gemini,
     #[cfg(feature = "pi")]
     Pi,
+    #[cfg(feature = "grok")]
+    Grok,
     #[cfg(not(any(
         feature = "claude",
         feature = "codex",
         feature = "gemini",
-        feature = "pi"
+        feature = "pi",
+    feature = "grok"
     )))]
     Unavailable,
 }
@@ -68,11 +73,14 @@ impl ProviderKind {
             Self::Gemini => "gemini",
             #[cfg(feature = "pi")]
             Self::Pi => "pi",
+            #[cfg(feature = "grok")]
+            Self::Grok => "grok",
             #[cfg(not(any(
                 feature = "claude",
                 feature = "codex",
                 feature = "gemini",
-                feature = "pi"
+                feature = "pi",
+                feature = "grok"
             )))]
             Self::Unavailable => "unavailable",
         }
@@ -118,11 +126,16 @@ impl LiveProvider {
             ProviderKind::Pi => pi::new(pi::Options {
                 binary: self.binary.clone(),
             }),
+            #[cfg(feature = "grok")]
+            ProviderKind::Grok => grok::new(grok::Options {
+                binary: self.binary.clone(),
+            }),
             #[cfg(not(any(
                 feature = "claude",
                 feature = "codex",
                 feature = "gemini",
-                feature = "pi"
+                feature = "pi",
+                feature = "grok"
             )))]
             ProviderKind::Unavailable => unreachable!("no live provider is compiled"),
         }
@@ -136,13 +149,16 @@ impl LiveProvider {
             ProviderKind::Gemini => Duration::from_secs(4 * 60),
             #[cfg(feature = "pi")]
             ProviderKind::Pi => Duration::from_secs(3 * 60),
+            #[cfg(feature = "grok")]
+            ProviderKind::Grok => Duration::from_secs(3 * 60),
             #[cfg(feature = "claude")]
             ProviderKind::Claude => Duration::from_secs(2 * 60),
             #[cfg(not(any(
                 feature = "claude",
                 feature = "codex",
                 feature = "gemini",
-                feature = "pi"
+                feature = "pi",
+                feature = "grok"
             )))]
             ProviderKind::Unavailable => Duration::from_secs(0),
         }
@@ -154,6 +170,10 @@ impl LiveProvider {
             ProviderKind::Claude => Duration::from_secs(15),
             #[cfg(feature = "pi")]
             ProviderKind::Pi => Duration::from_secs(2),
+            #[cfg(feature = "grok")]
+            // Grok streams many thought/message chunks; need longer quiet
+            // between multi-turn prompts than Pi.
+            ProviderKind::Grok => Duration::from_secs(8),
             #[cfg(feature = "codex")]
             ProviderKind::Codex => Duration::from_millis(1500),
             #[cfg(feature = "gemini")]
@@ -162,7 +182,8 @@ impl LiveProvider {
                 feature = "claude",
                 feature = "codex",
                 feature = "gemini",
-                feature = "pi"
+                feature = "pi",
+                feature = "grok"
             )))]
             ProviderKind::Unavailable => Duration::from_millis(0),
         }
@@ -182,11 +203,18 @@ impl LiveProvider {
             ProviderKind::Gemini => Vec::new(),
             #[cfg(feature = "pi")]
             ProviderKind::Pi => Vec::new(),
+            #[cfg(feature = "grok")]
+            ProviderKind::Grok => {
+                // Keep live tool/write flows unblocked; reject/approval tests
+                // still receive PermissionRequest when the model asks.
+                vec!["--always-approve".into()]
+            }
             #[cfg(not(any(
                 feature = "claude",
                 feature = "codex",
                 feature = "gemini",
-                feature = "pi"
+                feature = "pi",
+                feature = "grok"
             )))]
             ProviderKind::Unavailable => Vec::new(),
         }
@@ -195,7 +223,7 @@ impl LiveProvider {
     pub fn extra_env(
         &self,
         _temp_root: &Path,
-        _workdir: &Path,
+        workdir: &Path,
     ) -> Result<BTreeMap<String, String>, String> {
         match self.kind {
             #[cfg(feature = "codex")]
@@ -206,11 +234,21 @@ impl LiveProvider {
             ProviderKind::Gemini => Ok(BTreeMap::new()),
             #[cfg(feature = "pi")]
             ProviderKind::Pi => Ok(BTreeMap::new()),
+            #[cfg(feature = "grok")]
+            ProviderKind::Grok => {
+                let home = workdir.join(".grok-home");
+                prepare_grok_live_home(&home)?;
+                Ok(BTreeMap::from([(
+                    "GROK_HOME".into(),
+                    home.to_string_lossy().into_owned(),
+                )]))
+            }
             #[cfg(not(any(
                 feature = "claude",
                 feature = "codex",
                 feature = "gemini",
-                feature = "pi"
+                feature = "pi",
+                feature = "grok"
             )))]
             ProviderKind::Unavailable => Ok(BTreeMap::new()),
         }
@@ -231,11 +269,18 @@ impl LiveProvider {
             ProviderKind::Gemini => Ok(BTreeMap::new()),
             #[cfg(feature = "pi")]
             ProviderKind::Pi => Ok(BTreeMap::new()),
+            #[cfg(feature = "grok")]
+            ProviderKind::Grok => {
+                let home = workdir.join(".grok-home");
+                prepare_grok_live_home(&home)?;
+                Ok(BTreeMap::from([("GROK_HOME", home)]))
+            }
             #[cfg(not(any(
                 feature = "claude",
                 feature = "codex",
                 feature = "gemini",
-                feature = "pi"
+                feature = "pi",
+                feature = "grok"
             )))]
             ProviderKind::Unavailable => Ok(BTreeMap::new()),
         }
@@ -254,13 +299,16 @@ pub async fn preflight_live_provider(
         ProviderKind::Claude => Duration::from_secs(10),
         #[cfg(feature = "pi")]
         ProviderKind::Pi => Duration::from_secs(10),
+        #[cfg(feature = "grok")]
+        ProviderKind::Grok => Duration::from_secs(15),
         #[cfg(feature = "gemini")]
         ProviderKind::Gemini => Duration::from_secs(30),
         #[cfg(not(any(
             feature = "claude",
             feature = "codex",
             feature = "gemini",
-            feature = "pi"
+            feature = "pi",
+            feature = "grok"
         )))]
         ProviderKind::Unavailable => Duration::from_secs(0),
     };
@@ -292,11 +340,14 @@ pub async fn preflight_live_provider_with_timeout(
         ProviderKind::Claude => Ok(()),
         #[cfg(feature = "pi")]
         ProviderKind::Pi => Ok(()),
+        #[cfg(feature = "grok")]
+        ProviderKind::Grok => Ok(()),
         #[cfg(not(any(
             feature = "claude",
             feature = "codex",
             feature = "gemini",
-            feature = "pi"
+            feature = "pi",
+            feature = "grok"
         )))]
         ProviderKind::Unavailable => Ok(()),
     };
@@ -549,7 +600,7 @@ async fn preflight_codex_app_server_turn(
 }
 
 pub fn configured_live_providers() -> Vec<LiveProvider> {
-    let mut providers = ["claude", "codex", "gemini", "pi"]
+    let mut providers = ["claude", "codex", "gemini", "pi", "grok"]
         .into_iter()
         .filter_map(live_provider_by_name)
         .collect::<Vec<_>>();
@@ -609,6 +660,15 @@ pub fn live_provider_by_name(name: &str) -> Option<LiveProvider> {
                 Some("deepseek/deepseek-v4-flash".into()),
             ]),
             binary: live_pi_binary(),
+        }),
+        #[cfg(feature = "grok")]
+        "grok" => Some(LiveProvider {
+            kind: ProviderKind::Grok,
+            model: first_non_empty(&[
+                std::env::var("LUCARNE_LIVE_GROK_MODEL").ok(),
+                Some("grok-4.5".into()),
+            ]),
+            binary: live_grok_binary(),
         }),
         _ => None,
     }
@@ -710,6 +770,66 @@ pub fn live_pi_binary() -> String {
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "pi".into())
+}
+
+pub fn live_grok_binary() -> String {
+    if let Some(override_bin) = std::env::var("LUCARNE_LIVE_GROK_BIN")
+        .or_else(|_| std::env::var("LUCARNE_GROK_BIN"))
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+    {
+        return override_bin;
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let candidate = PathBuf::from(home).join(".grok/bin/grok");
+        if candidate.is_file() {
+            return candidate.to_string_lossy().into_owned();
+        }
+    }
+    "grok".into()
+}
+
+/// Shared user Grok home (for copying auth into isolated live homes).
+pub fn live_grok_shared_home() -> PathBuf {
+    if let Some(home) = std::env::var("GROK_HOME")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+    {
+        return PathBuf::from(home);
+    }
+    std::env::var("HOME")
+        .map(|home| PathBuf::from(home).join(".grok"))
+        .unwrap_or_else(|_| PathBuf::from(".grok"))
+}
+
+/// Isolate session artifacts under workdir while reusing host auth
+/// (mirrors Codex recording-home auth copy).
+fn prepare_grok_live_home(home: &Path) -> Result<(), String> {
+    fs::create_dir_all(home).map_err(|err| format!("mkdir {}: {err}", home.display()))?;
+    let shared = live_grok_shared_home();
+    // auth.json is required for session/new; without it ACP returns
+    // "Authentication required" and live turns hang/fail.
+    for name in ["auth.json", "models_cache.json", "version.json"] {
+        let source = shared.join(name);
+        if !source.is_file() {
+            continue;
+        }
+        let dest = home.join(name);
+        fs::copy(&source, &dest).map_err(|err| {
+            format!(
+                "copy Grok live home file {} -> {}: {err}",
+                source.display(),
+                dest.display()
+            )
+        })?;
+    }
+    if !home.join("auth.json").is_file() {
+        return Err(format!(
+            "Grok live home missing auth.json; sign in with `grok` once so {} exists",
+            shared.join("auth.json").display()
+        ));
+    }
+    Ok(())
 }
 
 pub fn live_codex_shared_home() -> String {

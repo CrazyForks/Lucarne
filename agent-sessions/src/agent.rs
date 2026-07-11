@@ -23,6 +23,7 @@ pub(crate) trait DiscoverableProvider: Sized + 'static {
         feature = "watch",
         feature = "claude",
         feature = "cursor",
+        feature = "grok",
         feature = "pi"
     ))]
     fn candidate_role(_root: &Path, _path: &Path) -> CandidateRole {
@@ -33,6 +34,7 @@ pub(crate) trait DiscoverableProvider: Sized + 'static {
         feature = "watch",
         feature = "claude",
         feature = "cursor",
+        feature = "grok",
         feature = "pi"
     ))]
     fn includes_candidate_in_history(root: &Path, path: &Path) -> bool {
@@ -97,13 +99,19 @@ pub(crate) trait DiscoverableProvider: Sized + 'static {
         feature = "watch",
         feature = "claude",
         feature = "cursor",
+        feature = "grok",
         feature = "pi"
     )
 ))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CandidateRole {
     Primary,
-    #[cfg(any(feature = "claude", feature = "cursor", feature = "pi"))]
+    #[cfg(any(
+        feature = "claude",
+        feature = "cursor",
+        feature = "grok",
+        feature = "pi"
+    ))]
     Subagent,
 }
 
@@ -113,6 +121,7 @@ pub(crate) enum CandidateRole {
         feature = "watch",
         feature = "claude",
         feature = "cursor",
+        feature = "grok",
         feature = "pi"
     )
 ))]
@@ -121,7 +130,12 @@ impl CandidateRole {
     pub fn is_history(self) -> bool {
         match self {
             Self::Primary => true,
-            #[cfg(any(feature = "claude", feature = "cursor", feature = "pi"))]
+            #[cfg(any(
+                feature = "claude",
+                feature = "cursor",
+                feature = "grok",
+                feature = "pi"
+            ))]
             Self::Subagent => false,
         }
     }

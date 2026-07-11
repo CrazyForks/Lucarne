@@ -1,6 +1,6 @@
 use super::providers::{configured_live_providers, preflight_live_provider, LiveProvider};
 use super::recording::{prepare_recorded_provider, PreparedRecordingRun, RecordedLiveCase};
-use crate::dialect::{Input, SessionParams};
+use crate::dialect::{Input, PermissionMode, SessionParams};
 use crate::event::{
     Decision, Event, Kind, Payload, PermissionAnswer, PermissionRequest, PermissionResponse,
     Timeline, TimelineItem, TimelineType, TurnCompleted, TurnFailed,
@@ -105,6 +105,12 @@ pub async fn run_live_turn_with_hooks(
     let adapter = provider.adapter();
     let extra_env = provider.extra_env(temp_root.path(), &spec.workdir)?;
     let extra_args = provider.extra_args(&spec.workdir);
+    let permission_mode = if provider.name() == "grok" {
+        // Grok Write/shell tools otherwise block on session/request_permission.
+        PermissionMode::Bypass
+    } else {
+        PermissionMode::Default
+    };
     let session = Arc::new(
         adapter
             .start(SessionParams {
@@ -115,6 +121,7 @@ pub async fn run_live_turn_with_hooks(
                 cwd: spec.workdir.to_string_lossy().into_owned(),
                 extra_env,
                 extra_args,
+                permission_mode,
                 ..Default::default()
             })
             .await

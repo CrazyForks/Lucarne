@@ -7,6 +7,7 @@ use smol_str::SmolStr;
     feature = "codex",
     feature = "cursor",
     feature = "gemini",
+    feature = "grok",
     feature = "pi"
 ))]
 pub(crate) mod projection;
