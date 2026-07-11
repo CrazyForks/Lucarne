@@ -11,7 +11,6 @@
 //! routing is unchanged.
 
 use async_trait::async_trait;
-use frankenstein::client_reqwest::Bot;
 use frankenstein::inline_mode::{
     InlineQueryResult, InlineQueryResultArticle, InputMessageContent, InputTextMessageContent,
 };
@@ -28,7 +27,7 @@ use frankenstein::types::{
     InlineKeyboardMarkup, MaybeInaccessibleMessage, PhotoSize, ReplyMarkup, ReplyParameters,
 };
 use frankenstein::updates::{Update, UpdateContent};
-use frankenstein::{AsyncTelegramApi, Error as TgError};
+use frankenstein::{AsyncTelegramApi, ParseMode};
 use futures::stream::{BoxStream, StreamExt};
 use lucarne_channel::{
     markdown::render_telegram_markdown_v2,
@@ -40,7 +39,6 @@ use lucarne_channel::{
     },
     Channel, TextFormat,
 };
-use frankenstein::ParseMode;
 use std::{
     path::PathBuf,
     str::FromStr,
@@ -49,6 +47,8 @@ use std::{
 };
 use tokio::sync::mpsc;
 use tracing::{debug, info, instrument, trace, warn};
+
+use crate::tg_bot::{Bot, BotError};
 
 const EVENT_QUEUE: usize = 128;
 const TELEGRAM_MESSAGE_LIMIT: usize = 4000;
@@ -114,23 +114,13 @@ impl TelegramChannel {
         Self::start_with_bot(cfg, bot)
     }
 
-    /// Construct the channel using a shared daemon HTTP client when possible.
+    /// Construct the channel using the daemon's shared HTTP client.
     ///
-    /// frankenstein 0.50 depends on reqwest 0.13 while the workspace (and
-    /// wechat-ilink) stay on reqwest 0.12, so the client handle cannot be
-    /// shared by type. We still accept the daemon client for API stability and
-    /// build an equivalent frankenstein client (timeouts + system proxy).
+    /// The Telegram bot implements frankenstein's `AsyncTelegramApi` on
+    /// workspace reqwest 0.12 (native-tls), so the daemon client is shared
+    /// by type with wechat-ilink and other channels.
     pub fn start_with_client(cfg: TelegramConfig, http_client: reqwest::Client) -> Arc<Self> {
-        let _daemon_client = http_client;
-        let frankenstein_client = frankenstein::reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(500))
-            .build()
-            .unwrap_or_else(|_| frankenstein::reqwest::Client::new());
-        let bot = Bot::builder()
-            .api_url(bot_api_url(&cfg.token))
-            .client(frankenstein_client)
-            .build();
+        let bot = Bot::with_client(bot_api_url(&cfg.token), http_client);
         Self::start_with_bot(cfg, bot)
     }
 
@@ -280,9 +270,9 @@ fn build_keyboard(rows: &[Vec<OutgoingButton>]) -> Option<InlineKeyboardMarkup> 
     })
 }
 
-fn map_err(e: TgError) -> ChannelError {
+fn map_err(e: BotError) -> ChannelError {
     match &e {
-        TgError::Api(api) => {
+        BotError::Api(api) => {
             let text = api.description.clone();
             let lower = text.to_ascii_lowercase();
             if lower.contains("message thread not found")
@@ -319,9 +309,9 @@ fn map_err(e: TgError) -> ChannelError {
     }
 }
 
-fn is_benign_edit_error(e: &TgError) -> bool {
+fn is_benign_edit_error(e: &BotError) -> bool {
     match e {
-        TgError::Api(api) => {
+        BotError::Api(api) => {
             let lower = api.description.to_ascii_lowercase();
             lower.contains("message is not modified")
         }
@@ -329,9 +319,9 @@ fn is_benign_edit_error(e: &TgError) -> bool {
     }
 }
 
-fn is_benign_delete_error(e: &TgError) -> bool {
+fn is_benign_delete_error(e: &BotError) -> bool {
     match e {
-        TgError::Api(api) => {
+        BotError::Api(api) => {
             let lower = api.description.to_ascii_lowercase();
             lower.contains("message to delete not found")
                 || lower.contains("message can't be deleted")
@@ -1173,12 +1163,14 @@ mod tests {
             .expect("production source");
         assert!(source.contains("pub fn start_with_client"));
         assert!(source.contains("http_client: reqwest::Client"));
-        // Daemon still injects its client for API stability; frankenstein uses
-        // reqwest 0.13 so we rebuild an equivalent client rather than sharing
-        // the 0.12 handle with wechat-ilink.
+        // Workspace reqwest 0.12 is shared with the daemon (native-tls).
         assert!(
-            source.contains("frankenstein::reqwest::Client::builder()"),
-            "Telegram bot must construct a frankenstein-compatible HTTP client"
+            source.contains("Bot::with_client(bot_api_url(&cfg.token), http_client)"),
+            "Telegram bot must reuse the daemon HTTP client"
+        );
+        assert!(
+            !source.contains("frankenstein::reqwest"),
+            "must not pull frankenstein's reqwest 0.13 / rustls client"
         );
         assert!(
             !source.contains("teloxide"),

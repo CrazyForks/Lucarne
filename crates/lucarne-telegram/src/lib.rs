@@ -18,6 +18,7 @@ mod command_sync;
 pub mod history;
 pub mod onboarding;
 pub mod state;
+mod tg_bot;
 pub mod turn;
 
 pub use adapter::{

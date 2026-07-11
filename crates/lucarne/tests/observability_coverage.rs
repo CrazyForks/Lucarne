@@ -181,6 +181,8 @@ fn runtime_modules_have_structured_tracing_or_are_declared_pure() {
         "crates/lucarne-channel/src/agent_message.rs",
         "crates/lucarne-channel/src/markdown.rs",
         "crates/lucarne-channel/src/types.rs",
+        // Thin frankenstein HTTP adapter (types + request/form only).
+        "crates/lucarne-telegram/src/tg_bot.rs",
         // testing/ modules moved from lucarne-test-support; test-only infrastructure
         "crates/lucarne/src/testing/mod.rs",
         "crates/lucarne/src/testing/live/mod.rs",

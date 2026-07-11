@@ -21,7 +21,10 @@ smol_str = { workspace = true }
 base64 = "0.22"
 reqwest = { workspace = true }
 rusqlite = { workspace = true }
-frankenstein = { version = "0.50.2", features = ["client-reqwest"] }
+# Types + AsyncTelegramApi only. HTTP client is local (`tg_bot`) on workspace
+# reqwest 0.12 / native-tls so release builds avoid frankenstein's reqwest 0.13
+# rustls/aws-lc path (broken on aarch64-pc-windows-msvc cargo-dist).
+frankenstein = { version = "0.50.2", default-features = false, features = ["trait-async"] }
 tempfile.workspace = true
 
 [dev-dependencies]
