@@ -414,14 +414,10 @@ where
                     thought_buf.push_str(&chunk);
                 }
             }
-            "tool_call" if selection.includes_operations() => {
-                flush_message_buffers(
-                    &mut entries,
-                    &mut user_buf,
-                    &mut assistant_buf,
-                    &mut thought_buf,
-                    ts.clone(),
-                );
+            "tool_call"
+                if selection.includes_operations()
+                    || (selection.includes_messages() && is_ask_user_tool_update(update)) =>
+            {
                 let id = update.tool_call_id.clone();
                 let name = update
                     .title
@@ -431,15 +427,41 @@ where
                     .raw_input
                     .as_ref()
                     .map(|v| v.to_string().into());
-                if let Some(id) = &id {
-                    pending_tools.insert(id.clone(), (name.clone().into(), input_json.clone()));
+                // Operations path keeps the normal tool timeline (flush + ToolCall).
+                // Message-only ask_user notify must NOT flush assistant buffers —
+                // flushing mid-turn would split preambles ("I'll ask…") into separate
+                // channel notifications and fragment the real final reply.
+                if selection.includes_operations() {
+                    flush_message_buffers(
+                        &mut entries,
+                        &mut user_buf,
+                        &mut assistant_buf,
+                        &mut thought_buf,
+                        ts.clone(),
+                    );
+                    if let Some(id) = &id {
+                        pending_tools
+                            .insert(id.clone(), (name.clone().into(), input_json.clone()));
+                    }
+                    entries.push(Entry::ToolCall {
+                        id: id.map(Into::into),
+                        name: name.clone().into(),
+                        input_json: input_json.clone(),
+                        timestamp: ts.clone(),
+                    });
                 }
-                entries.push(Entry::ToolCall {
-                    id: id.map(Into::into),
-                    name: name.into(),
-                    input_json,
-                    timestamp: ts,
-                });
+                // Notify-only: surface multi-option questions as assistant text so
+                // message-only history watch can deliver them without enabling the
+                // dense tool stream (and without an answer reverse-RPC path).
+                if selection.includes_messages() && is_ask_user_tool_name(&name) {
+                    if let Some(text) = format_ask_user_question_notify(input_json.as_deref()) {
+                        entries.push(Entry::AssistantMessage {
+                            text: text.into(),
+                            timestamp: ts,
+                            model: None,
+                        });
+                    }
+                }
             }
             "tool_call_update" if selection.includes_operations() => {
                 let id = update.tool_call_id.clone();
@@ -461,6 +483,16 @@ where
                 }
             }
             "turn_completed" if selection.includes_messages() || selection.includes_state() => {
+                // Capture final assistant body before flush so watch can attach it
+                // to TurnCompleted (Grok wire has no last_agent_message field).
+                let last_agent_message = (!assistant_buf.is_empty())
+                    .then(|| assistant_buf.as_str().into())
+                    .or_else(|| {
+                        entries.iter().rev().find_map(|e| match e {
+                            Entry::AssistantMessage { text, .. } => Some(text.clone()),
+                            _ => None,
+                        })
+                    });
                 flush_message_buffers(
                     &mut entries,
                     &mut user_buf,
@@ -470,6 +502,7 @@ where
                 );
                 entries.push(Entry::TurnCompleted {
                     stop_reason: update.stop_reason.clone().map(Into::into),
+                    last_agent_message,
                     timestamp: ts,
                 });
             }
@@ -572,10 +605,69 @@ fn tool_result_text(content: Option<&serde_json::Value>) -> Option<String> {
 
 fn timestamp_to_smol(value: Option<&serde_json::Value>) -> Option<SmolStr> {
     match value {
-        Some(serde_json::Value::String(s)) => Some(s.as_str().into()),
-        Some(serde_json::Value::Number(n)) => Some(n.to_string().into()),
+        Some(serde_json::Value::String(s)) => {
+            let s = s.trim();
+            if s.is_empty() {
+                return None;
+            }
+            // Already RFC3339-ish (used by synthesize duration).
+            if s.contains('T') {
+                return Some(s.into());
+            }
+            // Numeric string (seconds or millis).
+            if let Ok(n) = s.parse::<f64>() {
+                return unix_number_to_rfc3339(n).map(Into::into);
+            }
+            Some(s.into())
+        }
+        Some(serde_json::Value::Number(n)) => n
+            .as_f64()
+            .and_then(unix_number_to_rfc3339)
+            .map(Into::into),
         _ => None,
     }
+}
+
+/// Grok `updates.jsonl` top-level `timestamp` is unix seconds (sometimes ms).
+/// Watch `synthesize_task_complete` requires RFC3339 `…Z` for duration.
+fn unix_number_to_rfc3339(n: f64) -> Option<String> {
+    if !n.is_finite() || n < 0.0 {
+        return None;
+    }
+    // Heuristic: ≥ 1e12 → milliseconds since epoch; else seconds (frac → ms).
+    let (secs, millis) = if n >= 1_000_000_000_000.0 {
+        let ms = n as i64;
+        (ms.div_euclid(1000), ms.rem_euclid(1000) as u32)
+    } else {
+        let secs = n.floor() as i64;
+        let millis = ((n - secs as f64) * 1000.0).round() as u32;
+        (secs, millis.min(999))
+    };
+    civil_from_unix_secs(secs).map(|(y, m, d, hh, mm, ss)| {
+        format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}.{millis:03}Z")
+    })
+}
+
+/// Inverse of days_from_civil used by watch duration parsing (Howard Hinnant).
+fn civil_from_unix_secs(secs: i64) -> Option<(i32, u32, u32, u32, u32, u32)> {
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400) as u32;
+    let hh = tod / 3600;
+    let mm = (tod % 3600) / 60;
+    let ss = tod % 60;
+
+    // civil_from_days: days is days since 1970-01-01
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    Some((y as i32, m, d, hh, mm, ss))
 }
 
 #[cfg(feature = "agent_session")]
@@ -603,6 +695,149 @@ pub(crate) fn is_updates_jsonl(path: &Path) -> bool {
     path.file_name()
         .and_then(|n| n.to_str())
         .is_some_and(|n| n == "updates.jsonl")
+}
+
+fn is_ask_user_tool_name(name: &str) -> bool {
+    let trimmed = name.trim();
+    trimmed.eq_ignore_ascii_case("ask_user_question")
+        || trimmed.eq_ignore_ascii_case("AskUserQuestion")
+}
+
+pub(super) fn is_ask_user_notify_text(text: &str) -> bool {
+    text.trim_start().starts_with("Grok is asking:")
+}
+
+fn is_ask_user_tool_update(update: &RawSessionUpdate) -> bool {
+    if update
+        .title
+        .as_deref()
+        .is_some_and(is_ask_user_tool_name)
+    {
+        return true;
+    }
+    update
+        .raw_input
+        .as_ref()
+        .and_then(|v| v.get("questions"))
+        .and_then(|q| q.as_array())
+        .is_some_and(|a| !a.is_empty())
+        && update
+            .title
+            .as_deref()
+            .map(|t| t.starts_with("Ask:") || is_ask_user_tool_name(t))
+            .unwrap_or(false)
+}
+
+/// Format `ask_user_question` rawInput into a channel-facing notify body.
+/// Notify-only: does not create an intervention or answer path.
+pub(super) fn format_ask_user_question_notify(input_json: Option<&str>) -> Option<String> {
+    let raw = input_json?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let questions = value.get("questions")?.as_array()?;
+    if questions.is_empty() {
+        return None;
+    }
+
+    let mut body = String::from("Grok is asking:");
+    let multi = questions.len() > 1;
+    let mut wrote_question = false;
+    for (idx, question) in questions.iter().enumerate() {
+        let text = question
+            .get("question")
+            .or_else(|| question.get("prompt"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if text.is_empty() {
+            continue;
+        }
+        wrote_question = true;
+        if multi {
+            body.push_str(&format!("\n\n{}. {text}", idx + 1));
+        } else {
+            body.push_str(&format!("\n\n{text}"));
+        }
+        let Some(options) = question.get("options").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for option in options {
+            let label = option
+                .get("label")
+                .or_else(|| option.get("value"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            if label.is_empty() {
+                continue;
+            }
+            let description = option
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            if description.is_empty() {
+                body.push_str(&format!("\n• {label}"));
+            } else {
+                body.push_str(&format!("\n• {label} — {description}"));
+            }
+        }
+    }
+    wrote_question.then_some(body)
+}
+
+#[cfg(test)]
+mod timestamp_tests {
+    use super::*;
+
+    #[test]
+    fn unix_seconds_timestamp_becomes_rfc3339_z() {
+        // 2026-07-11T09:46:50Z ≈ 1783763210 (session sample order of magnitude)
+        let s = timestamp_to_smol(Some(&serde_json::json!(1783763210))).expect("ts");
+        assert!(
+            s.ends_with('Z') && s.contains('T'),
+            "expected RFC3339 Z, got {s}"
+        );
+        // synthesize duration parser requires fixed layout
+        assert_eq!(s.len(), "2026-07-11T09:46:50.000Z".len());
+    }
+
+    #[test]
+    fn unix_millis_timestamp_becomes_rfc3339_z() {
+        let s = timestamp_to_smol(Some(&serde_json::json!(1783763210228_i64))).expect("ts");
+        assert!(s.ends_with('Z') && s.contains('T'), "got {s}");
+    }
+
+    #[test]
+    fn rfc3339_string_timestamp_preserved() {
+        let s = timestamp_to_smol(Some(&serde_json::json!("2026-07-11T09:46:50.228Z")))
+            .expect("ts");
+        assert_eq!(s.as_str(), "2026-07-11T09:46:50.228Z");
+    }
+}
+
+#[cfg(test)]
+mod ask_user_notify_tests {
+    use super::*;
+
+    #[test]
+    fn format_ask_user_question_notify_renders_options() {
+        let input = r#"{"questions":[{"question":"Which style?","options":[{"label":"brief","description":"Short"},{"label":"detailed","description":"Long"}]}]}"#;
+        let text = format_ask_user_question_notify(Some(input)).expect("formatted");
+        assert!(text.contains("Grok is asking:"), "{text}");
+        assert!(text.contains("Which style?"), "{text}");
+        assert!(text.contains("• brief — Short"), "{text}");
+        assert!(text.contains("• detailed — Long"), "{text}");
+    }
+
+    #[test]
+    fn format_ask_user_question_notify_rejects_empty() {
+        assert!(format_ask_user_question_notify(None).is_none());
+        assert!(format_ask_user_question_notify(Some("{}")).is_none());
+        assert!(format_ask_user_question_notify(Some(r#"{"questions":[]}"#)).is_none());
+    }
 }
 
 #[cfg(all(test, feature = "agent_session"))]
@@ -661,6 +896,119 @@ mod title_probe_tests {
         assert_eq!(
             meta.title.as_deref(),
             Some("You are an adversarial verifier for the harness. Long body.")
+        );
+    }
+
+    #[test]
+    fn message_selection_projects_ask_user_question_as_assistant_notify() {
+        let updates = r#"{"method":"session/update","params":{"sessionId":"sid","update":{"sessionUpdate":"tool_call","toolCallId":"call-1","title":"ask_user_question","rawInput":{"questions":[{"question":"Which style?","options":[{"label":"brief","description":"Short"},{"label":"detailed","description":"Long"}]}]}}}}
+"#;
+        let body = parse_grok_body_reader(
+            Cursor::new(updates.as_bytes()),
+            ParseSelection::empty().with_messages(),
+            None,
+        )
+        .expect("parse");
+        let msgs: Vec<_> = body
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::AssistantMessage { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(msgs.len(), 1, "entries={:?}", body.entries.len());
+        assert!(msgs[0].contains("Which style?"), "{}", msgs[0]);
+        assert!(msgs[0].contains("brief"), "{}", msgs[0]);
+        assert!(
+            !body.entries.iter().any(|e| matches!(e, Entry::ToolCall { .. })),
+            "message-only selection must not emit ToolCall entries"
+        );
+    }
+
+    #[test]
+    fn message_selection_turn_completed_carries_last_agent_message() {
+        let msg = serde_json::json!({
+            "timestamp": 1783763210_u64,
+            "method": "session/update",
+            "params": {
+                "sessionId": "sid",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": { "type": "text", "text": "final answer body" }
+                }
+            }
+        });
+        let done = serde_json::json!({
+            "timestamp": 1783763210_u64,
+            "method": "session/update",
+            "params": {
+                "sessionId": "sid",
+                "update": {
+                    "sessionUpdate": "turn_completed",
+                    "stop_reason": "end_turn"
+                }
+            }
+        });
+        let updates = format!("{msg}\n{done}\n");
+        let body = parse_grok_body_reader(
+            Cursor::new(updates.as_bytes()),
+            ParseSelection::empty().with_messages(),
+            None,
+        )
+        .expect("parse");
+        let last = body.entries.iter().find_map(|e| match e {
+            Entry::TurnCompleted {
+                last_agent_message,
+                ..
+            } => last_agent_message.as_deref(),
+            _ => None,
+        });
+        assert_eq!(last, Some("final answer body"));
+        // timestamps on entries must be RFC3339 for watch synthesize
+        let ts = body.entries.iter().find_map(|e| match e {
+            Entry::AssistantMessage { timestamp, .. } => timestamp.as_deref(),
+            _ => None,
+        });
+        let ts = ts.expect("assistant ts");
+        assert!(ts.contains('T') && ts.ends_with('Z'), "got {ts}");
+    }
+
+    #[test]
+    fn message_selection_ask_user_does_not_split_assistant_preamble() {
+        // Real Grok turns often emit a short assistant preamble, then ask_user_question,
+        // then the final answer. Message-only watch must keep the preamble in the
+        // buffer so it does not become its own channel notification.
+        let updates = r#"{"method":"session/update","params":{"sessionId":"sid","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"I'll ask one question with only options A and B."}}}}
+{"method":"session/update","params":{"sessionId":"sid","update":{"sessionUpdate":"tool_call","toolCallId":"call-1","title":"ask_user_question","rawInput":{"questions":[{"question":"Which?","options":[{"label":"A"},{"label":"B"}]}]}}}}
+{"method":"session/update","params":{"sessionId":"sid","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":" Final answer."}}}}
+{"method":"session/update","params":{"sessionId":"sid","update":{"sessionUpdate":"turn_completed","stop_reason":"end_turn"}}}
+"#;
+        let body = parse_grok_body_reader(
+            Cursor::new(updates.as_bytes()),
+            ParseSelection::empty().with_messages(),
+            None,
+        )
+        .expect("parse");
+        let msgs: Vec<String> = body
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::AssistantMessage { text, .. } => Some(text.to_string()),
+                _ => None,
+            })
+            .collect();
+        // One notify for the question + one aggregated final assistant body.
+        assert_eq!(msgs.len(), 2, "msgs={msgs:?}");
+        assert!(msgs[0].contains("Grok is asking:"), "notify={}", msgs[0]);
+        assert!(
+            msgs[1].contains("I'll ask one question") && msgs[1].contains("Final answer"),
+            "final must keep preamble+tail, got {}",
+            msgs[1]
+        );
+        assert!(
+            !msgs.iter().any(|m| m == "I'll ask one question with only options A and B."),
+            "preamble must not be a standalone notify: {msgs:?}"
         );
     }
 }

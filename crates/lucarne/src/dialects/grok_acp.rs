@@ -10,7 +10,9 @@
 //! 2. `session/new` or `session/load` (resume UUID)
 //! 3. `session/prompt` for each user turn
 //! 4. `session/update` notifications stream chunks/tools
-//! 5. reverse client RPCs we answer: `session/request_permission` only
+//! 5. reverse client RPCs we answer:
+//!    - `session/request_permission` (tool approval)
+//!    - `_x.ai/ask_user_question` / `x.ai/ask_user_question` (multi-option questions)
 //! 6. `session/cancel` for interrupt
 
 use crate::{
@@ -67,7 +69,8 @@ pub struct GrokAcp {
     assistant_buf: String,
     thought_buf: String,
     tool_names: HashMap<String, String>,
-    permission_rpc_ids: HashMap<String, i64>,
+    /// Pending reverse-RPC replies keyed by Lucarne `req_id`.
+    client_rpc_ids: HashMap<String, PendingClientRpc>,
     command_catalog: AgentCommandCatalog,
     /// Raw availableCommands entries (including skill metadata) for skills list.
     available_command_meta: Vec<Value>,
@@ -113,6 +116,21 @@ enum SessionState {
     Closed,
 }
 
+/// Reverse client RPCs that wait for a Lucarne intervention reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingClientRpcKind {
+    /// `session/request_permission` — allow-once / deny options.
+    Permission,
+    /// `_x.ai/ask_user_question` — multi-option clarifying questions.
+    AskUserQuestion,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingClientRpc {
+    rpc_id: i64,
+    kind: PendingClientRpcKind,
+}
+
 impl Default for GrokAcp {
     fn default() -> Self {
         Self::new()
@@ -136,7 +154,7 @@ impl GrokAcp {
             assistant_buf: String::new(),
             thought_buf: String::new(),
             tool_names: HashMap::new(),
-            permission_rpc_ids: HashMap::new(),
+            client_rpc_ids: HashMap::new(),
             command_catalog: AgentCommandCatalog {
                 commands: Vec::new(),
                 complete: true,
@@ -937,7 +955,13 @@ impl GrokAcp {
             .and_then(|v| v.as_str())
             .unwrap_or("permission");
         let req_id = format!("grok-perm-{id}");
-        self.permission_rpc_ids.insert(req_id.clone(), id);
+        self.client_rpc_ids.insert(
+            req_id.clone(),
+            PendingClientRpc {
+                rpc_id: id,
+                kind: PendingClientRpcKind::Permission,
+            },
+        );
 
         let options = vec![
             PermissionQuestionOption {
@@ -963,6 +987,40 @@ impl GrokAcp {
                 is_other: false,
                 is_secret: false,
             }],
+        }))]
+    }
+
+    /// Grok Build multi-option clarifying questions via reverse RPC.
+    ///
+    /// Wire (live 0.2.93): method `_x.ai/ask_user_question` with params
+    /// `{ sessionId, toolCallId, questions, mode }`. Client result uses
+    /// internally tagged `outcome`: `accepted` | `chat_about_this` |
+    /// `skip_interview` | `cancelled`.
+    fn handle_ask_user_question(&mut self, id: i64, params: &Value) -> Vec<Event> {
+        let req_id = format!("grok-ask-{id}");
+        self.client_rpc_ids.insert(
+            req_id.clone(),
+            PendingClientRpc {
+                rpc_id: id,
+                kind: PendingClientRpcKind::AskUserQuestion,
+            },
+        );
+
+        let questions = parse_ask_user_questions(params);
+        if questions.is_empty() {
+            warn!(
+                target: "lucarne::dialects::grok_acp",
+                id,
+                "ask_user_question with no parseable questions; still surface empty request"
+            );
+        }
+
+        vec![Event::new(Payload::PermissionRequest(PermissionRequest {
+            req_id,
+            tool: "ask_user_question".into(),
+            input: Some(params.clone()),
+            risk: Risk::Low,
+            questions,
         }))]
     }
 }
@@ -1057,6 +1115,10 @@ impl Dialect for GrokAcp {
                     // Permission is relay (user decision), not environment hosting.
                     "session/request_permission" | "request_permission" => {
                         return self.handle_permission_request(id, &params);
+                    }
+                    // Multi-option clarifying questions (Grok Build ask_user_question tool).
+                    "_x.ai/ask_user_question" | "x.ai/ask_user_question" => {
+                        return self.handle_ask_user_question(id, &params);
                     }
                     // Environment reverse RPCs (fs/*, terminal/*) are unsupported:
                     // we advertise them false; still answer method-not-found if called.
@@ -1387,43 +1449,14 @@ impl Dialect for GrokAcp {
         req_id: &str,
         response: &PermissionResponse,
     ) -> Result<Vec<OutFrame>> {
-        let rpc_id = self
-            .permission_rpc_ids
-            .remove(req_id)
-            .ok_or_else(|| {
-                LucarneError::dialect(format!(
-                    "grok: unknown permission request {req_id}"
-                ))
-            })?;
-        let outcome = match response.decision {
-            Decision::Allow => {
-                let option_id = response
-                    .answers
-                    .values()
-                    .next()
-                    .and_then(|a| a.answers.first().cloned())
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| {
-                        response
-                            .answers
-                            .values()
-                            .next()
-                            .map(|a| a.text.clone())
-                            .filter(|s| !s.is_empty())
-                    })
-                    .unwrap_or_else(|| "allow-once".into());
-                json!({
-                    "outcome": {
-                        "outcome": "selected",
-                        "optionId": option_id
-                    }
-                })
-            }
-            Decision::Deny => json!({
-                "outcome": { "outcome": "cancelled" }
-            }),
+        let pending = self.client_rpc_ids.remove(req_id).ok_or_else(|| {
+            LucarneError::dialect(format!("grok: unknown permission request {req_id}"))
+        })?;
+        let result = match pending.kind {
+            PendingClientRpcKind::Permission => encode_permission_outcome(response),
+            PendingClientRpcKind::AskUserQuestion => encode_ask_user_question_outcome(response),
         };
-        self.enqueue_result(rpc_id, outcome);
+        self.enqueue_result(pending.rpc_id, result);
         Ok(std::mem::take(&mut self.pending_out))
     }
 
@@ -1516,6 +1549,158 @@ fn permission_mode_label(mode: PermissionMode) -> &'static str {
         PermissionMode::Auto => "auto",
         PermissionMode::Full | PermissionMode::Bypass => "always-approve",
     }
+}
+
+fn encode_permission_outcome(response: &PermissionResponse) -> Value {
+    match response.decision {
+        Decision::Allow => {
+            let option_id = response
+                .answers
+                .values()
+                .next()
+                .and_then(|a| a.answers.first().cloned())
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    response
+                        .answers
+                        .values()
+                        .next()
+                        .map(|a| a.text.clone())
+                        .filter(|s| !s.is_empty())
+                })
+                .unwrap_or_else(|| "allow-once".into());
+            json!({
+                "outcome": {
+                    "outcome": "selected",
+                    "optionId": option_id
+                }
+            })
+        }
+        Decision::Deny => json!({
+            "outcome": { "outcome": "cancelled" }
+        }),
+    }
+}
+
+/// Encode `_x.ai/ask_user_question` result (live-verified 0.2.93).
+///
+/// Internally tagged on `outcome`:
+/// `accepted` | `chat_about_this` | `skip_interview` | `cancelled`.
+/// `accepted` carries `answers: { question -> [label, ...] }` and `partial_answers`.
+fn encode_ask_user_question_outcome(response: &PermissionResponse) -> Value {
+    if response.decision == Decision::Deny {
+        return json!({ "outcome": "cancelled" });
+    }
+    if response.answers.is_empty() {
+        return json!({ "outcome": "cancelled" });
+    }
+
+    let mut answers = serde_json::Map::new();
+    for (key, answer) in &response.answers {
+        if key.is_empty() {
+            continue;
+        }
+        let labels: Vec<Value> = if !answer.answers.is_empty() {
+            answer
+                .answers
+                .iter()
+                .filter(|s| !s.is_empty())
+                .map(|s| Value::String(s.clone()))
+                .collect()
+        } else if !answer.text.is_empty() {
+            vec![Value::String(answer.text.clone())]
+        } else {
+            Vec::new()
+        };
+        if labels.is_empty() {
+            continue;
+        }
+        answers.insert(key.clone(), Value::Array(labels));
+    }
+    if answers.is_empty() {
+        return json!({ "outcome": "cancelled" });
+    }
+    json!({
+        "outcome": "accepted",
+        "answers": Value::Object(answers),
+        "partial_answers": {},
+    })
+}
+
+fn parse_ask_user_questions(params: &Value) -> Vec<PermissionQuestion> {
+    let raw_qs = params
+        .get("questions")
+        .or_else(|| params.pointer("/input/questions"))
+        .or_else(|| params.pointer("/rawInput/questions"))
+        .and_then(|v| v.as_array());
+    let Some(raw_qs) = raw_qs else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    for rq in raw_qs {
+        let Some(o) = rq.as_object() else {
+            continue;
+        };
+        let str_of = |keys: &[&str]| -> String {
+            for k in keys {
+                if let Some(s) = o.get(*k).and_then(|v| v.as_str()) {
+                    if !s.is_empty() {
+                        return s.to_string();
+                    }
+                }
+            }
+            String::new()
+        };
+        let multi_select = o
+            .get("multi_select")
+            .or_else(|| o.get("multiSelect"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let question_text = str_of(&["question", "prompt", "text"]);
+        // Leave synthetic ids empty so session answer keys prefer `question`
+        // text — Grok's accepted wire uses question text as map keys.
+        let id = str_of(&["id"]);
+        let header = str_of(&["header", "title"]);
+        let mut q = PermissionQuestion {
+            id,
+            header,
+            question: question_text,
+            multi_select,
+            is_other: false,
+            is_secret: false,
+            options: Vec::new(),
+        };
+        if let Some(opts) = o.get("options").and_then(|v| v.as_array()) {
+            for ro in opts {
+                let Some(oo) = ro.as_object() else {
+                    continue;
+                };
+                let label = ["label", "value"]
+                    .iter()
+                    .find_map(|k| oo.get(*k).and_then(|v| v.as_str()))
+                    .unwrap_or("")
+                    .to_string();
+                if label.is_empty() {
+                    continue;
+                }
+                q.options.push(PermissionQuestionOption {
+                    label,
+                    description: oo
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                });
+            }
+        }
+        if q.question.is_empty() && q.options.is_empty() {
+            continue;
+        }
+        out.push(q);
+    }
+    out
 }
 
 fn normalize_permission_mode(raw: &str) -> Option<&'static str> {
@@ -2180,5 +2365,130 @@ mod tests {
         );
         assert_eq!(d.models.models.len(), 2);
         assert_eq!(d.models.current_model.as_deref(), Some("grok-4.5"));
+    }
+
+    #[test]
+    fn ask_user_question_reverse_rpc_emits_permission_request() {
+        let mut d = GrokAcp::new();
+        ready_session(&mut d);
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 42,
+            "method": "_x.ai/ask_user_question",
+            "params": {
+                "sessionId": "sid-cmd",
+                "toolCallId": "call-ask-1",
+                "questions": [{
+                    "question": "Which option do you prefer?",
+                    "options": [
+                        {"label": "A", "description": "Option A"},
+                        {"label": "B", "description": "Option B"}
+                    ],
+                    "multiSelect": false
+                }],
+                "mode": "default"
+            }
+        });
+        let events = d.translate(serde_json::to_string(&req).unwrap().as_bytes());
+        let pr = events.iter().find_map(|e| match &e.payload {
+            Payload::PermissionRequest(p) => Some(p.clone()),
+            _ => None,
+        });
+        let pr = pr.expect("PermissionRequest");
+        assert_eq!(pr.tool, "ask_user_question");
+        assert_eq!(pr.req_id, "grok-ask-42");
+        assert_eq!(pr.questions.len(), 1);
+        assert_eq!(pr.questions[0].question, "Which option do you prefer?");
+        assert_eq!(pr.questions[0].options.len(), 2);
+        assert_eq!(pr.questions[0].options[0].label, "A");
+        assert!(!pr.questions[0].multi_select);
+    }
+
+    #[test]
+    fn ask_user_question_response_encodes_accepted_outcome() {
+        use crate::event::PermissionAnswer;
+        let mut d = GrokAcp::new();
+        ready_session(&mut d);
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "_x.ai/ask_user_question",
+            "params": {
+                "sessionId": "sid-cmd",
+                "toolCallId": "call-ask-7",
+                "questions": [{
+                    "question": "Which option do you prefer?",
+                    "options": [
+                        {"label": "A", "description": "Option A"},
+                        {"label": "B", "description": "Option B"}
+                    ]
+                }],
+                "mode": "default"
+            }
+        });
+        let _ = d.translate(serde_json::to_string(&req).unwrap().as_bytes());
+        let mut answers = BTreeMap::new();
+        answers.insert(
+            "Which option do you prefer?".into(),
+            PermissionAnswer {
+                answers: vec!["A".into()],
+                text: String::new(),
+            },
+        );
+        let frames = d
+            .encode_permission_response(
+                "grok-ask-7",
+                &PermissionResponse {
+                    decision: Decision::Allow,
+                    answers,
+                },
+            )
+            .expect("encode");
+        let line = String::from_utf8_lossy(match &frames[0] {
+            OutFrame::Stdin(b) => b,
+            _ => panic!("expected stdin frame"),
+        });
+        let resp: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(resp["id"], 7);
+        assert_eq!(resp["result"]["outcome"], "accepted");
+        assert_eq!(
+            resp["result"]["answers"]["Which option do you prefer?"],
+            json!(["A"])
+        );
+        assert!(resp["result"]["partial_answers"].is_object());
+    }
+
+    #[test]
+    fn ask_user_question_deny_encodes_cancelled() {
+        let mut d = GrokAcp::new();
+        ready_session(&mut d);
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "x.ai/ask_user_question",
+            "params": {
+                "sessionId": "sid-cmd",
+                "toolCallId": "call-ask-8",
+                "questions": [{
+                    "question": "Continue?",
+                    "options": [{"label": "yes"}, {"label": "no"}]
+                }],
+                "mode": "default"
+            }
+        });
+        let _ = d.translate(serde_json::to_string(&req).unwrap().as_bytes());
+        let frames = d
+            .encode_permission_response(
+                "grok-ask-8",
+                &PermissionResponse::from_decision(Decision::Deny),
+            )
+            .expect("encode");
+        let line = String::from_utf8_lossy(match &frames[0] {
+            OutFrame::Stdin(b) => b,
+            _ => panic!("expected stdin"),
+        });
+        let resp: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(resp["id"], 8);
+        assert_eq!(resp["result"]["outcome"], "cancelled");
     }
 }

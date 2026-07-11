@@ -1090,6 +1090,11 @@ impl SessionWatcher {
         old: &FileSnapshot,
         len: u64,
     ) -> std::io::Result<(u64, Vec<u8>)> {
+        // Always read the full [old.len, len) range (chunked). Do NOT stop early
+        // when a trailing complete JSONL record appears: Grok (and peers) can emit
+        // single agent_message lines larger than MAX_WATCH_READ_BYTES. Early-stop +
+        // drop_leading_partial_line permanently discarded those oversized lines and
+        // left only turn_completed without body text — channel saw nothing.
         let mut file = fs::File::open(path)?;
         let mut start = len;
         let lower = old.len;
@@ -1119,19 +1124,6 @@ impl SessionWatcher {
                     combined.extend_from_slice(&bytes);
                     bytes = combined;
                 }
-                break;
-            }
-            if has_complete_jsonl_record_after_leading_boundary(&bytes) {
-                drop_leading_partial_line(&mut bytes);
-                trace!(
-                    target: "agent_sessions::watch",
-                    path = %path.display(),
-                    chunk_start,
-                    old_len = lower,
-                    new_len = len,
-                    buffered_bytes = bytes.len(),
-                    "stopped jsonl delta lookback after complete record boundary"
-                );
                 break;
             }
             start = chunk_start;

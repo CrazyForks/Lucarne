@@ -60,7 +60,7 @@ Technical locks (implementation agents must not re-litigate without ADR):
 | B10 | SessionStarted with native session id | peers | **Done** |
 | B11 | SessionClosed + ResumeHandle (UUID) | peers | **Done** |
 | B12 | Permission request + response round-trip | pi permission_intercept; codex approvals | **Done** |
-| B13 | User question / multi-option intervention if Grok emits | codex question_*, claude ask_user | **§H** — N/A |
+| B13 | User question / multi-option intervention if Grok emits | codex question_*, claude ask_user | **Done** — `_x.ai/ask_user_question` |
 | B14 | Interrupt / cancel in-flight turn | pi/codex interrupt | **Done** |
 | B15 | Interrupt recovery (next turn succeeds) | codex interrupt_recovery | **Done** — `interrupt_recovery.fixture` + TurnFailed(`cancelled`) then second turn |
 | B16 | Image / multimodal user input if Grok ACP accepts | live image tests peers | **Done** (encode + live recording); ACP image unit fixture optional |
@@ -152,7 +152,7 @@ Mirror peer scenario *roles* (names may differ). Each row needs at least one fix
 | F1.14 | fork | **Done** | dialect unit + live command (incl. fork with args) |
 | F1.15 | new session | **Done** | dialect unit + live command |
 | F1.16 | confirm/deny intervention | **Done** | permission allow/deny path |
-| F1.17 | question / multi-option | **§H** | N/A — same as B13 |
+| F1.17 | question / multi-option | **Done** | `ask_user_question.fixture` |
 | F1.18 | foreign session ignored | **Done** | dialect unit `foreign_session_update_ignored` |
 | F1.19 | start missing id closes cleanly | **Done** | `start_missing_id.fixture` |
 | F1.20 | reasoning stream | **Done** | `agent_thought_chunk` mapping |
@@ -224,7 +224,8 @@ seeded from `summary.json` + bounded lookback, with depth-3 roots under
 
 | Capability id | Why N/A or deferred | Evidence (doc/fixture/probe) |
 |---------------|---------------------|------------------------------|
-| B13 / F1.17 multi-option question UI | Grok ACP uses `session/request_permission` for tool approval; no separate multi-option "question" notification observed | Real session updates sample + ACP `sessionUpdate` table |
+| ~~B13 / F1.17 multi-option question UI~~ | **Done** — live dialogue: reverse RPC `_x.ai/ask_user_question`; history watch: notify-only projection of `tool_call` ask_user_question as assistant text (no answer path on disk) | `ask_user_question.fixture` + grok parse/watch unit tests |
+| Watch large agent_message line drop | **Done** — `read_delta` no early-stop; Grok unix ts → RFC3339; `TurnCompleted.last_agent_message` | `grok_oversized_agent_message_line_reaches_watch_events` + timestamp/turn_completed unit tests |
 | B16 ACP image unit fixture | Dialect encodes image blocks; live recording exists; optional fakeagent image fixture not added | `encode_user_message` image branch + `agent_runtime_live_image_input_grok` |
 | B17 / E8 attachment outbound | No provider-native attachment/media events in Grok `updates.jsonl` samples | Sample sessions under `~/.grok/sessions` |
 | B9 usage mid-stream | Prompt result may carry usage → `TurnCompleted.usage`; partial `UsageDelta` not observed | `SessionPrompt` result handling; basic/error fixtures omit usage |

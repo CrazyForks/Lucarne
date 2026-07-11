@@ -20,6 +20,9 @@ pub(super) struct FileSnapshot {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ProviderWatchState {
     pub(crate) last_prompt_timestamp: Option<SmolStr>,
+    /// Last assistant body seen without a following turn_completed (Grok).
+    /// Consumed when a TurnCompleted arrives so channel gets one final notify.
+    pub(crate) pending_assistant_text: Option<SmolStr>,
     #[cfg(feature = "codex")]
     event_fingerprints: VecDeque<u64>,
 }
@@ -28,6 +31,7 @@ impl ProviderWatchState {
     pub(crate) fn with_last_prompt_timestamp(last_prompt_timestamp: Option<SmolStr>) -> Self {
         Self {
             last_prompt_timestamp,
+            pending_assistant_text: None,
             #[cfg(feature = "codex")]
             event_fingerprints: VecDeque::new(),
         }

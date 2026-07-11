@@ -2147,3 +2147,187 @@ async fn initial_codex_jsonl_preserves_trailing_partial_for_next_delta() {
         Some("initial partial done")
     );
 }
+
+#[cfg(feature = "grok")]
+fn grok_session_paths(base: &Path) -> (PathBuf, PathBuf) {
+    // Grok layout: <GROK_HOME>/sessions/<encoded-cwd>/<uuid>/updates.jsonl
+    let root = base.join("sessions");
+    let session_dir = root.join("%2Ftmp%2Fproject").join("019f0000-0000-7000-8000-000000000001");
+    let updates = session_dir.join("updates.jsonl");
+    (root, updates)
+}
+
+#[cfg(feature = "grok")]
+fn write_initial_grok_session(updates: &Path) {
+    fs::create_dir_all(updates.parent().unwrap()).unwrap();
+    fs::write(
+        updates.parent().unwrap().join("summary.json"),
+        r#"{"sessionId":"019f0000-0000-7000-8000-000000000001","cwd":"/tmp/project","title":"watch-test"}"#,
+    )
+    .unwrap();
+    fs::write(
+        updates,
+        concat!(
+            r#"{"timestamp":1000,"method":"session/update","params":{"sessionId":"019f0000-0000-7000-8000-000000000001","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"ping"}}}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+}
+
+/// Regression: Grok often writes the full final answer as one agent_message_chunk
+/// line larger than MAX_WATCH_READ_BYTES (2KiB), immediately followed by
+/// turn_completed. Early-stop lookback used to drop the oversized line and leave
+/// only turn_completed (no last_agent_message) — channels never saw the reply.
+#[cfg(feature = "grok")]
+#[tokio::test]
+async fn grok_oversized_agent_message_line_reaches_watch_events() {
+    let temp = tempfile::tempdir().unwrap();
+    let (root, updates) = grok_session_paths(temp.path());
+    write_initial_grok_session(&updates);
+    let canonical = fs::canonicalize(&updates).unwrap();
+
+    let (mut watcher, tx) = test_watcher_for(
+        watch_provider("grok"),
+        &root,
+        crate::ParseSelection::empty().with_messages(),
+        Duration::from_millis(10),
+    );
+    // Baseline existing file without emit.
+    let _ = recv_timeout(&mut watcher, Duration::from_millis(30)).await;
+
+    let body = format!(
+        "## root cause write-up\n\n{}{}",
+        "x".repeat((MAX_WATCH_READ_BYTES as usize) + 64),
+        "\n\nend of answer."
+    );
+    let message_line = serde_json::json!({
+        "timestamp": 2000,
+        "method": "session/update",
+        "params": {
+            "sessionId": "019f0000-0000-7000-8000-000000000001",
+            "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": body },
+            }
+        }
+    })
+    .to_string();
+    assert!(
+        message_line.len() > MAX_WATCH_READ_BYTES as usize,
+        "fixture line must exceed the watch read chunk size"
+    );
+    let done_line = serde_json::json!({
+        "timestamp": 2001,
+        "method": "session/update",
+        "params": {
+            "sessionId": "019f0000-0000-7000-8000-000000000001",
+            "update": {
+                "sessionUpdate": "turn_completed",
+                "stop_reason": "end_turn",
+            }
+        }
+    })
+    .to_string();
+
+    {
+        let mut file = OpenOptions::new().append(true).open(&updates).unwrap();
+        writeln!(file, "{message_line}").unwrap();
+        writeln!(file, "{done_line}").unwrap();
+        file.sync_all().unwrap();
+    }
+    tx.send(RawWatchEvent::Paths(vec![canonical])).unwrap();
+
+    use futures::StreamExt;
+    let text = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let updates = watcher
+                .next()
+                .await
+                .expect("watch stream")
+                .expect("watch update");
+            if let Some(text) = updates.iter().find_map(|update| {
+                update.events.iter().find_map(|event| match event {
+                    // Channel-facing path is TurnCompleted.last_agent_message
+                    // (mid-turn assistant rows are marked partial and dropped).
+                    WatchEvent::TurnCompleted(completed) => completed.last_agent_message.clone(),
+                    WatchEvent::AssistantMessage(message)
+                        if message.phase.is_none() =>
+                    {
+                        message.text.clone()
+                    }
+                    _ => None,
+                })
+            }) {
+                break text;
+            }
+        }
+    })
+    .await
+    .expect("oversized Grok agent_message_chunk must produce a channel-facing body");
+
+    assert!(
+        text.contains("root cause write-up") && text.contains("end of answer"),
+        "lost or truncated body: {text}"
+    );
+    assert!(
+        text.len() > MAX_WATCH_READ_BYTES as usize,
+        "expected full oversized body, got len {}",
+        text.len()
+    );
+}
+
+/// Mid-turn status rows must not each become channel notifications.
+#[cfg(feature = "grok")]
+#[test]
+fn grok_normalize_keeps_only_turn_completed_body_not_mid_turn_status() {
+    use crate::watch::provider::ProviderWatchEvents;
+    use crate::watch::state::ProviderWatchState;
+    use crate::watch::{WatchAssistantMessage, WatchEventMeta, WatchTurnCompleted};
+
+    let mut state = ProviderWatchState::default();
+    let events = vec![
+        WatchEvent::AssistantMessage(WatchAssistantMessage {
+            meta: WatchEventMeta::default(),
+            model: None,
+            phase: None,
+            text: Some("I'll audit the design.".into()),
+        }),
+        WatchEvent::AssistantMessage(WatchAssistantMessage {
+            meta: WatchEventMeta::default(),
+            model: None,
+            phase: None,
+            text: Some("Writing the verdict.".into()),
+        }),
+        WatchEvent::AssistantMessage(WatchAssistantMessage {
+            meta: WatchEventMeta::default(),
+            model: None,
+            phase: None,
+            text: Some("Not Refuted".into()),
+        }),
+        WatchEvent::TurnCompleted(WatchTurnCompleted {
+            meta: WatchEventMeta::default(),
+            last_agent_message: Some("Not Refuted".into()),
+            duration_ms: None,
+            value_json: Some("end_turn".into()),
+        }),
+    ]
+    .into_boxed_slice();
+
+    let out = <crate::providers::grok::Grok as ProviderWatchEvents>::normalize_watch_events(
+        events, &mut state,
+    );
+    let bodies: Vec<_> = out
+        .iter()
+        .filter_map(|e| match e {
+            WatchEvent::TurnCompleted(c) => c.last_agent_message.as_deref(),
+            WatchEvent::AssistantMessage(m) if m.phase.is_none() => m.text.as_deref(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        bodies,
+        vec!["Not Refuted"],
+        "mid-turn status must not notify; only final body: {bodies:?}"
+    );
+}

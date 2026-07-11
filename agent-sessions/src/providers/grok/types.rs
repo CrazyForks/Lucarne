@@ -46,6 +46,10 @@ pub(crate) enum Entry {
     },
     TurnCompleted {
         stop_reason: Option<SmolStr>,
+        /// Final assistant text from the same parse window (if any).
+        /// Used by watch so channel notify still works when synthesize cannot
+        /// rebuild duration from timestamps.
+        last_agent_message: Option<SmolStr>,
         timestamp: Option<SmolStr>,
     },
 }

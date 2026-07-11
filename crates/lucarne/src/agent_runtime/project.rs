@@ -149,7 +149,10 @@ fn project_tool_call(call: ToolCall) -> (SmolStr, Value) {
 }
 
 fn suppress_public_tool_call(call: &ToolCall) -> bool {
-    matches!(call.name.as_str(), "request_user_input" | "AskUserQuestion")
+    matches!(
+        call.name.as_str(),
+        "request_user_input" | "AskUserQuestion" | "ask_user_question"
+    )
 }
 
 fn project_permission_request(request: crate::event::PermissionRequest) -> Option<PublicEvent> {

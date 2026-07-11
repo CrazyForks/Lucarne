@@ -208,7 +208,7 @@ Telegram workspace 映射为 Forum Topic。一个项目一个 topic；一个 top
 | 推理 / Thinking | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | 工具调用 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | 结构化审批 | ✅ | ✅ | ✅ | — | ✅ | ✅ |
-| AskUserQuestion | ✅ | ✅ | ✅ | — | — | — |
+| AskUserQuestion | ✅ | ✅ | ✅ | — | — | ✅ |
 | 使用量追踪 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | 中断 | ✅ | ✅ | ✅ | — | ✅ | ✅ |
 | Resume | ✅ | ✅ | ✅ | — | ✅ | ✅ |

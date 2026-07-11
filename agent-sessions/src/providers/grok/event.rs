@@ -168,6 +168,7 @@ fn agent_session_from_grok_body(body: &GrokBody) -> Session {
             }
             GrokEntry::TurnCompleted {
                 stop_reason,
+                last_agent_message: _,
                 timestamp,
             } => {
                 if let Some(reason) = stop_reason {
@@ -346,12 +347,13 @@ fn watch_events_from_grok_entries(
             }
             GrokEntry::TurnCompleted {
                 stop_reason,
+                last_agent_message,
                 timestamp,
             } => {
                 events.push(crate::watch::WatchEvent::TurnCompleted(
                     crate::watch::WatchTurnCompleted {
                         meta: watch_meta(timestamp.clone()),
-                        last_agent_message: None,
+                        last_agent_message: last_agent_message.clone(),
                         duration_ms: None,
                         value_json: stop_reason.clone().map(Into::into),
                     },
@@ -501,30 +503,91 @@ impl crate::watch::provider::ProviderWatchEvents for super::Grok {
         events: Box<[crate::watch::WatchEvent]>,
         state: &mut crate::watch::state::ProviderWatchState,
     ) -> Box<[crate::watch::WatchEvent]> {
+        // Grok wire has no assistant "phase". Every mid-turn status chunk would
+        // otherwise look like a terminal reply: synthesize promoted each one and
+        // channels filled with "I'll audit…", "Writing the verdict.", "Not Refuted".
+        // Mark ordinary assistant text as partial so only TurnCompleted (with
+        // last_agent_message) and explicit ask_user notifies are channel-facing.
+        let mut events = events.into_vec();
+        for event in &mut events {
+            match event {
+                crate::watch::WatchEvent::UserMessage(_) => {
+                    state.pending_assistant_text = None;
+                }
+                crate::watch::WatchEvent::AssistantMessage(message) => {
+                    if message.phase.is_none()
+                        && !message
+                            .text
+                            .as_deref()
+                            .is_some_and(super::is_ask_user_notify_text)
+                    {
+                        message.phase = Some("partial".into());
+                        if let Some(text) = message.text.clone() {
+                            state.pending_assistant_text = Some(text);
+                        }
+                    }
+                }
+                crate::watch::WatchEvent::TurnCompleted(completed) => {
+                    if completed.last_agent_message.is_none() {
+                        completed.last_agent_message = state.pending_assistant_text.take();
+                    } else {
+                        state.pending_assistant_text = None;
+                    }
+                }
+                _ => {}
+            }
+        }
+
         let events = crate::watch::provider::synthesize_task_complete_from_terminal_responses(
-            events,
+            events.into_boxed_slice(),
             state,
             |response| response.phase.is_none(),
         );
-        // Grok sessions emit dense tool_call/tool_result streams. History watch
-        // only needs user prompts + terminal assistant (+ synthesized
-        // turn_completed) for channel notifications. Forwarding every tool
-        // event saturates the core broadcast bus and lags Telegram/WeChat.
-        events
-            .into_vec()
-            .into_iter()
-            .filter(|event| {
-                matches!(
-                    event,
-                    crate::watch::WatchEvent::UserMessage(_)
-                        | crate::watch::WatchEvent::AssistantMessage(_)
-                        | crate::watch::WatchEvent::TurnCompleted(_)
-                        | crate::watch::WatchEvent::TurnFailed(_)
-                        | crate::watch::WatchEvent::Attachment(_)
-                        | crate::watch::WatchEvent::State(_)
-                )
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice()
+
+        // History watch: user prompts + turn completions (+ ask_user notify).
+        // Drop partial/final_answer assistant rows — core already skips phase != None,
+        // but filtering here keeps the bus small.
+        let mut out = Vec::new();
+        for event in events.into_vec() {
+            match event {
+                crate::watch::WatchEvent::ToolCall(call)
+                    if super::is_ask_user_tool_name(call.name.as_str()) =>
+                {
+                    if let Some(text) =
+                        super::format_ask_user_question_notify(call.input_json.as_deref())
+                    {
+                        out.push(crate::watch::WatchEvent::AssistantMessage(
+                            crate::watch::WatchAssistantMessage {
+                                meta: call.meta,
+                                model: None,
+                                phase: None,
+                                text: Some(text.into()),
+                            },
+                        ));
+                    }
+                }
+                crate::watch::WatchEvent::AssistantMessage(message)
+                    if message.phase.is_none() =>
+                {
+                    out.push(crate::watch::WatchEvent::AssistantMessage(message));
+                }
+                crate::watch::WatchEvent::TurnCompleted(completed)
+                    if completed.last_agent_message.is_some()
+                        || completed.value_json.is_some() =>
+                {
+                    // Prefer body-bearing completions; empty stop_reason-only rows
+                    // are useless for channels and used to ride along noise.
+                    if completed.last_agent_message.is_some() {
+                        out.push(crate::watch::WatchEvent::TurnCompleted(completed));
+                    }
+                }
+                crate::watch::WatchEvent::UserMessage(_)
+                | crate::watch::WatchEvent::TurnFailed(_)
+                | crate::watch::WatchEvent::Attachment(_)
+                | crate::watch::WatchEvent::State(_) => out.push(event),
+                _ => {}
+            }
+        }
+        out.into_boxed_slice()
     }
 }

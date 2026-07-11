@@ -208,7 +208,7 @@ Telegram workspaces map to Forum Topics. One project gets one topic; one topic c
 | Reasoning / Thinking | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Tool calls | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Structured approval | ✅ | ✅ | ✅ | — | ✅ | ✅ |
-| AskUserQuestion | ✅ | ✅ | ✅ | — | — | — |
+| AskUserQuestion | ✅ | ✅ | ✅ | — | — | ✅ |
 | Usage tracking | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Interrupt | ✅ | ✅ | ✅ | — | ✅ | ✅ |
 | Resume | ✅ | ✅ | ✅ | — | ✅ | ✅ |

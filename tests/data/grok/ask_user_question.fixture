@@ -1,0 +1,14 @@
+# Grok ACP ask_user_question reverse RPC (multi-option clarifying questions)
+EXPECT_IN_CONTAINS "initialize"
+OUT {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}
+EXPECT_IN_CONTAINS "session/new"
+OUT {"jsonrpc":"2.0","id":2,"result":{"sessionId":"sess-ask"}}
+EXPECT_IN_CONTAINS "session/prompt"
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-ask","update":{"sessionUpdate":"tool_call","toolCallId":"call-ask-1","title":"ask_user_question","rawInput":{"questions":[{"question":"Which response style?","options":[{"label":"brief","description":"Short"},{"label":"detailed","description":"Long"}]}]},"_meta":{"x.ai/tool":{"name":"ask_user_question","kind":"ask_user","namespace":"grok_build","read_only":true}}}}}
+OUT {"jsonrpc":"2.0","id":10,"method":"_x.ai/ask_user_question","params":{"sessionId":"sess-ask","toolCallId":"call-ask-1","questions":[{"question":"Which response style?","options":[{"label":"brief","description":"Short"},{"label":"detailed","description":"Long"}],"multiSelect":false}],"mode":"default"}}
+EXPECT_IN_CONTAINS "accepted"
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-ask","update":{"sessionUpdate":"tool_call_update","toolCallId":"call-ask-1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"User has answered your questions: \"Which response style?\"=\"brief\"."}}],"rawOutput":{"type":"AskUserQuestion","UserAnswered":{"message":"User has answered your questions: \"Which response style?\"=\"brief\"."}}}}}
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-ask","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Got it."}}}}
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-ask","update":{"sessionUpdate":"turn_completed","stop_reason":"end_turn"}}}
+OUT {"jsonrpc":"2.0","id":3,"result":{}}
+EXIT 0

@@ -6,7 +6,8 @@ use common::{collect_timelines, fakeagent_bin, fixture_path, kinds, run_scenario
 use lucarne::adapters::grok;
 use lucarne::dialect::Input;
 use lucarne::event::{
-    Decision, Kind, Payload, PermissionRequest, PermissionResponse, ResumeHandle, TimelineType,
+    Decision, Kind, Payload, PermissionAnswer, PermissionRequest, PermissionResponse, ResumeHandle,
+    TimelineType,
 };
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -175,6 +176,65 @@ async fn permission_allow_flow() {
         r.events
             .iter()
             .any(|e| matches!(e.payload, Payload::TurnCompleted(_)))
+    );
+}
+
+/// Grok Build multi-option clarifying questions via `_x.ai/ask_user_question`.
+#[tokio::test]
+async fn ask_user_question_flow() {
+    let mut sc = base_scenario("ask_user_question.fixture");
+    sc.on_permission = Some(Arc::new(|req: &PermissionRequest| {
+        assert_eq!(req.tool, "ask_user_question");
+        assert!(
+            !req.questions.is_empty(),
+            "expected structured questions, got {req:?}"
+        );
+        let mut answers = BTreeMap::new();
+        for q in &req.questions {
+            let key = if !q.question.is_empty() {
+                q.question.clone()
+            } else if !q.id.is_empty() {
+                q.id.clone()
+            } else {
+                continue;
+            };
+            let label = q
+                .options
+                .first()
+                .map(|o| o.label.clone())
+                .unwrap_or_else(|| "brief".into());
+            answers.insert(
+                key,
+                PermissionAnswer {
+                    answers: vec![label],
+                    text: String::new(),
+                },
+            );
+        }
+        PermissionResponse {
+            decision: Decision::Allow,
+            answers,
+        }
+    }));
+    let r = run_scenario(sc).await;
+    assert!(r.closed, "kinds = {:?}", kinds(&r.events));
+    let pr = r
+        .events
+        .iter()
+        .find_map(|e| match &e.payload {
+            Payload::PermissionRequest(p) => Some(p),
+            _ => None,
+        })
+        .expect("PermissionRequest for ask_user_question");
+    assert_eq!(pr.tool, "ask_user_question");
+    assert_eq!(pr.questions[0].question, "Which response style?");
+    assert_eq!(pr.questions[0].options[0].label, "brief");
+    assert!(
+        r.events
+            .iter()
+            .any(|e| matches!(e.payload, Payload::TurnCompleted(_))),
+        "expected TurnCompleted, kinds={:?}",
+        kinds(&r.events)
     );
 }
 
