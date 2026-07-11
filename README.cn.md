@@ -60,7 +60,7 @@ lucarned init
 
 初始化会引导你：
 
-- 选择启用的 Agent：`claude`、`codex`、`copilot`、`gemini`、`pi`
+- 选择启用的 Agent：`claude`、`codex`、`copilot`、`gemini`、`pi`、`grok`（Grok Build）
 - 配置 Telegram Bot Token 和已开启 Topics/Thread mode 的入口 chat（可选）
 - 扫码登录微信（可选）
 - 生成配置文件：`~/.lucarned/lucarned.yaml`
@@ -160,6 +160,7 @@ export LUCARNE_AUTHORIZED_USER_IDS="111111,222222"
 1. Lucarne 把 Agent 进展推送到微信。
 2. 引用通知并回复，Lucarne 自动恢复对应 agent session。
 3. 继续追问，自动接续原上下文。
+4. 若官方限流导致消息积压，发送 `/latest` 或快捷指令 `/l` 可立即冲刷积压通知（不回复帮助菜单）。
 
 微信引用路由支持双策略：优先 `message_id`，失败后用引用文本哈希兜底。
 
@@ -195,25 +196,25 @@ Telegram workspace 映射为 Forum Topic。一个项目一个 topic；一个 top
                │
          agent-sessions             ← Provider parse / discovery / watch
                │
-    ┌──────┬──────┬──────┬──────┐
-  Claude  Codex Gemini Copilot  Pi  ← Agent CLI 进程
+    ┌──────┬──────┬──────┬──────┬──────┐
+  Claude Codex Gemini Copilot  Pi   Grok  ← Agent CLI 进程
 ```
 ---
 
 ## Agent 能力矩阵
 
-| 能力 | Claude | Codex | Gemini | Copilot | Pi |
-|---|---:|---:|---:|---:|---:|
-| 推理 / Thinking | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 工具调用 | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 结构化审批 | ✅ | ✅ | ✅ | — | ✅ |
-| AskUserQuestion | ✅ | ✅ | ✅ | — | — |
-| 使用量追踪 | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 中断 | ✅ | ✅ | ✅ | — | ✅ |
-| Resume | ✅ | ✅ | ✅ | — | ✅ |
-| 子 Agent | ✅ | ✅ | — | — | — |
-| 原生命令 | ✅ | ✅ | ✅ | — | ✅ |
-| Fork（创建分支会话） | ✅ | ✅ | — | — | ✅ |
+| 能力 | Claude | Codex | Gemini | Copilot | Pi | Grok Build |
+|---|---:|---:|---:|---:|---:|---:|
+| 推理 / Thinking | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 工具调用 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 结构化审批 | ✅ | ✅ | ✅ | — | ✅ | ✅ |
+| AskUserQuestion | ✅ | ✅ | ✅ | — | — | — |
+| 使用量追踪 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 中断 | ✅ | ✅ | ✅ | — | ✅ | ✅ |
+| Resume | ✅ | ✅ | ✅ | — | ✅ | ✅ |
+| 子 Agent | ✅ | ✅ | — | — | — | — |
+| 原生命令 | ✅ | ✅ | ✅ | — | ✅ | ✅ |
+| Fork（创建分支会话） | ✅ | ✅ | — | — | ✅ | ✅ |
 
 ---
 

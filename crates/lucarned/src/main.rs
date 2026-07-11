@@ -40,6 +40,7 @@ const DEFAULT_LUCARNED_CONFIG: &str = r#"agents:
   - copilot
   - gemini
   - pi
+  - grok
 
 state:
   db: ~/.lucarned/state.sqlite3

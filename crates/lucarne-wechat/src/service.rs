@@ -3054,7 +3054,8 @@ fn parse_slash_command(text: &str) -> Option<SlashCommand> {
         .to_ascii_lowercase();
     match name.as_str() {
         "help" => Some(SlashCommand::Help),
-        "latest" => Some(SlashCommand::Latest),
+        // `/l` is a short alias for `/latest` (rate-limit flush).
+        "latest" | "l" => Some(SlashCommand::Latest),
         "new" => Some(SlashCommand::New),
         "status" => Some(SlashCommand::Status),
         "kill" => {
@@ -3131,7 +3132,7 @@ fn render_wechat_help() -> &'static str {
 | 命令 | 说明 |\n\
 |---|---|\n\
 | `/help` | 显示帮助 |\n\
-| `/latest` | 清除限流并立即推送积压的 agent 通知（无菜单回复） |\n\
+| `/latest` / `/l` | 清除限流并立即推送积压的 agent 通知（无菜单回复） |\n\
 | `/config` | 查看全局配置 |\n\
 | `/config global bypass on/off` | 开关全局权限绕过 |\n\
 | `/config global notifications on/off` | 开关全局通知 |\n\
@@ -3139,7 +3140,7 @@ fn render_wechat_help() -> &'static str {
 | `/new` | 引用通知后开启该工作区的新会话 |\n\
 | `/kill all / <session_id:pid>` | 终止 agent 进程 |\n\
 \n⚠️\n\
-微信主动通知有频率和会话时效限制（可在配置文件配置）。长时间没收到 agent 消息时，发送 `/latest` 可立即把积压通知推到最新。\n"
+微信主动通知有频率和会话时效限制（可在配置文件配置）。长时间没收到 agent 消息时，发送 `/latest` 或 `/l` 可立即把积压通知推到最新。\n"
 }
 
 #[cfg(test)]
@@ -4072,6 +4073,7 @@ mod tests {
         assert!(replies[0].text.contains("`/status`"));
         assert!(replies[0].text.contains("`/new`"));
         assert!(replies[0].text.contains("`/latest`"));
+        assert!(replies[0].text.contains("`/l`"));
         assert!(replies[0].text.contains("微信主动通知有频率和会话时效限制"));
         assert!(!replies[0].text.contains(WECHAT_REPLY_REQUIRED));
     }
@@ -4106,6 +4108,47 @@ mod tests {
             transport.sends().is_empty(),
             " /latest with empty queue must not push menu: {:?}",
             transport.sends()
+        );
+    }
+
+    #[tokio::test]
+    async fn slash_l_alias_matches_latest_without_menu_reply() {
+        let provider = Arc::new(FakeProvider::default());
+        let core = test_core(provider);
+        let transport = Arc::new(FakeTransport::default());
+        let service = WechatNotificationService::new(
+            Arc::clone(&core),
+            Arc::clone(&transport),
+            WechatServiceOptions::default(),
+        );
+
+        service
+            .handle_incoming(WechatIncoming::new(
+                "latest-alias-1",
+                "user-1",
+                "/l",
+                Option::<String>::None,
+            ))
+            .await
+            .expect("handle /l");
+
+        assert!(
+            transport.replies().is_empty(),
+            "/l must not send menu/help reply: {:?}",
+            transport.replies()
+        );
+        assert!(
+            transport.sends().is_empty(),
+            "/l with empty queue must not push menu: {:?}",
+            transport.sends()
+        );
+        assert_eq!(
+            parse_slash_command("/l"),
+            Some(SlashCommand::Latest)
+        );
+        assert_eq!(
+            parse_slash_command("/L"),
+            Some(SlashCommand::Latest)
         );
     }
 

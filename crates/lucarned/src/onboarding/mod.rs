@@ -261,5 +261,6 @@ mod tests {
         let ids = available_agent_ids();
         assert!(ids.contains(&"codex".to_string()));
         assert!(ids.contains(&"pi".to_string()));
+        assert!(ids.contains(&"grok".to_string()));
     }
 }

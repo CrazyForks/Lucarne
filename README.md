@@ -60,7 +60,7 @@ lucarned init
 
 Initialization guides you through:
 
-- Selecting enabled agents: `claude`, `codex`, `copilot`, `gemini`, `pi`
+- Selecting enabled agents: `claude`, `codex`, `copilot`, `gemini`, `pi`, `grok` (Grok Build)
 - Configuring a Telegram Bot Token and an entry chat with Topics/thread mode enabled (optional)
 - Logging in to WeChat by QR code (optional)
 - Generating the config file: `~/.lucarned/lucarned.yaml`
@@ -160,6 +160,7 @@ See the full command reference at [`docs/commands.md`](docs/commands.md). This R
 1. Lucarne pushes agent progress to WeChat.
 2. Quote a notification and reply; Lucarne automatically restores the matching agent session.
 3. Continue the conversation with the original context attached.
+4. If rate limits delay pushes, send `/latest` or `/l` to flush queued agent notifications (no help menu reply).
 
 WeChat quote routing uses two strategies: it prefers `message_id`, then falls back to a quoted-text hash.
 
@@ -195,25 +196,25 @@ Telegram workspaces map to Forum Topics. One project gets one topic; one topic c
                │
          agent-sessions             ← Provider parse / discovery / watch
                │
-    ┌──────┬──────┬──────┬──────┐
-  Claude  Codex Gemini Copilot  Pi  ← Agent CLI processes
+    ┌──────┬──────┬──────┬──────┬──────┐
+  Claude Codex Gemini Copilot  Pi   Grok  ← Agent CLI processes
 ```
 ---
 
 ## Agent Capability Matrix
 
-| Capability | Claude | Codex | Gemini | Copilot | Pi |
-|---|---:|---:|---:|---:|---:|
-| Reasoning / Thinking | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Tool calls | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Structured approval | ✅ | ✅ | ✅ | — | ✅ |
-| AskUserQuestion | ✅ | ✅ | ✅ | — | — |
-| Usage tracking | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Interrupt | ✅ | ✅ | ✅ | — | ✅ |
-| Resume | ✅ | ✅ | ✅ | — | ✅ |
-| Sub-agents | ✅ | ✅ | — | — | — |
-| Native commands | ✅ | ✅ | ✅ | — | ✅ |
-| Fork (create branched session) | ✅ | ✅ | — | — | ✅ |
+| Capability | Claude | Codex | Gemini | Copilot | Pi | Grok Build |
+|---|---:|---:|---:|---:|---:|---:|
+| Reasoning / Thinking | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Tool calls | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Structured approval | ✅ | ✅ | ✅ | — | ✅ | ✅ |
+| AskUserQuestion | ✅ | ✅ | ✅ | — | — | — |
+| Usage tracking | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Interrupt | ✅ | ✅ | ✅ | — | ✅ | ✅ |
+| Resume | ✅ | ✅ | ✅ | — | ✅ | ✅ |
+| Sub-agents | ✅ | ✅ | — | — | — | — |
+| Native commands | ✅ | ✅ | ✅ | — | ✅ | ✅ |
+| Fork (create branched session) | ✅ | ✅ | — | — | ✅ | ✅ |
 
 ---
 

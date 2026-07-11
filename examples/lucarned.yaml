@@ -5,6 +5,7 @@ agents:
   - copilot
   - gemini
   - pi
+  - grok
 
 state:
   db: ~/.lucarned/state.sqlite3 # SQLite state database path.

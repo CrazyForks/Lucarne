@@ -48,11 +48,14 @@
 | 引用 Lucarne 通知并回复 | 恢复对应 provider session，继续上下文 |
 | 引用 Lucarne 通知并回复 `/new` | 为对应 workspace 新建 Agent 对话，后续回复接续新 session |
 | 直接发普通消息 | 提示先引用通知 |
+| `/latest` / `/l` | 清除限流并立即推送积压的 agent 通知（不回复帮助菜单） |
 | `/status` | 查看全局或单 workspace 状态 |
 | `/new`（未引用） | 提示先引用通知，避免无法确定 workspace |
 | `/kill all` | 终止所有 Agent 进程 |
 | `/kill <session_id:pid>` | 终止指定 Agent 进程 |
-| `/help` | 查看 WeChat 命令帮助 |
+| `/help` | 查看 WeChat 命令帮助（含 `/latest` / `/l`） |
 | `/config` | 查看当前 bypass、notifications 状态 |
 | `/config global notifications on\|off` | 开关全局通知 |
 | `/config global bypass on\|off` | 开关全局权限绕过 |
+
+微信主动通知受频率与会话时效限制。长时间未收到 agent 消息时，发 `/latest` 或快捷 `/l` 可立刻冲刷积压通知。
