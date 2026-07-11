@@ -1317,7 +1317,18 @@ impl Dialect for GrokAcp {
                 ));
             }
             Some(PendingKind::SessionCancel) => {
-                self.turn_active = false;
+                // Surface cancel as TurnFailed so callers can recover with a
+                // subsequent prompt (parity with Codex interrupt_recovery).
+                if self.turn_active {
+                    self.turn_active = false;
+                    self.assistant_buf.clear();
+                    self.thought_buf.clear();
+                    events.push(Event::new(Payload::TurnFailed(TurnFailed {
+                        turn_id: self.current_turn_id(),
+                        error: "cancelled".into(),
+                        code: String::new(),
+                    })));
+                }
             }
             None => {}
         }
@@ -1724,6 +1735,53 @@ mod tests {
         });
         assert!(line.contains("session/load"));
         assert!(line.contains("uuid-resume"));
+    }
+
+    #[test]
+    fn session_cancel_emits_turn_failed_when_turn_active() {
+        let mut d = GrokAcp::new();
+        d.session_id = Some("s".into());
+        d.state = SessionState::Ready;
+        d.session_started = true;
+        let _ = d
+            .encode_user_message(&Input {
+                text: "busy".into(),
+                images: vec![],
+            })
+            .expect("prompt");
+        let _ = d.drain_out_frames();
+        let cancel_frames = d.encode_interrupt().expect("cancel");
+        assert!(!cancel_frames.is_empty());
+        let events = d.translate(br#"{"jsonrpc":"2.0","id":2,"result":{}}"#);
+        assert!(
+            events.iter().any(|e| matches!(
+                &e.payload,
+                Payload::TurnFailed(tf) if tf.error == "cancelled"
+            )),
+            "expected TurnFailed(cancelled), got {events:?}"
+        );
+        assert!(!d.turn_active);
+    }
+
+    #[test]
+    fn start_missing_session_id_closes() {
+        let mut d = GrokAcp::new();
+        let _ = d.init(&SessionParams {
+            cwd: "/tmp".into(),
+            ..Default::default()
+        });
+        let _ = d.translate(
+            br#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}"#,
+        );
+        let _ = d.drain_out_frames();
+        let events = d.translate(br#"{"jsonrpc":"2.0","id":2,"result":{}}"#);
+        assert!(
+            events.iter().any(|e| matches!(
+                &e.payload,
+                Payload::SessionClosed(c) if c.reason.contains("missing sessionId")
+            )),
+            "got {events:?}"
+        );
     }
 
     #[test]

@@ -1,0 +1,15 @@
+# Grok ACP interrupt + recovery: cancel first turn, then accept a second turn.
+EXPECT_IN_CONTAINS "initialize"
+OUT {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}
+EXPECT_IN_CONTAINS "session/new"
+OUT {"jsonrpc":"2.0","id":2,"result":{"sessionId":"sess-int-recover"}}
+EXPECT_IN_CONTAINS "first turn"
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-int-recover","update":{"sessionUpdate":"tool_call","toolCallId":"call-int","title":"sleep","rawInput":{"seconds":30}}}}
+EXPECT_IN_CONTAINS "session/cancel"
+OUT {"jsonrpc":"2.0","id":4,"result":{}}
+OUT {"jsonrpc":"2.0","id":3,"result":{}}
+EXPECT_IN_CONTAINS "second turn"
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-int-recover","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Recovered after cancel."}}}}
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-int-recover","update":{"sessionUpdate":"turn_completed","stop_reason":"end_turn"}}}
+OUT {"jsonrpc":"2.0","id":5,"result":{}}
+EXIT 0

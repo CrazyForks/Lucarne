@@ -1,0 +1,11 @@
+# Grok ACP resume: empty sessionId in session/load result keeps the requested
+# resume UUID (agent often omits sessionId on load success).
+EXPECT_IN_CONTAINS "initialize"
+OUT {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}
+EXPECT_IN_CONTAINS "session/load"
+OUT {"jsonrpc":"2.0","id":2,"result":{}}
+EXPECT_IN_CONTAINS "session/prompt"
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"uuid-resume-empty","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Loaded with requested UUID."}}}}
+OUT {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"uuid-resume-empty","update":{"sessionUpdate":"turn_completed","stop_reason":"end_turn"}}}
+OUT {"jsonrpc":"2.0","id":3,"result":{}}
+EXIT 0

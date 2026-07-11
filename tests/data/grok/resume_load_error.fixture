@@ -1,0 +1,7 @@
+# Grok ACP resume failure: session/load error closes the session (no Codex-style
+# thread/start fallback — ACP load failure is terminal for this provider).
+EXPECT_IN_CONTAINS "initialize"
+OUT {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}
+EXPECT_IN_CONTAINS "session/load"
+OUT {"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"unknown session"}}
+EXIT 0

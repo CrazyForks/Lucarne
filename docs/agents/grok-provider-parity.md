@@ -62,7 +62,7 @@ Technical locks (implementation agents must not re-litigate without ADR):
 | B12 | Permission request + response round-trip | pi permission_intercept; codex approvals | **Done** |
 | B13 | User question / multi-option intervention if Grok emits | codex question_*, claude ask_user | **§H** — N/A |
 | B14 | Interrupt / cancel in-flight turn | pi/codex interrupt | **Done** |
-| B15 | Interrupt recovery (next turn succeeds) | codex interrupt_recovery | **Done** (runtime path); dedicated recovery fixture → **§H** |
+| B15 | Interrupt recovery (next turn succeeds) | codex interrupt_recovery | **Done** — `interrupt_recovery.fixture` + TurnFailed(`cancelled`) then second turn |
 | B16 | Image / multimodal user input if Grok ACP accepts | live image tests peers | **Done** (encode + live recording); ACP image unit fixture optional |
 | B17 | Attachment / media outbound if Grok emits | watch attachment path | **§H** — N/A |
 | B18 | Foreign session noise ignored (wrong sessionId) | codex foreign_thread | **Done** |
@@ -140,11 +140,11 @@ Mirror peer scenario *roles* (names may differ). Each row needs at least one fix
 | F1.02 | tool call + tool result | **Done** | `tool_fs.fixture` + reverse `fs/*` unit |
 | F1.03 | multi-turn | **Done** | `multi_turn.fixture` |
 | F1.04 | resume propagates session ref | **Done** | `resume.fixture` |
-| F1.05 | resume missing / fallback | **§H** | empty `sessionId` → SessionClosed; no Codex-style fallback suite |
+| F1.05 | resume missing / fallback | **Done** | `resume_load_error` (load error → close); `resume_empty_session_id` (keep UUID); no Codex thread/start fallback |
 | F1.06 | permission allow | **Done** | `permission.fixture` |
 | F1.07 | permission deny | **Done** | live reject + permission path; dialect confirm/deny |
 | F1.08 | interrupt | **Done** | `interrupt.fixture` |
-| F1.09 | interrupt recovery | **§H** | interrupt only; second-turn recovery not fixture-covered |
+| F1.09 | interrupt recovery | **Done** | `interrupt_recovery.fixture` |
 | F1.10 | error → TurnFailed | **Done** | `error.fixture` |
 | F1.11 | usage when present | **§H** | code maps prompt-result usage; fixtures omit usage payload |
 | F1.12 | model catalog / set model | **Done** | dialect unit + live command round-trip |
@@ -154,7 +154,7 @@ Mirror peer scenario *roles* (names may differ). Each row needs at least one fix
 | F1.16 | confirm/deny intervention | **Done** | permission allow/deny path |
 | F1.17 | question / multi-option | **§H** | N/A — same as B13 |
 | F1.18 | foreign session ignored | **Done** | dialect unit `foreign_session_update_ignored` |
-| F1.19 | start missing id closes cleanly | **Done** | empty sessionId → SessionClosed path |
+| F1.19 | start missing id closes cleanly | **Done** | `start_missing_id.fixture` |
 | F1.20 | reasoning stream | **Done** | `agent_thought_chunk` mapping |
 
 ### F2 Parse / agent-sessions
@@ -227,9 +227,8 @@ seeded from `summary.json` + bounded lookback, with depth-3 roots under
 | B17 / E8 attachment outbound | No provider-native attachment/media events in Grok `updates.jsonl` samples | Sample sessions under `~/.grok/sessions` |
 | B9 usage mid-stream | Prompt result may carry usage → `TurnCompleted.usage`; partial `UsageDelta` not observed | `SessionPrompt` result handling; basic/error fixtures omit usage |
 | C9 auto-retry mapping | No auto-retry `sessionUpdate` observed | Disk samples |
-| F1.05 resume missing/fallback | Resume uses `session/load`; missing/empty id closes cleanly — Codex thread-resume quirk suite not ported | `session/load` + empty sessionId → SessionClosed |
-| F1.09 interrupt recovery fixture | Interrupt cancels turn; dedicated second-turn recovery fixture not added (runtime supports multi-turn after cancel) | `interrupt.fixture` only |
 | F1.11 usage fixture payload | Code path present; fixtures do not include usage-bearing prompt results | `error`/`basic` fixtures |
+| Codex-style resume→fresh-start fallback | Grok ACP: `session/load` error closes; empty load result keeps requested UUID. No automatic `session/new` after failed load (unlike Codex thread/resume→thread/start) | `resume_load_error.fixture`, `resume_empty_session_id.fixture` |
 | Channel bot live e2e (Telegram/WeChat × Grok) | Notifications use channel-agnostic core events; no provider-specific bot e2e required for fixture bar | Telegram/WeChat consume common timeline |
 
 ---

@@ -193,6 +193,175 @@ async fn interrupt_flow() {
     assert!(r.closed, "kinds = {:?}", kinds(&r.events));
 }
 
+/// Interrupt first turn, then recover with a second successful turn (Codex F1.09 role).
+#[tokio::test]
+async fn interrupt_recovery_second_turn_success_after_cancel() {
+    let interrupted = Arc::new(AtomicBool::new(false));
+    let resent = Arc::new(AtomicBool::new(false));
+    let interrupted_capture = Arc::clone(&interrupted);
+    let resent_capture = Arc::clone(&resent);
+    let mut sc = base_scenario("interrupt_recovery.fixture");
+    sc.first_prompt = "first turn".into();
+    sc.on_event = Some(Arc::new(move |sess, ev| {
+        let interrupted = Arc::clone(&interrupted_capture);
+        let resent = Arc::clone(&resent_capture);
+        Box::pin(async move {
+            match &ev.payload {
+                Payload::Timeline(tl)
+                    if tl.item.ty == TimelineType::ToolCall
+                        && !interrupted.swap(true, Ordering::SeqCst) =>
+                {
+                    sess.interrupt().await.map_err(|err| err.to_string())
+                }
+                Payload::TurnFailed(tf)
+                    if interrupted.load(Ordering::SeqCst)
+                        && !resent.swap(true, Ordering::SeqCst)
+                        && tf.error == "cancelled" =>
+                {
+                    sess.send(Input {
+                        text: "second turn".into(),
+                        images: vec![],
+                    })
+                    .await
+                    .map_err(|err| err.to_string())
+                }
+                _ => Ok(()),
+            }
+        })
+    }));
+    let r = run_scenario(sc).await;
+    assert!(
+        interrupted.load(Ordering::SeqCst) && resent.load(Ordering::SeqCst),
+        "interrupt recovery flow did not fire; kinds={:?}",
+        kinds(&r.events)
+    );
+
+    let failures: Vec<_> = r
+        .events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            Payload::TurnFailed(tf) => Some(tf.error.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failures, vec!["cancelled".to_string()]);
+
+    let msgs = collect_timelines(&r.events, TimelineType::AssistantMessage);
+    assert!(
+        msgs.iter().any(|m| {
+            m.assistant_message
+                .as_ref()
+                .is_some_and(|a| a.text.contains("Recovered after cancel."))
+        }),
+        "missing recovery assistant text: {msgs:?}"
+    );
+    assert!(
+        r.events
+            .iter()
+            .any(|e| matches!(e.payload, Payload::TurnCompleted(_))),
+        "missing recovered TurnCompleted; kinds={:?}",
+        kinds(&r.events)
+    );
+}
+
+/// Empty session/new result closes cleanly (Codex F1.19 role).
+#[tokio::test]
+async fn start_missing_id_closes_session() {
+    let r = run_scenario(base_scenario("start_missing_id.fixture")).await;
+    assert!(r.closed, "kinds = {:?}", kinds(&r.events));
+    let closed = r
+        .events
+        .iter()
+        .find_map(|e| match &e.payload {
+            Payload::SessionClosed(s) => Some(s.clone()),
+            _ => None,
+        })
+        .expect("SessionClosed");
+    assert!(
+        closed.reason.contains("missing sessionId") || closed.reason.contains("session"),
+        "unexpected reason = {:?}",
+        closed.reason
+    );
+    assert!(
+        !r.events
+            .iter()
+            .any(|e| matches!(e.payload, Payload::SessionStarted(_))),
+        "must not SessionStarted without sessionId"
+    );
+}
+
+/// session/load RPC error closes session (Grok has no thread/start-style fallback).
+#[tokio::test]
+async fn resume_load_error_closes_session() {
+    let mut sc = base_scenario("resume_load_error.fixture");
+    let mut data = BTreeMap::new();
+    data.insert(
+        "session_id".into(),
+        serde_json::Value::String("stale-uuid".into()),
+    );
+    sc.resume = Some(ResumeHandle {
+        version: 1,
+        data,
+    });
+    let r = run_scenario(sc).await;
+    assert!(r.closed, "kinds = {:?}", kinds(&r.events));
+    let closed = r
+        .events
+        .iter()
+        .find_map(|e| match &e.payload {
+            Payload::SessionClosed(s) => Some(s.clone()),
+            _ => None,
+        })
+        .expect("SessionClosed");
+    assert!(
+        closed.reason.contains("unknown session"),
+        "unexpected reason = {:?}",
+        closed.reason
+    );
+    assert!(
+        !r.events
+            .iter()
+            .any(|e| matches!(e.payload, Payload::SessionStarted(_))),
+        "load error must not start session"
+    );
+}
+
+/// Empty sessionId on successful session/load keeps the requested resume UUID.
+#[tokio::test]
+async fn resume_empty_session_id_keeps_requested_uuid() {
+    let mut sc = base_scenario("resume_empty_session_id.fixture");
+    let mut data = BTreeMap::new();
+    data.insert(
+        "session_id".into(),
+        serde_json::Value::String("uuid-resume-empty".into()),
+    );
+    sc.resume = Some(ResumeHandle {
+        version: 1,
+        data,
+    });
+    sc.first_prompt = "Resume if possible".into();
+    let r = run_scenario(sc).await;
+    assert!(r.closed, "kinds = {:?}", kinds(&r.events));
+    let started = r
+        .events
+        .iter()
+        .find_map(|e| match &e.payload {
+            Payload::SessionStarted(s) => Some(s.clone()),
+            _ => None,
+        })
+        .expect("SessionStarted");
+    assert_eq!(started.session_id, "uuid-resume-empty");
+    let msgs = collect_timelines(&r.events, TimelineType::AssistantMessage);
+    assert!(
+        msgs.iter().any(|m| {
+            m.assistant_message
+                .as_ref()
+                .is_some_and(|a| a.text.contains("Loaded with requested UUID."))
+        }),
+        "assistant texts: {msgs:?}"
+    );
+}
+
 #[tokio::test]
 async fn error_emits_turn_failed() {
     let r = run_scenario(base_scenario("error.fixture")).await;
