@@ -48,7 +48,7 @@
 | 引用 Lucarne 通知并回复 | 恢复对应 provider session，继续上下文 |
 | 引用 Lucarne 通知并回复 `/new` | 为对应 workspace 新建 Agent 对话，后续回复接续新 session |
 | 直接发普通消息 | 提示先引用通知 |
-| `/latest` / `/l` | 清除限流并立即推送积压的 agent 通知（不回复帮助菜单） |
+| `/latest` / `/l` | 清除限流与积压，只推送各工作区最新一轮 agent 通知（不回复帮助菜单） |
 | `/status` | 查看全局或单 workspace 状态 |
 | `/new`（未引用） | 提示先引用通知，避免无法确定 workspace |
 | `/kill all` | 终止所有 Agent 进程 |
@@ -58,4 +58,4 @@
 | `/config global notifications on\|off` | 开关全局通知 |
 | `/config global bypass on\|off` | 开关全局权限绕过 |
 
-微信主动通知受频率与会话时效限制。长时间未收到 agent 消息时，发 `/latest` 或快捷 `/l` 可立刻冲刷积压通知。
+微信主动通知受频率与会话时效限制。长时间未收到 agent 消息时，发 `/latest` 或快捷 `/l` 可清除积压并只推送各工作区最新一轮通知（不会把历史积压全部刷出）。
