@@ -415,7 +415,10 @@ where
                 }
                 _ = pending_retry.tick() => {
                     self.retry_pending_startup_help(true).await;
-                    self.retry_pending_notifications().await?;
+                    // Rate-limit backlog is stale once the window lifts: drop it
+                    // rather than flooding WeChat. Users can `/l` before discard
+                    // to take the latest per workspace.
+                    self.discard_pending_notifications();
                     self.retry_completed_pending_replies().await?;
                 }
                 message = incoming.next() => {
@@ -1574,47 +1577,56 @@ where
         Ok(())
     }
 
-    async fn retry_pending_notifications(&self) -> Result<(), WechatError> {
+    /// Drop the entire pending-notification backlog without sending.
+    ///
+    /// Used by the periodic tick after the local rate-limit window ends so
+    /// stale backlog does not flood WeChat. While rate-limited, keep the queue
+    /// so `/latest` / `/l` can still flush the latest per workspace.
+    fn discard_pending_notifications(&self) {
         if self.rate_limit_remaining().is_some() {
-            return Ok(());
+            return;
         }
-        for notification in self.take_pending_notifications() {
+        let dropped = self.take_pending_notifications();
+        if !dropped.is_empty() {
+            info!(
+                target: "lucarne_wechat::service",
+                dropped = dropped.len(),
+                "wechat discarded pending notification backlog after rate limit"
+            );
+        }
+    }
+
+    /// Collapse pending notifications to the latest round per workspace and send.
+    ///
+    /// For each workspace: keep the last text entry and any attachments that
+    /// follow it in that workspace's queue; drop everything else. Send failures
+    /// (including re-rate-limit) drop the kept entries — they are not requeued.
+    /// Does not touch pending replies.
+    async fn flush_latest_pending_notifications(&self) -> Result<(), WechatError> {
+        let latest = collapse_pending_notifications_to_latest_per_workspace(
+            self.take_pending_notifications(),
+        );
+        for notification in latest {
             match notification.content {
                 WechatPendingNotificationContent::Text(body) => {
-                    if !self
+                    let _delivered = self
                         .try_send_notification(
                             &notification.workspace_id,
                             &notification.user_id,
                             &body,
-                            notification.provider_session_id.clone(),
-                        )
-                        .await?
-                    {
-                        self.remember_pending_notification(
-                            notification.workspace_id,
-                            notification.user_id,
-                            body,
                             notification.provider_session_id,
-                        );
-                    }
+                        )
+                        .await?;
                 }
                 WechatPendingNotificationContent::Attachment(attachment) => {
-                    if !self
+                    let _delivered = self
                         .try_send_attachment_notification(
                             &notification.workspace_id,
                             &notification.user_id,
                             &attachment,
-                            notification.provider_session_id.clone(),
-                        )
-                        .await?
-                    {
-                        self.remember_pending_attachment_notification(
-                            notification.workspace_id,
-                            notification.user_id,
-                            attachment,
                             notification.provider_session_id,
-                        );
-                    }
+                        )
+                        .await?;
                 }
             }
         }
@@ -1800,11 +1812,11 @@ where
                 self.transport.reply(message, render_wechat_help()).await?;
             }
             SlashCommand::Latest => {
-                // Rate limiter already cleared in handle_incoming. Flush queued
-                // agent traffic so the user sees the latest without waiting for
-                // the periodic retry tick. Do not reply with the help menu.
-                self.retry_pending_notifications().await?;
-                self.retry_completed_pending_replies().await?;
+                // Rate limiter already cleared in handle_incoming. Drop backlog
+                // and send only the latest round per workspace — never flood
+                // WeChat with the full queue. Pending replies are left alone
+                // (periodic tick still delivers completed replies).
+                self.flush_latest_pending_notifications().await?;
             }
             SlashCommand::New => {
                 let Some(scope) = self.slash_scope(message)? else {
@@ -3477,6 +3489,57 @@ fn parse_config_command(text: &str) -> Option<ConfigCommand> {
     }
 }
 
+/// Keep the latest notification round per workspace from a drained queue.
+///
+/// Workspace order follows first appearance in `pending`. For each workspace:
+/// the last text entry, plus attachments that follow that text in the same
+/// workspace subsequence. Workspaces with only attachments keep the last entry.
+fn collapse_pending_notifications_to_latest_per_workspace(
+    pending: Vec<WechatPendingNotification>,
+) -> Vec<WechatPendingNotification> {
+    let mut workspace_order: Vec<WorkspaceId> = Vec::new();
+    let mut by_workspace: HashMap<WorkspaceId, Vec<WechatPendingNotification>> = HashMap::new();
+    for notification in pending {
+        let workspace_id = notification.workspace_id.clone();
+        if !by_workspace.contains_key(&workspace_id) {
+            workspace_order.push(workspace_id.clone());
+        }
+        by_workspace
+            .entry(workspace_id)
+            .or_default()
+            .push(notification);
+    }
+
+    let mut latest = Vec::new();
+    for workspace_id in workspace_order {
+        let Some(entries) = by_workspace.remove(&workspace_id) else {
+            continue;
+        };
+        let last_text_idx = entries.iter().rposition(|entry| {
+            matches!(entry.content, WechatPendingNotificationContent::Text(_))
+        });
+        match last_text_idx {
+            Some(text_idx) => {
+                latest.push(entries[text_idx].clone());
+                for entry in entries.into_iter().skip(text_idx + 1) {
+                    if matches!(
+                        entry.content,
+                        WechatPendingNotificationContent::Attachment(_)
+                    ) {
+                        latest.push(entry);
+                    }
+                }
+            }
+            None => {
+                if let Some(last) = entries.into_iter().last() {
+                    latest.push(last);
+                }
+            }
+        }
+    }
+    latest
+}
+
 fn parse_slash_command(text: &str) -> Option<SlashCommand> {
     let trimmed = text.trim();
     if !trimmed.starts_with('/') {
@@ -3492,7 +3555,7 @@ fn parse_slash_command(text: &str) -> Option<SlashCommand> {
         .to_ascii_lowercase();
     match name.as_str() {
         "help" => Some(SlashCommand::Help),
-        // `/l` is a short alias for `/latest` (rate-limit flush).
+        // `/l` is a short alias for `/latest` (clear backlog; send latest only).
         "latest" | "l" => Some(SlashCommand::Latest),
         "new" => Some(SlashCommand::New),
         "status" => Some(SlashCommand::Status),
@@ -3570,7 +3633,7 @@ fn render_wechat_help() -> &'static str {
 | 命令 | 说明 |\n\
 |---|---|\n\
 | `/help` | 显示帮助 |\n\
-| `/latest` / `/l` | 清除限流并立即推送积压的 agent 通知（无菜单回复） |\n\
+| `/latest` / `/l` | 清除限流与积压，只推送各工作区最新一轮 agent 通知（无菜单回复） |\n\
 | `/config` | 查看全局配置 |\n\
 | `/config global bypass on/off` | 开关全局权限绕过 |\n\
 | `/config global notifications on/off` | 开关全局通知 |\n\
@@ -3578,7 +3641,7 @@ fn render_wechat_help() -> &'static str {
 | `/new` | 引用通知后开启该工作区的新会话 |\n\
 | `/kill all / <session_id:pid>` | 终止 agent 进程 |\n\
 \n⚠️\n\
-微信主动通知有频率和会话时效限制（可在配置文件配置）。长时间没收到 agent 消息时，发送 `/latest` 或 `/l` 可立即把积压通知推到最新。\n"
+微信主动通知有频率和会话时效限制（可在配置文件配置）。长时间没收到 agent 消息时，发送 `/latest` 或 `/l` 可清除积压并只推送各工作区最新一轮通知。\n"
 }
 
 #[cfg(test)]
@@ -4802,7 +4865,7 @@ mod tests {
         assert_eq!(service.pending_notification_count(), 1);
         assert!(transport.sends().is_empty());
 
-        // Simulate active rate limit that would block periodic retry.
+        // Simulate active rate limit that would block periodic discard.
         service.rate_limiter.defer(Duration::from_secs(60));
         assert!(service.rate_limit_remaining().is_some());
 
@@ -4834,6 +4897,350 @@ mod tests {
             " /latest must not reply with menu: {:?}",
             transport.replies()
         );
+    }
+
+    #[tokio::test]
+    async fn slash_latest_sends_only_latest_text_per_workspace_and_drops_older() {
+        let provider = Arc::new(FakeProvider::default());
+        let core = test_core(Arc::clone(&provider));
+        let opened_a = core
+            .open_workspace_with_events(OpenWorkspaceRequest {
+                provider_id: "codex",
+                project_path: Some("/tmp/workspace-latest-a".into()),
+                title: "workspace-latest-a".into(),
+            })
+            .await
+            .expect("open workspace a");
+        let opened_b = core
+            .open_workspace_with_events(OpenWorkspaceRequest {
+                provider_id: "codex",
+                project_path: Some("/tmp/workspace-latest-b".into()),
+                title: "workspace-latest-b".into(),
+            })
+            .await
+            .expect("open workspace b");
+        let ws_a = opened_a.workspace.workspace_id.clone();
+        let ws_b = opened_b.workspace.workspace_id.clone();
+        let session_a = core
+            .active_provider_session_id(&ws_a)
+            .expect("session a");
+        let session_b = core
+            .active_provider_session_id(&ws_b)
+            .expect("session b");
+        let transport = Arc::new(FakeTransport::default());
+        let service = WechatNotificationService::new(
+            Arc::clone(&core),
+            Arc::clone(&transport),
+            WechatServiceOptions {
+                initial_user_ids: vec!["user-1".into()],
+                ..WechatServiceOptions::default()
+            },
+        );
+
+        service.remember_pending_notification(
+            ws_a.clone(),
+            "user-1".into(),
+            "old-a".into(),
+            session_a.clone(),
+        );
+        service.remember_pending_notification(
+            ws_a.clone(),
+            "user-1".into(),
+            "new-a".into(),
+            session_a.clone(),
+        );
+        service.remember_pending_notification(
+            ws_b.clone(),
+            "user-1".into(),
+            "only-b".into(),
+            session_b,
+        );
+        service.remember_pending_notification(
+            ws_a,
+            "user-1".into(),
+            "newest-a".into(),
+            session_a,
+        );
+        assert_eq!(service.pending_notification_count(), 4);
+
+        service
+            .handle_incoming(WechatIncoming::new(
+                "latest-collapse-1",
+                "user-1",
+                "/l",
+                Option::<String>::None,
+            ))
+            .await
+            .expect("handle /l collapse");
+
+        assert_eq!(service.pending_notification_count(), 0);
+        let sends = transport.sends();
+        assert_eq!(sends.len(), 2, "one latest per workspace: {sends:?}");
+        assert!(
+            sends.iter().any(|s| s.text == "newest-a"),
+            "workspace-a latest missing: {sends:?}"
+        );
+        assert!(
+            sends.iter().any(|s| s.text == "only-b"),
+            "workspace-b latest missing: {sends:?}"
+        );
+        assert!(
+            sends.iter().all(|s| s.text != "old-a" && s.text != "new-a"),
+            "older backlog must not be sent: {sends:?}"
+        );
+        assert!(transport.replies().is_empty());
+    }
+
+    #[tokio::test]
+    async fn slash_latest_keeps_attachments_after_latest_text_for_workspace() {
+        let provider = Arc::new(FakeProvider::default());
+        let core = test_core(provider);
+        let opened = core
+            .open_workspace_with_events(OpenWorkspaceRequest {
+                provider_id: "codex",
+                project_path: Some("/tmp/workspace-latest-att".into()),
+                title: "workspace-latest-att".into(),
+            })
+            .await
+            .expect("open workspace");
+        let workspace_id = opened.workspace.workspace_id.clone();
+        let session = core
+            .active_provider_session_id(&workspace_id)
+            .expect("session");
+        let transport = Arc::new(FakeTransport::default());
+        let service = WechatNotificationService::new(
+            core,
+            Arc::clone(&transport),
+            WechatServiceOptions {
+                initial_user_ids: vec!["user-1".into()],
+                ..WechatServiceOptions::default()
+            },
+        );
+
+        service.remember_pending_notification(
+            workspace_id.clone(),
+            "user-1".into(),
+            "stale text".into(),
+            session.clone(),
+        );
+        service.remember_pending_attachment_notification(
+            workspace_id.clone(),
+            "user-1".into(),
+            AgentAttachment {
+                id: "old-att".into(),
+                filename: "old.png".into(),
+                media_type: "image/png".into(),
+                data_base64: "AA==".into(),
+                caption: None,
+            },
+            session.clone(),
+        );
+        service.remember_pending_notification(
+            workspace_id.clone(),
+            "user-1".into(),
+            "fresh text".into(),
+            session.clone(),
+        );
+        service.remember_pending_attachment_notification(
+            workspace_id,
+            "user-1".into(),
+            AgentAttachment {
+                id: "fresh-att".into(),
+                filename: "fresh.png".into(),
+                media_type: "image/png".into(),
+                data_base64: "AQ==".into(),
+                caption: Some("cap".into()),
+            },
+            session,
+        );
+
+        service
+            .handle_incoming(WechatIncoming::new(
+                "latest-att-1",
+                "user-1",
+                "/latest",
+                Option::<String>::None,
+            ))
+            .await
+            .expect("handle /latest with attachments");
+
+        assert_eq!(service.pending_notification_count(), 0);
+        let sends = transport.sends();
+        assert_eq!(sends.len(), 1);
+        assert_eq!(sends[0].text, "fresh text");
+        let attachments = transport.attachments();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].id.as_str(), "fresh-att");
+        assert!(
+            !attachments.iter().any(|a| a.id.as_str() == "old-att"),
+            "attachments before latest text must be dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn slash_latest_send_failure_drops_without_requeue() {
+        let provider = Arc::new(FakeProvider::default());
+        let core = test_core(provider);
+        let opened = core
+            .open_workspace_with_events(OpenWorkspaceRequest {
+                provider_id: "codex",
+                project_path: Some("/tmp/workspace-latest-drop".into()),
+                title: "workspace-latest-drop".into(),
+            })
+            .await
+            .expect("open workspace");
+        let workspace_id = opened.workspace.workspace_id.clone();
+        let session = core
+            .active_provider_session_id(&workspace_id)
+            .expect("session");
+        let transport = Arc::new(FakeTransport::default());
+        transport.fail_sends("still rate limited");
+        let service = WechatNotificationService::new(
+            core,
+            Arc::clone(&transport),
+            WechatServiceOptions {
+                initial_user_ids: vec!["user-1".into()],
+                ..WechatServiceOptions::default()
+            },
+        );
+
+        service.remember_pending_notification(
+            workspace_id,
+            "user-1".into(),
+            "will not requeue".into(),
+            session,
+        );
+
+        // Clear rate limiter so flush runs; transport still fails the send.
+        service.rate_limiter.clear();
+        service
+            .flush_latest_pending_notifications()
+            .await
+            .expect("flush should not error on soft send failure");
+
+        assert!(transport.sends().is_empty());
+        assert_eq!(
+            service.pending_notification_count(),
+            0,
+            "/l must drop on failure, not requeue"
+        );
+    }
+
+    #[tokio::test]
+    async fn slash_latest_does_not_retry_completed_pending_replies() {
+        let provider = Arc::new(FakeProvider::default());
+        let core = test_core(provider);
+        let opened = core
+            .open_workspace_with_events(OpenWorkspaceRequest {
+                provider_id: "codex",
+                project_path: Some("/tmp/workspace-latest-no-replies".into()),
+                title: "workspace-latest-no-replies".into(),
+            })
+            .await
+            .expect("open workspace");
+        let workspace_id = opened.workspace.workspace_id.clone();
+        let transport = Arc::new(FakeTransport::default());
+        let service = WechatNotificationService::new(
+            core,
+            Arc::clone(&transport),
+            WechatServiceOptions {
+                initial_user_ids: vec!["user-1".into()],
+                ..WechatServiceOptions::default()
+            },
+        );
+
+        let turn_id = TurnId::new("turn-must-not-flush-via-l");
+        let source = WechatIncoming::new(
+            "user-msg-pending-reply",
+            "user-1",
+            "please continue",
+            Option::<String>::None,
+        );
+        service.remember_pending_reply(turn_id.clone(), workspace_id, source);
+        assert!(service.record_pending_assistant_message(
+            &turn_id,
+            "reply that must not flush via /l"
+        ));
+        service.mark_pending_reply_completed(&turn_id);
+        assert_eq!(service.pending_reply_count(), 1);
+
+        let replies_before = transport.replies().len();
+        service
+            .handle_incoming(WechatIncoming::new(
+                "latest-no-reply-flush",
+                "user-1",
+                "/l",
+                Option::<String>::None,
+            ))
+            .await
+            .expect("handle /l");
+
+        assert_eq!(
+            transport.replies().len(),
+            replies_before,
+            "/l must not deliver pending replies"
+        );
+        assert_eq!(
+            service.pending_reply_count(),
+            1,
+            "completed pending reply stays until periodic retry"
+        );
+    }
+
+    #[test]
+    fn collapse_pending_keeps_last_text_and_following_attachments_per_workspace() {
+        let session = ProviderSessionId::new("codex:s");
+        let ws = WorkspaceId::new("ws-1");
+        let pending = vec![
+            WechatPendingNotification {
+                workspace_id: ws.clone(),
+                user_id: "u".into(),
+                content: WechatPendingNotificationContent::Text("old".into()),
+                provider_session_id: session.clone(),
+            },
+            WechatPendingNotification {
+                workspace_id: ws.clone(),
+                user_id: "u".into(),
+                content: WechatPendingNotificationContent::Attachment(AgentAttachment {
+                    id: "a1".into(),
+                    filename: "a1.png".into(),
+                    media_type: "image/png".into(),
+                    data_base64: "AA==".into(),
+                    caption: None,
+                }),
+                provider_session_id: session.clone(),
+            },
+            WechatPendingNotification {
+                workspace_id: ws.clone(),
+                user_id: "u".into(),
+                content: WechatPendingNotificationContent::Text("new".into()),
+                provider_session_id: session.clone(),
+            },
+            WechatPendingNotification {
+                workspace_id: ws,
+                user_id: "u".into(),
+                content: WechatPendingNotificationContent::Attachment(AgentAttachment {
+                    id: "a2".into(),
+                    filename: "a2.png".into(),
+                    media_type: "image/png".into(),
+                    data_base64: "AQ==".into(),
+                    caption: None,
+                }),
+                provider_session_id: session,
+            },
+        ];
+        let collapsed = collapse_pending_notifications_to_latest_per_workspace(pending);
+        assert_eq!(collapsed.len(), 2);
+        match &collapsed[0].content {
+            WechatPendingNotificationContent::Text(body) => assert_eq!(body.as_str(), "new"),
+            _ => panic!("expected latest text"),
+        }
+        match &collapsed[1].content {
+            WechatPendingNotificationContent::Attachment(att) => {
+                assert_eq!(att.id.as_str(), "a2");
+            }
+            _ => panic!("expected following attachment"),
+        }
     }
 
     #[tokio::test]
@@ -6492,14 +6899,9 @@ cwd: `/Volumes/Data/opensource/conductor/lucarnex`"#;
         assert_eq!(service.pending_notification_count(), 1);
 
         transport.clear_send_failures();
-        service
-            .retry_pending_notifications()
-            .await
-            .expect("retry pending notification");
-
-        let sends = transport.sends();
-        assert_eq!(sends.len(), 1);
-        assert!(sends[0].text.contains("background complete"));
+        // Periodic path discards backlog; `/l` is how the user pulls the latest.
+        service.discard_pending_notifications();
+        assert!(transport.sends().is_empty());
         assert_eq!(service.pending_notification_count(), 0);
     }
 
@@ -6958,7 +7360,7 @@ cwd: `/Volumes/Data/opensource/conductor/lucarnex`"#;
     }
 
     #[tokio::test]
-    async fn rate_limited_notification_waits_before_retrying() {
+    async fn rate_limited_pending_notifications_are_discarded_after_window_not_replayed() {
         let provider = Arc::new(FakeProvider::default());
         let core = test_core(Arc::clone(&provider));
         let opened = core
@@ -7001,15 +7403,15 @@ cwd: `/Volumes/Data/opensource/conductor/lucarnex`"#;
         );
         transport.clear_send_failures();
 
-        service.retry_pending_notifications().await.unwrap();
+        // Still rate-limited: keep the queue, do not send.
+        service.discard_pending_notifications();
         assert!(transport.sends().is_empty());
         assert_eq!(service.pending_notification_count(), 1);
 
         tokio::time::sleep(Duration::from_millis(60)).await;
-        service.retry_pending_notifications().await.unwrap();
-        let sends = transport.sends();
-        assert_eq!(sends.len(), 1);
-        assert_eq!(sends[0].text, "delayed body");
+        // Window lifted: discard without flooding WeChat.
+        service.discard_pending_notifications();
+        assert!(transport.sends().is_empty());
         assert_eq!(service.pending_notification_count(), 0);
     }
 
@@ -7064,11 +7466,13 @@ cwd: `/Volumes/Data/opensource/conductor/lucarnex`"#;
             ))
             .await
             .unwrap();
-        service.retry_pending_notifications().await.unwrap();
-
-        let sends = transport.sends();
-        assert_eq!(sends.len(), 1);
-        assert_eq!(sends[0].text, "delayed body");
+        assert!(
+            service.rate_limit_remaining().is_none(),
+            "any incoming must clear local rate-limit backoff"
+        );
+        // Blank/non-slash incoming does not flush notifications; tick would discard.
+        assert_eq!(service.pending_notification_count(), 1);
+        assert!(transport.sends().is_empty());
     }
 
     #[tokio::test]

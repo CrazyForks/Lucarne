@@ -160,7 +160,7 @@ See the full command reference at [`docs/commands.md`](docs/commands.md). This R
 1. Lucarne pushes agent progress to WeChat.
 2. Quote a notification and reply; Lucarne automatically restores the matching agent session.
 3. Continue the conversation with the original context attached.
-4. If rate limits delay pushes, send `/latest` or `/l` to flush queued agent notifications (no help menu reply).
+4. If rate limits delay pushes, send `/latest` or `/l` to clear the backlog and deliver only the latest notification round per workspace (no help menu reply; does not replay the full queue).
 
 WeChat quote routing uses two strategies: it prefers `message_id`, then falls back to a quoted-text hash.
 
