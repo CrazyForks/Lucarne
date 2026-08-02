@@ -1,7 +1,7 @@
 class Lucarned < Formula
   desc "Local lucarne daemon for channel adapters and agent sessions"
   homepage "https://github.com/tuchg/Lucarne"
-  version "0.5.1"
+  version "0.5.2"
   license "MIT"
 
   depends_on :macos
@@ -9,13 +9,13 @@ class Lucarned < Formula
   stable do
     on_macos do
       on_arm do
-        url "https://github.com/tuchg/Lucarne/releases/download/v0.5.1/lucarned-v0.5.1-aarch64-apple-darwin.tar.xz"
-        sha256 "625c1b6b583af2155bf08949911888289a610fedcfaea775d4184c55e6102fe8"
+        url "https://github.com/tuchg/Lucarne/releases/download/v0.5.2/lucarned-v0.5.2-aarch64-apple-darwin.tar.xz"
+        sha256 "fa34d53baea5811ee9be7d7836036c6a2ea33362fbcc15dd5d33aa7e282067b5"
       end
 
       on_intel do
-        url "https://github.com/tuchg/Lucarne/releases/download/v0.5.1/lucarned-v0.5.1-x86_64-apple-darwin.tar.xz"
-        sha256 "7c7172dc100d80c5724ce542d5b80c0f47d545b8da4256af3cefcf40db2edbdd"
+        url "https://github.com/tuchg/Lucarne/releases/download/v0.5.2/lucarned-v0.5.2-x86_64-apple-darwin.tar.xz"
+        sha256 "9326148ff0fabf3c9626a1b04f07341897c0f938753ad152e5e6e9f0838cf3c8"
       end
     end
   end
